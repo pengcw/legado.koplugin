@@ -82,7 +82,7 @@ local function requestJson(request)
         return parsed_body
     end
 
-    logger.warn("requestJson: cannot get access token:", status_code)
+    loggerlog.warn("requestJson: cannot get access token:", status_code)
     logger.warn("requestJson: error:", response_body)
     error("Connection error, please check the server")
 end
@@ -996,20 +996,18 @@ function M:check_the_background_download_job(chapter_down_tasks)
         downloaded_num = tonumber(err)
     end
 
+    dbg.v('Download progress num:', downloaded_num)
     if downloaded_num == 0 then
 
         return {
-            type = 'INITIALIZING',
+            type = 'PENDING',
             body = {
+                type = 'INITIALIZING',
                 total = total_num,
                 downloaded = downloaded_num
             }
         }
-    end
-
-    dbg.v('Download progress num:', downloaded_num)
-
-    if downloaded_num < total_num then
+    elseif  downloaded_num < total_num then
         return {
             type = 'PENDING',
             body = {
