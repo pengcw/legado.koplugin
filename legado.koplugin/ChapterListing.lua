@@ -255,7 +255,7 @@ function ChapterListing:onMenuHold(item)
                 callback = function(autoturn_spin)
 
                     local status, err = pcall(function()
-                        logger.info('开始缓存autoturn_spin.value', autoturn_spin.value)
+
                         self:ChapterDownManager(tonumber(chapters_index), 'next', autoturn_spin.value)
                     end)
                     if not status and err then
@@ -431,6 +431,8 @@ function ChapterListing:ChapterDownManager(begin_chapter_index, call_event, down
 
     local chapter_down_tasks = err
 
+    dbg.v('chapter_down_tasks:', chapter_down_tasks)
+
     if H.is_tbl(chapter_down_tasks) and chapter_down_tasks[1] ~= nil and chapter_down_tasks[1].book_cache_id ~= nil then
 
         local job = {
@@ -509,11 +511,23 @@ function ChapterListing:openMenu()
         text = Icons.FA_TRASH .. " 清空本书缓存",
         callback = function()
             UIManager:close(dialog)
-            Backend:HandleResponse(Backend:cleanBookCache(self.bookinfo.cache_id), function(data)
-                self:onReturn()
-            end, function(err_msg)
-                MessageBox:error('操作失败:', err_msg)
+
+            MessageBox:loading("清理中...", function()
+                return Backend:cleanBookCache(self.bookinfo.cache_id)
+            end, function(state, response)
+                if state == true then
+                    Backend:HandleResponse(response, function(data)
+                        Backend:show_notice("已清理,刷新重新可添加")
+                        self:onReturn()
+
+                    end, function(err_msg)
+                        MessageBox:error('操作失败:', err_msg)
+                    end)
+
+                end
+
             end)
+
         end
     }}, {{
         text = Icons.FA_SHARE .. " 跳转到指定章节",

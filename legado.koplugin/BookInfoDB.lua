@@ -15,14 +15,6 @@ local M = {
     in_transaction = false
 }
 
-local function convertLegadoToBooks(legado_server, legado_data)
-
-end
-
-local function convertLegadoToChapter(bookinfo, legado_data)
-    return
-end
-
 local function custom_concat(tbl, sep)
     sep = sep or ""
     local result = {}
@@ -1224,7 +1216,7 @@ WHERE
   content = 'downloading_' AND
   cacheFilePath IS NULL;
     ]]
-    return self:exec(sql_stmt)
+    return self:getDB():exec(sql_stmt)
 end
 
 function M:isDownloading(bookCacheId, chapterIndex)
@@ -1293,6 +1285,7 @@ end
 
 function M:dynamicUpdateChapters(chapter, updateData)
     if not H.is_tbl(updateData) or not H.is_tbl(chapter) then
+        dbg.log('dynamicUpdateChapters Required parameter error')
         return
     end
 
@@ -1361,9 +1354,11 @@ function M:dynamicUpdate(tableName, updateData, conditions)
     local param_count = 0
 
     for key, value in pairs(updateData) do
+
         table.insert(set_clause, key .. " = ?")
 
-        if value == "_NULL" then
+        if value == '_NULL' then
+
             value = self.nil_object()
         end
 
@@ -1382,6 +1377,7 @@ function M:dynamicUpdate(tableName, updateData, conditions)
             if value == '_NULL' then
                 table.insert(where_parts, string.format("%s IS NULL", field))
             elseif H.is_tbl(value) and not H.is_str(value._where) then
+
                 table.insert(where_parts, value._where)
             else
                 table.insert(where_parts, string.format("%s = ?", field))

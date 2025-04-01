@@ -5,9 +5,7 @@ local setmetatable_gc = require("ffi/__gc")
 local md5 = require("ffi/sha2").md5
 local Notification = require("ui/widget/notification")
 local dbg = require("dbg")
-local ltn12 = require("ltn12")
-local http = require("socket.http")
-local socketutil = require("socketutil")
+
 local socket_url = require("socket.url")
 
 local util = require("util")
@@ -20,8 +18,6 @@ local H = require("libs/Helper")
 
 local BookInfoDB = require("BookInfoDB")
 
-local SQ3 = require("lua-ljsqlite3/init")
-
 local function wrap_response(data, err_message)
     return data ~= nil and {
         type = 'SUCCESS',
@@ -33,6 +29,10 @@ local function wrap_response(data, err_message)
 end
 
 local function requestJson(request)
+
+    local ltn12 = require("ltn12")
+    local http = require("socket.http")
+    local socketutil = require("socketutil")
 
     local parsed_url = socket_url.parse(request.url)
 
@@ -312,6 +312,10 @@ function M:getProxyImageUrl(bookUrl, picUrls)
 end
 
 local function pDownload_Image(img_src, timeout)
+
+    local ltn12 = require("ltn12")
+    local http = require("socket.http")
+    local socketutil = require("socketutil")
 
     timeout = timeout or 600
 
@@ -802,7 +806,7 @@ end
 
 function M:cleanBookCache(book_cache_id)
     if self:isExtractingInBackground() == true then
-        return wrap_response(nil, '有后台任务进行中,请等待结束')
+        return wrap_response(nil, '有后台任务进行中,请等待结束或者重启koreader')
     end
     local bookShelfId = self:getServerPathCode()
 
@@ -821,7 +825,7 @@ end
 
 function M:cleanAllBookCaches()
     if self:isExtractingInBackground() == true then
-        return wrap_response(nil, '有后台任务进行中,请等待结束')
+        return wrap_response(nil, '有后台任务进行中,请等待结束或者重启koreader')
     end
 
     local bookShelfId = self:getServerPathCode()
