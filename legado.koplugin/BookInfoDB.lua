@@ -1404,13 +1404,13 @@ function M:getDownloadProgress(bookCacheId, target_indexes)
     local function generate_placeholders(arr)
         local validated = {}
         for _, v in ipairs(arr) do
-            assert(type(v) == "number", "The index value must be a number")
             table.insert(validated, tostring(v))
         end
         return table.concat(validated, ",")
     end
 
     local query = string.format(sql_template, generate_placeholders(target_indexes), bookCacheId)
+
     local ret = self:getDB():rowexec(query)
     ret = tonumber(ret)
 
