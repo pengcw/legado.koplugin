@@ -3,15 +3,14 @@ local _ = require("gettext")
 local logger = require("logger")
 local util = require("util")
 
+local MessageBox = require("MessageBox")
 local Backend = require("Backend")
 local ChapterListing = require("ChapterListing")
 local LibraryView = require("LibraryView")
 local BookReader = require("BookReader")
 
-Backend:initialize()
-
 local Legado = WidgetContainer:extend({
-    name = "开源阅读web"
+    name = "开源阅读插件"
 })
 
 function Legado:init()
@@ -44,5 +43,7 @@ function Legado:onReaderReady(doc_settings)
         ChapterListing:onMainReaderReady(self.ui, doc_settings)
     end
 end
+
+Backend:initialize()
 
 return Legado

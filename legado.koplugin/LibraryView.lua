@@ -215,7 +215,7 @@ function LibraryView:openInstalledReadSource()
     end, {
         title = "设置阅读web接口地址",
         input = legado_server,
-        description = "例http://127.0.0.1:1122,服务器版本需加/reader3 \r\n (书架与接口地址关联,换地址原缓存信息会隐藏 \r\n 建议静态IP使用)"
+        description = "例http://127.0.0.1:1122,服务器版本目前仅支持单用户需加/reader3 \r\n (书架与接口地址关联,换地址原缓存信息会隐藏,建议静态IP使用)"
     })
 
 end
@@ -265,11 +265,12 @@ function LibraryView:openMenu()
             UIManager:close(dialog)
 
             local about_txt = [[
-      简介: 一个在 KOReader 中阅读legado开源阅读书库的插件，, 适配阅读3.0 web api, 支持手机app和服务器版本，初衷是kindle的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的在线阅读，提升老设备体验。
+-昨日邻家乞新火，晓窗分与读书灯-
+
+ 简介: 一个在 KOReader 中阅读legado开源阅读书库的插件, 适配阅读3.0 web api, 支持手机app和服务器版本, 初衷是kindle的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的在线阅读，提升老设备体验。
       功能: 前后无缝翻页,离线缓存,自动预下载章节,同步进度,碎片章节历史记录清除,支持漫画，其他没有的功能可在服务端操作。
       操作: 列表支持下拉或Home键刷新、右键列表菜单、Menu键左上角菜单,阅读界面下拉菜单有返回按键。
       章节页面图标说明: %1 可下载 %2 已阅读 %3 服务器阅读进度
-      UI部分取自rakuyomi项目
       帮助改进请到pengcw/legado.koplugin
       版本: ver_%4
               ]]
