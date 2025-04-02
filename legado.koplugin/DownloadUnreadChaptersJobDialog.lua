@@ -53,7 +53,8 @@ function DownloadUnreadChaptersJobDialog:pollAndCreateTextWidget()
         if self.cancellation_requested then
             message = "正在等待下载被取消…"
         elseif state.body.type == 'INITIALIZING' then
-            message = "正在下载章节，这将需要一段时间…"
+            message = string.format("正在下载章节，这将需要一段时间… (%s / %s)", state.body.downloaded,
+                state.body.total)
         else
             message = string.format("正在下载章节，这将需要一段时间… (%s / %s)", state.body.downloaded,
                 state.body.total)

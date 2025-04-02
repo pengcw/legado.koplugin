@@ -28,6 +28,101 @@ local function wrap_response(data, err_message)
     }
 end
 
+local function requestJsonAutoRedirect(request)
+    local ltn12 = require("ltn12")
+    local https = require("ssl.https")
+    local socketutil = require("socketutil")
+
+    local max_redirects = 5
+    local current_redirect = 0
+    local final_url = request.url
+    local response_body, status_code, response_headers
+    local method = request.method or "GET"
+    local original_method = method
+
+    repeat
+
+        local parsed_url = socket_url.parse(final_url)
+
+        if current_redirect == 0 then
+            local query_params = request.query_params or {}
+            local built_query = ""
+            for name, value in pairs(query_params) do
+                if built_query ~= "" then
+                    built_query = built_query .. "&"
+                end
+                built_query = built_query .. name .. "=" .. socket_url.escape(value)
+            end
+            parsed_url.query = built_query ~= "" and built_query or nil
+        end
+
+        local built_url = socket_url.build(parsed_url)
+
+        local headers = {}
+        local serialized_body = nil
+
+        if request.body and method ~= "GET" and method ~= "HEAD" then
+            serialized_body = JSON.encode(request.body)
+            headers["Content-Type"] = "application/json"
+            headers["Content-Length"] = tostring(#serialized_body)
+        end
+
+        socketutil:set_timeout(request.timeout or 15)
+
+        local sink = {}
+        local _, code, headers = https.request({
+            url = built_url,
+            method = method,
+            headers = headers,
+            source = serialized_body and ltn12.source.string(serialized_body) or nil,
+            sink = ltn12.sink.table(sink)
+        })
+        status_code = code
+        response_headers = headers
+        response_body = table.concat(sink)
+
+        socketutil:reset_timeout()
+
+        if status_code >= 300 and status_code < 400 then
+            current_redirect = current_redirect + 1
+            if current_redirect > max_redirects then
+                error("Too many redirects (" .. max_redirects .. ")")
+            end
+
+            local location = response_headers.location
+            if not location then
+                error("Redirect without Location header (status " .. status_code .. ")")
+            end
+
+            final_url = socket_url.absolute(built_url, location)
+
+            -- RFC 7231
+            if status_code == 303 then
+                method = "GET"
+            elseif status_code == 307 or status_code == 308 then
+                method = original_method
+            elseif status_code == 301 or status_code == 302 then
+                -- method = (original_method == "POST") and "GET" or original_method
+                method = original_method
+            end
+
+            if method == "GET" then
+                request.body = nil
+            end
+        end
+    until not (status_code >= 300 and status_code < 400)
+
+    if status_code == 200 then
+        local ok, parsed = pcall(JSON.decode, response_body)
+        if not ok or type(parsed) ~= "table" then
+            error("Invalid JSON response: " .. tostring(response_body))
+        end
+        return parsed
+    else
+        error("Request failed (status " .. status_code .. "): " .. tostring(response_body))
+    end
+end
+
 local function requestJson(request)
 
     local ltn12 = require("ltn12")
@@ -82,7 +177,7 @@ local function requestJson(request)
         return parsed_body
     end
 
-    loggerlog.warn("requestJson: cannot get access token:", status_code)
+    logger.warn("requestJson: cannot get access token:", status_code)
     logger.warn("requestJson: error:", response_body)
     error("Connection error, please check the server")
 end
@@ -90,8 +185,7 @@ end
 local M = {
     settings_data = nil,
     task_pid_file = nil,
-    dbManager = {},
-    ui_refresh_time = 0
+    dbManager = {}
 }
 
 function M:HandleResponse(response, on_success, on_error)
@@ -114,16 +208,26 @@ function M:initialize()
         self.settings_data.data = {
             legado_server = 'http://127.0.0.1:1122',
             chapter_sorting_mode = "chapter_descending",
-            server_address_md5 = 'f528764d624db129b32c21fbca0cb8d6'
+            server_address_md5 = 'f528764d624db129b32c21fbca0cb8d6',
+            setting_url = 'http://127.0.0.1:1122',
+            reader3_un = '',
+            reader3_pwd = '',
+            ui_refresh_time = nil
         }
         self.settings_data:flush()
+    end
+
+    -- 兼容上个版本
+    if H.is_nil(self.settings_data.data.setting_url) and H.is_nil(self.settings_data.data.reader3_un) and
+        H.is_str(self.settings_data.data.legado_server) then
+        self.settings_data.data.setting_url = self.settings_data.data.legado_server
     end
 
     self.dbManager = BookInfoDB:new({
         dbPath = H.getTempDirectory() .. "/bookinfo.db"
     })
 
-    self.ui_refresh_time = os.time()
+    self.settings_data.data.ui_refresh_time = os.time()
 end
 
 function M:show_notice(msg, timeout)
@@ -709,7 +813,7 @@ end
 
 function M:refreshChaptersCache(bookinfo)
 
-    if os.time() - self.ui_refresh_time < 3 then
+    if os.time() - self.settings_data.data.ui_refresh_time < 3 then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(true)
     end
@@ -723,10 +827,21 @@ function M:refreshChaptersCache(bookinfo)
         return wrap_response(nil, "获取目录参数错误")
     end
 
+    local accessToken = nil
+    if self.settings_data.data.reader3_un ~= '' then
+        local status, err = self:_reader3Login()
+        if status ~= true then
+            return wrap_response(nil, err or '接口鉴权出错')
+        else
+            accessToken = err
+        end
+    end
+
     local status, err = pcall(function()
         return requestJson({
             url = table.concat({legado_server, '/getChapterList'}),
             query_params = {
+                accessToken = accessToken,
                 url = bookUrl,
                 v = os.time()
             },
@@ -737,6 +852,12 @@ function M:refreshChaptersCache(bookinfo)
     if not status then
         dbg.log(err)
         return wrap_response(nil, '请求出错,请检查服务')
+    end
+
+    if H.is_tbl(err) and err.isSuccess == true and err.data == "NEED_LOGIN" then
+        self.settings_data.data.accessToken = nil
+        return wrap_response(nil, '请再次操作,刷新token并继续')
+
     end
 
     if not err or not H.is_tbl(err.data) then
@@ -752,14 +873,61 @@ function M:refreshChaptersCache(bookinfo)
         dbg.log('refreshChaptersCache数据写入', tostring(err))
         return wrap_response(nil, '数据写入出错,请重试')
     end
-    self.ui_refresh_time = os.time()
+    self.settings_data.data.ui_refresh_time = os.time()
     return wrap_response(true)
 
 end
 
+function M:_reader3Login()
+
+    if H.is_str(self.settings_data.data.accessToken) then
+        return true, self.settings_data.data.accessToken
+    end
+
+    local legado_server = self.settings_data.data['legado_server']
+    local reader3_un = self.settings_data.data.reader3_un
+    local reader3_pwd = self.settings_data.data.reader3_pwd
+
+    if reader3_pwd == '' or reader3_un == '' or not H.is_str(reader3_un) or not H.is_str(reader3_pwd) then
+        return false, '认证信息设置不全'
+    end
+
+    local auth_info = {
+        username = reader3_un,
+        password = reader3_pwd,
+        code = "",
+        isLogin = true
+    }
+
+    local status, err = pcall(function()
+        return requestJsonAutoRedirect({
+            url = legado_server .. '/login?v=' .. os.time(),
+            body = auth_info,
+            method = 'POST',
+            timeout = 6
+        })
+    end)
+
+    if not status then
+        return false, err or '获取用户信息出错'
+    end
+
+    if not H.is_tbl(err) or not H.is_tbl(err.data) then
+        return false, err.errorMsg or "服务器返回了无效的数据结构"
+    end
+
+    if not H.is_str(err.data.accessToken) then
+        return false, '获取Token失败'
+    end
+
+    self.settings_data.data.accessToken = err.data.accessToken
+
+    return true, err.data.accessToken
+end
+
 function M:refreshLibraryCache()
 
-    if os.time() - self.ui_refresh_time < 3 then
+    if os.time() - self.settings_data.data.ui_refresh_time < 3 then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(true)
     end
@@ -768,10 +936,25 @@ function M:refreshLibraryCache()
 
     local legado_server = self.settings_data.data['legado_server']
 
+    -- logger.info('reader3_un', self.settings_data.data.reader3_un)
+    local accessToken = nil
+    if self.settings_data.data.reader3_un ~= '' then
+        local status, err = self:_reader3Login()
+        if status ~= true then
+            return wrap_response(nil, err or '接口鉴权出错')
+        else
+            accessToken = err
+        end
+    end
+
     local status, err = pcall(function()
         return requestJson({
-            url = legado_server .. '/getBookshelf?v=' .. os.time(),
-            timeout = 6
+            url = legado_server .. '/getBookshelf',
+            timeout = 6,
+            query_params = {
+                accessToken = accessToken,
+                v = os.time()
+            }
         })
     end)
 
@@ -781,6 +964,11 @@ function M:refreshLibraryCache()
     end
 
     local response = err
+
+    if H.is_tbl(response) and response.isSuccess == true and response.data == "NEED_LOGIN" then
+        self.settings_data.data.accessToken = nil
+        return wrap_response(nil, '请再次操作,刷新token并继续')
+    end
 
     if not response or not H.is_tbl(response.data) then
 
@@ -796,7 +984,7 @@ function M:refreshLibraryCache()
         return wrap_response(nil, '写入数据库出错,请重试')
     end
 
-    self.ui_refresh_time = os.time()
+    self.settings_data.data.ui_refresh_time = os.time()
     return wrap_response(true)
 end
 
@@ -1007,7 +1195,7 @@ function M:check_the_background_download_job(chapter_down_tasks)
                 downloaded = downloaded_num
             }
         }
-    elseif  downloaded_num < total_num then
+    elseif downloaded_num < total_num then
         return {
             type = 'PENDING',
             body = {
@@ -1043,19 +1231,29 @@ M.saveBookProgress = function(self, chapter)
     local msTime = time.to_ms(time.now())
     local chapter_index = chapter.chapters_index
 
+    local legado_server = self.settings_data.data['legado_server']
+
+    local accessToken = nil
+    if self.settings_data.data.reader3_un ~= '' then
+        local status, err = self:_reader3Login()
+        if status ~= true then
+            return wrap_response(nil, err or '接口鉴权出错')
+        else
+            accessToken = err
+        end
+    end
+
     local mark_chapter = {
         name = chapter.name,
         author = chapter.author,
         durChapterPos = 0,
-
+        accessToken = accessToken,
         durChapterIndex = chapter_index,
         durChapterTime = msTime,
         durChapterTitle = chapter.title or '',
         index = chapter_index,
         url = chapter.bookUrl
     }
-
-    local legado_server = self.settings_data.data['legado_server']
 
     local task_pid, err = ffiUtil.runInSubProcess(function()
         local status, err = pcall(function()
@@ -1135,7 +1333,7 @@ function M:after_reader_chapter_show(chapter)
     end
 end
 
-function M:pDownloadChapter(chapter, message_dialog)
+function M:pDownloadChapter(chapter, message_dialog, is_recursive)
 
     local bookUrl = chapter.bookUrl
     local book_cache_id = chapter.book_cache_id
@@ -1162,15 +1360,26 @@ function M:pDownloadChapter(chapter, message_dialog)
 
     local legado_server = self.settings_data.data['legado_server']
 
+    local accessToken = nil
+    if H.is_str(self.settings_data.data.reader3_un) and self.settings_data.data.reader3_un ~= '' then
+        local status, err = self:_reader3Login()
+        if status ~= true then
+            error(err or '接口鉴权出错')
+        else
+            accessToken = err
+        end
+    end
+
     local status, err = pcall(function()
         return requestJson({
             url = table.concat({legado_server, '/getBookContent'}),
             query_params = {
+                accessToken = accessToken,
                 url = bookUrl,
                 index = down_chapter_index,
                 v = os.time()
             },
-            timeout = 10
+            timeout = 12
         })
     end)
 
@@ -1179,6 +1388,11 @@ function M:pDownloadChapter(chapter, message_dialog)
     end
 
     local response = err
+    
+    if is_recursive ~= true and H.is_tbl(response) and response.isSuccess == true and response.data == "NEED_LOGIN" then
+        self.settings_data.data.accessToken = nil
+        self:pDownloadChapter(chapter, message_dialog, true)
+    end
 
     if response and response.data then
         local content = response.data
@@ -1276,7 +1490,7 @@ function M:getServerPathCode()
     if self.settings_data.data['server_address_md5'] == nil then
         local server_address_md5 = socket_url.parse(self.settings_data.data['legado_server']).host
         self.settings_data.data['server_address_md5'] = md5(server_address_md5)
-        self.settings_data:flush()
+        self.saveSettings()
     end
     return tostring(self.settings_data.data['server_address_md5'])
 end
@@ -1285,15 +1499,29 @@ function M:getSettings()
     return self.settings_data.data
 end
 
-function M:setSettings(settings)
+function M:saveSettings(settings)
+    self.settings_data.data.accessToken = nil
+    self.settings_data.data.ui_refresh_time = nil
+    if H.is_nil(settings) and H.is_str(self.settings_data.data.legado_server) then
+        self.settings_data:flush()
+        return wrap_response(true)
+    else
+        if not H.is_str(settings.legado_server) or not H.is_str(settings.chapter_sorting_mode) then
+            return wrap_response(nil, '参数校检错误，保存失败')
+        end
+        self.settings_data.data = settings
+        self.settings_data:flush()
+        return wrap_response(true)
+    end
+end
 
-    local new_legado_server = settings.legado_server
+function M:setEndpointUrl(new_setting_url)
 
-    if not H.is_str(new_legado_server) or new_legado_server == '' then
+    if not H.is_str(new_setting_url) or new_setting_url == '' then
         return wrap_response(nil, '参数校检错误，保存失败')
     end
 
-    local parsed = socket_url.parse(new_legado_server)
+    local parsed = socket_url.parse(new_setting_url)
     if not parsed then
         return wrap_response(nil, '地址不合规则，请检查')
     end
@@ -1313,16 +1541,36 @@ function M:setSettings(settings)
         end
     end
 
-    settings.legado_server = new_legado_server
-    if not H.is_str(settings.chapter_sorting_mode) then
-        return wrap_response(nil, '参数校检错误，保存失败')
+    -- logger.info("userinfo", parsed.userinfo)
+
+    local settings = self.settings_data.data
+
+    local username = ''
+    local password = ''
+    if parsed.userinfo then
+
+        local decoded_userinfo = socket_url.unescape(parsed.userinfo)
+        username, password = decoded_userinfo:match("^([^:]+):?(.*)$")
+        password = (password ~= "") and password or nil
+        if not H.is_str(username) or not H.is_str(password) then
+            return wrap_response(nil, "username,passwor格式有误")
+        end
     end
 
-    settings.server_address_md5 = md5(parsed.host)
-    self.settings_data.data = settings
-    self.settings_data:flush()
+    local clean_url = string.format("%s://%s%s%s%s%s%s", parsed.scheme, parsed.host,
+        parsed.port and (":" .. parsed.port) or "", parsed.path or "", parsed.query and ("?" .. parsed.query) or "",
+        parsed.params and (";" .. parsed.params) or "", parsed.fragment and ("#" .. parsed.fragment) or "")
 
-    return wrap_response(settings)
+    dbg.log("clean_url", clean_url)
+
+    self.settings_data.data.reader3_un = username
+    self.settings_data.data.reader3_pwd = password
+    self.settings_data.data.legado_server = clean_url
+    self.settings_data.data.setting_url = new_setting_url
+    self.settings_data.data.server_address_md5 = md5(parsed.host)
+    self:saveSettings()
+
+    return wrap_response(self.settings_data.data)
 end
 
 function M:searchBookSource(search_text, lastIndex)
