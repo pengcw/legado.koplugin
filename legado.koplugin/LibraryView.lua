@@ -44,8 +44,12 @@ function LibraryView:init()
         self.key_events.FocusRight = {{"Right"}}
     end
 
-    self:updateItems()
-
+    -- 防御性编码,koreader太容易崩了
+    local status, err = pcall(self.updateItems, self)
+    if not status then
+        MessageBox.error('初始化失败')
+        logger.err('leado plugin err:', err)
+    end
 end
 
 function LibraryView:onFocusRight()
@@ -119,7 +123,7 @@ function LibraryView:generateItemTableFromMangas(books)
     for _, bookinfo in ipairs(books) do
 
         local show_book_title =
-            ("%s (%s)"):format(bookinfo.name or "未命名漫画", bookinfo.author or "未知作者")
+            ("%s (%s)"):format(bookinfo.name or "未命名书籍", bookinfo.author or "未知作者")
 
         table.insert(item_table, {
             cache_id = bookinfo.cache_id,
@@ -141,7 +145,6 @@ end
 
 function LibraryView:fetchAndShow()
     UIManager:show(LibraryView:new{
-
         covers_fullscreen = true,
         title = "书架"
     })
@@ -184,6 +187,7 @@ function LibraryView:onContextMenuChoice(item)
         bookinfo.totalChapterNum or '', bookinfo.wordCount or '', bookinfo.intro or '')
 
     MessageBox:confirm(msginfo, nil, {
+        icon = "notice-info",
         no_ok_button = true,
         other_buttons_first = true,
         other_buttons = {{{
@@ -200,22 +204,27 @@ end
 function LibraryView:openInstalledReadSource()
 
     local setting_data = Backend:getSettings()
-    local legado_server = tostring(setting_data.legado_server)
 
     MessageBox:input(nil, function(input_text)
         if input_text then
-            local new_setting_data = setting_data
-            new_setting_data.legado_server = input_text
-            Backend:HandleResponse(Backend:setSettings(new_setting_data), function(data)
-                Backend:show_notice('设置成功')
+            local new_setting_url = util.trim(input_text)
+            Backend:HandleResponse(Backend:setEndpointUrl(new_setting_url), function(data)
+                Backend:show_notice('设置成功,下拉刷新')
             end, function(err_msg)
                 MessageBox:error('设置失败:', err_msg)
             end)
         end
     end, {
-        title = "设置阅读web接口地址",
-        input = legado_server,
-        description = "例http://127.0.0.1:1122,服务器版本目前仅支持单用户需加/reader3 \r\n (书架与接口地址关联,换地址原缓存信息会隐藏,建议静态IP使用)"
+        title = "设置阅读api接口地址",
+        input = tostring(setting_data.setting_url),
+        description = [[
+(书架与接口地址关联,换地址原缓存信息会隐藏,建议静态IP或域名使用)
+格式符合RFC3986,服务器版本需加/reader3
+例:手机app http://127.0.0.1:1122
+服务器版 http://127.0.0.1:1122/reader3
+服务器版有账号 
+https://username:password@127.0.0.1:1122/reader3
+]]
     })
 
 end
@@ -267,12 +276,12 @@ function LibraryView:openMenu()
             local about_txt = [[
 -昨日邻家乞新火，晓窗分与读书灯-
 
- 简介: 一个在 KOReader 中阅读legado开源阅读书库的插件, 适配阅读3.0 web api, 支持手机app和服务器版本, 初衷是kindle的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的在线阅读，提升老设备体验。
-      功能: 前后无缝翻页,离线缓存,自动预下载章节,同步进度,碎片章节历史记录清除,支持漫画，其他没有的功能可在服务端操作。
-      操作: 列表支持下拉或Home键刷新、右键列表菜单、Menu键左上角菜单,阅读界面下拉菜单有返回按键。
-      章节页面图标说明: %1 可下载 %2 已阅读 %3 服务器阅读进度
-      帮助改进请到pengcw/legado.koplugin
-      版本: ver_%4
+    简介: 一个在 KOReader 中阅读legado开源阅读书库的插件, 适配阅读3.0 web api, 支持手机app和服务器版本, 初衷是kindle的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的在线阅读，提升老设备体验。
+    功能: 前后无缝翻页,离线缓存,自动预下载章节,同步进度,碎片章节历史记录清除,支持漫画，其他没有的功能可在服务端操作。
+    操作: 列表支持下拉或Home键刷新、右键列表菜单、Menu键左上角菜单,阅读界面下拉菜单有返回按键。
+ 章节页面图标说明: %1 可下载 %2 已阅读 %3 服务器阅读进度
+ 帮助改进请到pengcw/legado.koplugin反馈
+ 版本: ver_%4
               ]]
 
             local version = ''

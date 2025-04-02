@@ -107,29 +107,14 @@ function ChapterListing:generateItemTableFromChapters(chapters)
     local item_table = {}
 
     for _, chapter in ipairs(chapters) do
-        local text = ""
-        if chapter.volume_num ~= nil then
-
-            text = text .. "Volume " .. chapter.volume_num .. ", "
-        end
-
-        if chapter.index ~= nil then
-            text = text .. chapter.index .. " - "
-        end
-
-        text = text .. chapter.title
-
-        if chapter.scanlator ~= nil then
-            text = text .. " (" .. chapter.scanlator .. ")"
-        end
-
+       
         local mandatory = (chapter.index == self.bookinfo.durChapterIndex and Icons.FA_THUMB_TACK or '') ..
                               (chapter.isRead and Icons.FA_CHECK_CIRCLE or "") ..
                               (chapter.isDownLoaded ~= true and Icons.FA_DOWNLOAD or "")
 
         table.insert(item_table, {
             chapters_index = chapter.chapters_index,
-            text = text,
+            text = chapter.title or  tostring(chapter.chapters_index),
             mandatory = mandatory
         })
 
@@ -490,7 +475,7 @@ function ChapterListing:openMenu()
             else
                 settings.chapter_sorting_mode = 'chapter_ascending'
             end
-            Backend:HandleResponse(Backend:setSettings(settings), function(data)
+            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
                 self:updateItems()
             end, function(err_msg)
                 MessageBox:error('设置失败:', err_msg)

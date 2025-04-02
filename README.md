@@ -25,7 +25,10 @@
 
 ## 安装步骤
 1. 下载插件压缩包或克隆本仓库
-2. 将解压后的插件文件夹（`legado.koplugin`）复制到 KOReader 的插件目录 koreader/plugins/
+2. 将解压后的插件文件夹（`legado.koplugin`）复制到 KOReader 的插件目录 koreader/plugins/ 
+- [漫画阅读优化设置](https://github.com/hanatsumi/rakuyomi/blob/main/docs/reader-recommended-settings/index.md)
+- [Koreader官方指南](https://koreader.rocks/user_guide/#L1-manga)
+- [文本阅读调整](https://koreader.rocks/user_guide/#L2-styletweaks)
 
 ## 设备支持  
 **已验证机型**：  
@@ -33,7 +36,7 @@
 ・Kobo → Libra 2  
 ・其他KOReader设备 → 理论兼容  
 
-💡 提示：遇到问题请反馈 | reader服务器目前只支持单用户版! | 漫画缓存注意及时清理  
+💡 提示：遇到问题请反馈 | reader服务器版已支持多用户! | 漫画缓存注意及时清理  
 
 -----
 
@@ -47,7 +50,7 @@
 
 #### 数据服务
 - 📱 兼容 [阅读APP](https://github.com/gedoor/legado) 接口
-- ☁️ 支持 [reader-server](https://github.com/hectorqin/reader) 服务端(单用户版)
+- ☁️ 支持 [reader-server](https://github.com/hectorqin/reader) 服务端
 
 ---
 
