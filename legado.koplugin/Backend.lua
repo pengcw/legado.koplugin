@@ -28,9 +28,69 @@ local function wrap_response(data, err_message)
     }
 end
 
+local function requestJson(request)
+
+    local ltn12 = require("ltn12")
+    local http = require("socket.http")
+    local socketutil = require("socketutil")
+
+    local parsed_url = socket_url.parse(request.url)
+
+    local query_params = request.query_params or {}
+    local built_query_params = ""
+    for name, value in pairs(query_params) do
+        if built_query_params ~= "" then
+            built_query_params = built_query_params .. "&"
+        end
+        built_query_params = built_query_params .. name .. "=" .. socket_url.escape(value)
+    end
+
+    parsed_url.query = built_query_params ~= "" and built_query_params or nil
+    local built_url = socket_url.build(parsed_url)
+
+    local headers = request.headers or {}
+    local serialized_body = nil
+    if request.body ~= nil then
+        serialized_body = JSON.encode(request.body)
+        headers["Content-Type"] = "application/json"
+        headers["Content-Length"] = serialized_body:len()
+    end
+
+    local timeout = request.timeout or 15
+    socketutil:set_timeout(timeout, timeout)
+
+    local sink = {}
+    local _, status_code, response_headers = http.request({
+        url = built_url,
+        method = request.method or "GET",
+        headers = headers,
+        source = serialized_body ~= nil and ltn12.source.string(serialized_body) or nil,
+        sink = ltn12.sink.table(sink),
+        create = socketutil.tcp
+    })
+
+    socketutil:reset_timeout()
+
+    local response_body = table.concat(sink)
+
+    if status_code == 200 and response_body ~= "" then
+        local _, parsed_body = pcall(JSON.decode, response_body)
+        if type(parsed_body) ~= 'table' then
+            error("Expected to be able to decode the response body as JSON: " .. response_body .. "(status code: " ..
+                      status_code .. ")")
+        end
+        return parsed_body
+    end
+
+    logger.warn("requestJson: cannot get access token:", status_code)
+    logger.warn("requestJson: error:", response_body)
+    error("Connection error, please check the server")
+end
+
 local function requestJsonAutoRedirect(request)
     local ltn12 = require("ltn12")
     local https = require("ssl.https")
+    local http = require("socket.http")
     local socketutil = require("socketutil")
 
     local max_redirects = 5
@@ -56,9 +116,11 @@ local function requestJsonAutoRedirect(request)
             parsed_url.query = built_query ~= "" and built_query or nil
         end
 
+        local http_client = parsed_url.scheme:lower() == "https" and https or http
+
         local built_url = socket_url.build(parsed_url)
 
-        local headers = {}
+        local headers = request.headers or {}
         local serialized_body = nil
 
         if request.body and method ~= "GET" and method ~= "HEAD" then
@@ -70,7 +132,7 @@ local function requestJsonAutoRedirect(request)
         socketutil:set_timeout(request.timeout or 15)
 
         local sink = {}
-        local _, code, headers = https.request({
+        local _, code, headers = http_client.request({
             url = built_url,
             method = method,
             headers = headers,
@@ -123,69 +185,10 @@ local function requestJsonAutoRedirect(request)
     end
 end
 
-local function requestJson(request)
-
-    local ltn12 = require("ltn12")
-    local http = require("socket.http")
-    local socketutil = require("socketutil")
-
-    local parsed_url = socket_url.parse(request.url)
-
-    local query_params = request.query_params or {}
-    local built_query_params = ""
-    for name, value in pairs(query_params) do
-        if built_query_params ~= "" then
-            built_query_params = built_query_params .. "&"
-        end
-        built_query_params = built_query_params .. name .. "=" .. socket_url.escape(value)
-    end
-
-    parsed_url.query = built_query_params ~= "" and built_query_params or nil
-    local built_url = socket_url.build(parsed_url)
-
-    local headers = {}
-    local serialized_body = nil
-    if request.body ~= nil then
-        serialized_body = JSON.encode(request.body)
-        headers["Content-Type"] = "application/json"
-        headers["Content-Length"] = serialized_body:len()
-    end
-
-    local timeout = request.timeout or 15
-    socketutil:set_timeout(timeout, timeout)
-
-    local sink = {}
-    local _, status_code, response_headers = http.request({
-        url = built_url,
-        method = request.method or "GET",
-        headers = headers,
-        source = serialized_body ~= nil and ltn12.source.string(serialized_body) or nil,
-        sink = ltn12.sink.table(sink),
-        create = socketutil.tcp
-    })
-
-    socketutil:reset_timeout()
-
-    local response_body = table.concat(sink)
-
-    if status_code == 200 and response_body ~= "" then
-        local _, parsed_body = pcall(JSON.decode, response_body)
-        if type(parsed_body) ~= 'table' then
-            error("Expected to be able to decode the response body as JSON: " .. response_body .. "(status code: " ..
-                      status_code .. ")")
-        end
-        return parsed_body
-    end
-
-    logger.warn("requestJson: cannot get access token:", status_code)
-    logger.warn("requestJson: error:", response_body)
-    error("Connection error, please check the server")
-end
-
 local M = {
+    dbManager = {},
     settings_data = nil,
-    task_pid_file = nil,
-    dbManager = {}
+    task_pid_file = nil
 }
 
 function M:HandleResponse(response, on_success, on_error)
@@ -211,8 +214,7 @@ function M:initialize()
             server_address_md5 = 'f528764d624db129b32c21fbca0cb8d6',
             setting_url = 'http://127.0.0.1:1122',
             reader3_un = '',
-            reader3_pwd = '',
-            ui_refresh_time = nil
+            reader3_pwd = ''
         }
         self.settings_data:flush()
     end
@@ -226,18 +228,22 @@ function M:initialize()
     self.dbManager = BookInfoDB:new({
         dbPath = H.getTempDirectory() .. "/bookinfo.db"
     })
-
-    self.settings_data.data.ui_refresh_time = os.time()
 end
 
 function M:show_notice(msg, timeout)
     Notification:notify(msg, Notification.SOURCE_ALWAYS_SHOW)
 end
 
+function M:backgroundCacheConfig()
+    return LuaSettings:open(H.getTempDirectory() .. '/cache.lua')
+end
+function M:resetReader3Token()
+    self:backgroundCacheConfig():delSetting('r3k'):flush()
+end
 function M:getCacheChapterFilePath(chapter)
 
     if not H.is_tbl(chapter) or chapter.book_cache_id == nil or chapter.chapters_index == nil then
-        dbg.log('getCacheChapterFilePath Incorrect input parameters:', chapter)
+        dbg.log('getCacheChapterFilePath parameters err:', chapter)
         return chapter
     end
 
@@ -262,7 +268,7 @@ function M:getCacheChapterFilePath(chapter)
 
     local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index)
 
-    local extensions = {'txt', 'cbz', 'jpg', 'png'}
+    local extensions = {'txt', 'cbz', 'html', 'xhtml', 'jpg', 'png'}
 
     if H.is_str(cacheExt) then
 
@@ -282,7 +288,7 @@ end
 
 function M:findNextChaptersNotDownLoad(current_chapter, count)
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('findNextChaptersNotDownLoad Incorrect input parameters:', current_chapter)
+        dbg.log('findNextChaptersNotDownLoad parameters err:', current_chapter)
         return {}
     end
 
@@ -336,14 +342,18 @@ local function convertToGrayscale(image_data)
 end
 
 local function get_img_src(html)
+    if not H.is_str(html) then
+        return {}
+    end
     local img_sources = {}
-
-    local img_pattern = '<img[^>]*src="([^"]+)"[^>]*>'
-    if type(html) == 'string' and html:match(img_pattern) then
-
-        for src in html:gmatch(img_pattern) do
-            table.insert(img_sources, src)
-
+    -- local img_pattern = '<img[^>]*src%s*=%s*(["\']?)(.-)%1[^>]*>'
+    local img_pattern = "<img[^>]*src%s*=%s*([\"']?)([^%s\"'>]+)%1[^>]*>"
+    local quote, nsrc = html:match(img_pattern)
+    if nsrc then
+        for _, src in html:gmatch(img_pattern) do
+            if src ~= nil and src ~= "" then
+                table.insert(img_sources, src)
+            end
         end
     end
     return img_sources
@@ -387,13 +397,28 @@ local function get_image_format_head8(image_data)
 end
 
 function M:getProxyCoverUrl(coverUrl)
-
-    if H.is_str(coverUrl) then
-        coverUrl = util.urlEncode(coverUrl)
+    if not H.is_str(coverUrl) then
+        return coverUrl
     end
     local legado_server = self.settings_data.data['legado_server']
+    return table.concat({legado_server, '/cover?path=', util.urlEncode(coverUrl)})
+end
 
-    return table.concat({legado_server, '/cover?path=', coverUrl})
+function M:getProxyEpubUrl(bookUrl, htmlUrl)
+    if not H.is_str(htmlUrl) then
+        return htmlUrl
+    end
+    local legado_server = self.settings_data.data['legado_server']
+    if legado_server:match("/reader3$") and htmlUrl:match("%.x?html$") then
+        local api_root_url = legado_server:gsub("/reader3$", "")
+        htmlUrl = htmlUrl:gsub("([^%w%-%.%_%~%/])", function(c)
+            return string.format("%%%02X", string.byte(c))
+        end)
+        return api_root_url .. htmlUrl
+
+    else
+        return htmlUrl
+    end
 end
 
 function M:getProxyImageUrl(bookUrl, picUrls)
@@ -406,12 +431,26 @@ function M:getProxyImageUrl(bookUrl, picUrls)
     local width = Device.screen:getWidth() or 800
     local legado_server = self.settings_data.data['legado_server']
 
-    for i, img_src in ipairs(picUrls) do
-        local new_url =
-            legado_server .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' .. util.urlEncode(img_src) ..
-                '&width=' .. width
-        table.insert(new_porxy_picurls, new_url)
+    if legado_server:match("/reader3$") then
+        local api_root_url = legado_server:gsub("/reader3$", "")
+
+        for i, img_src in ipairs(picUrls) do
+            img_src = img_src:gsub("([^%w%-%.%_%~%/])", function(c)
+                return string.format("%%%02X", string.byte(c))
+            end)
+
+            local new_url = img_src:gsub("^__API_ROOT__", api_root_url)
+
+            table.insert(new_porxy_picurls, new_url)
+        end
+    else
+        for i, img_src in ipairs(picUrls) do
+            local new_url = legado_server .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' ..
+                                util.urlEncode(img_src) .. '&width=' .. width
+            table.insert(new_porxy_picurls, new_url)
+        end
     end
+
     return new_porxy_picurls
 end
 
@@ -463,8 +502,10 @@ end
 
 local function pDownload_CreateCBZ(filePath, img_sources)
 
+    dbg.v('CreateCBZ strat:')
+
     if not filePath or not H.is_tbl(img_sources) then
-        return false, 'Cbz generates input parameters error'
+        error('Cbz generates input parameters error')
     end
 
     local is_convertToGrayscale = false
@@ -472,15 +513,18 @@ local function pDownload_CreateCBZ(filePath, img_sources)
     local cbz_path_tmp = filePath .. '.downloading'
 
     if util.fileExists(cbz_path_tmp) then
-        return false,
-            'There are other threads downloading, this download will be cancelled, please wait for the download to be completed'
+        if M:isExtractingInBackground() == true then
+            error('There are other threads downloading, cancelled')
+        else
+            util.removeFile(cbz_path_tmp)
+        end
     end
 
     local ZipWriter = require("ffi/zipwriter")
 
     local cbz = ZipWriter:new{}
     if not cbz:open(cbz_path_tmp) then
-        return false
+        error('CreateCBZ cbz:open err')
     end
     cbz:add("mimetype", "application/vnd.comicbook+zip", true)
 
@@ -488,6 +532,7 @@ local function pDownload_CreateCBZ(filePath, img_sources)
 
     for i, img_src in ipairs(img_sources) do
 
+        dbg.v('Download_Image start', i, img_src)
         local status, err = pcall(pDownload_Image, img_src)
 
         if status and H.is_tbl(err) and err['data'] then
@@ -508,11 +553,14 @@ local function pDownload_CreateCBZ(filePath, img_sources)
 
             cbz:add(img_name, imgdata, no_compression)
 
+        else
+            dbg.v('Download_Image err', tostring(err))
         end
         ::continue::
     end
 
     cbz:close()
+    dbg.v('CreateCBZ cbz:close')
 
     if util.fileExists(filePath) ~= true then
         os.rename(cbz_path_tmp, filePath)
@@ -520,11 +568,10 @@ local function pDownload_CreateCBZ(filePath, img_sources)
         if util.fileExists(cbz_path_tmp) == true then
             util.removeFile(cbz_path_tmp)
         end
-        return false,
-            'The cbz file has failed to generate, there is already a target file, this download is cancelled, it has been cleaned or please wait for the background download to be completed'
+        error('exist target file, cancelled')
     end
 
-    return true
+    return filePath
 end
 
 function M:DownAllChapter(chapters)
@@ -534,7 +581,7 @@ function M:DownAllChapter(chapters)
 
     local status, err = self:preLoadingChapters(begin_chapter, #chapters)
     if not status then
-        return wrap_response(nil, err or '数据请求错误')
+        return wrap_response(nil, tostring(err))
     else
         return wrap_response(err)
     end
@@ -574,7 +621,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
         UIManager:preventStandby()
     end)
 
-    self.dbManager:closeDB()
+    self:closeDbManager()
 
     local task_pid, err = ffiUtil.runInSubProcess(function()
 
@@ -615,7 +662,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
 
                             if not status then
                                 dbg.log('An error occurred when cleaning the download task to write to the database:',
-                                    tostring(err))
+                                H.errorHandler(err))
                             end
                         end
                     end
@@ -685,7 +732,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
             dbg.v('Chapters that end the load cleanup are not completed:', tostring(err))
         end
 
-        self.dbManager:closeDB()
+        self:closeDbManager()
 
         chapter_down_tasks = nil
         task_return_ok_list = nil
@@ -709,7 +756,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
         return true
 
     end, nil, true)
-
+    --logger.info('pid', task_pid, ffiUtil.isSubProcessDone(task_pid))
     if not task_pid then
         dbg.log("Multithreaded task creation failed:" .. tostring(err))
         pcall(function()
@@ -776,8 +823,7 @@ end
 
 function M:getBookShelfCache()
     local bookShelfId = self:getServerPathCode()
-    local books_data = self.dbManager:getAllBooksByUI(bookShelfId)
-    return books_data
+    return self.dbManager:getAllBooksByUI(bookShelfId)
 end
 
 function M:getBookSelfLastUpdateTime()
@@ -811,11 +857,11 @@ function M:getBookChapterPlusCache(bookCacheId)
     return chapter_data
 end
 
-function M:refreshChaptersCache(bookinfo)
+function M:refreshChaptersCache(bookinfo, last_refresh_time)
 
-    if os.time() - self.settings_data.data.ui_refresh_time < 3 then
+    if last_refresh_time and os.time() - last_refresh_time < 2 then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
-        return wrap_response(true)
+        return wrap_response(nil, '处理中')
     end
 
     local book_cache_id = bookinfo.cache_id
@@ -831,7 +877,7 @@ function M:refreshChaptersCache(bookinfo)
     if self.settings_data.data.reader3_un ~= '' then
         local status, err = self:_reader3Login()
         if status ~= true then
-            return wrap_response(nil, err or '接口鉴权出错')
+            return wrap_response(nil, tostring(err) or '接口鉴权出错')
         else
             accessToken = err
         end
@@ -854,10 +900,9 @@ function M:refreshChaptersCache(bookinfo)
         return wrap_response(nil, '请求出错,请检查服务')
     end
 
-    if H.is_tbl(err) and err.isSuccess == true and err.data == "NEED_LOGIN" then
-        self.settings_data.data.accessToken = nil
-        return wrap_response(nil, '请再次操作,刷新token并继续')
-
+    if H.is_tbl(err) and err.data == "NEED_LOGIN" and err.isSuccess == false then
+        self:resetReader3Token()
+        return wrap_response(nil, 'token过期,请再次操作,刷新并继续')
     end
 
     if not err or not H.is_tbl(err.data) then
@@ -873,17 +918,15 @@ function M:refreshChaptersCache(bookinfo)
         dbg.log('refreshChaptersCache数据写入', tostring(err))
         return wrap_response(nil, '数据写入出错,请重试')
     end
-    self.settings_data.data.ui_refresh_time = os.time()
     return wrap_response(true)
 
 end
 
 function M:_reader3Login()
-
-    if H.is_str(self.settings_data.data.accessToken) then
-        return true, self.settings_data.data.accessToken
+    local cache_config = self:backgroundCacheConfig()
+    if H.is_str(cache_config.data.r3k) then
+        return true, cache_config.data.r3k
     end
-
     local legado_server = self.settings_data.data['legado_server']
     local reader3_un = self.settings_data.data.reader3_un
     local reader3_pwd = self.settings_data.data.reader3_pwd
@@ -920,28 +963,27 @@ function M:_reader3Login()
         return false, '获取Token失败'
     end
 
-    self.settings_data.data.accessToken = err.data.accessToken
+    cache_config:saveSetting("r3k", err.data.accessToken):flush()
 
     return true, err.data.accessToken
 end
 
-function M:refreshLibraryCache()
+function M:refreshLibraryCache(last_refresh_time)
 
-    if os.time() - self.settings_data.data.ui_refresh_time < 3 then
+    if last_refresh_time and os.time() - last_refresh_time < 2 then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
-        return wrap_response(true)
+        return wrap_response(nil, '处理中')
     end
 
     local bookShelfId = self:getServerPathCode()
 
     local legado_server = self.settings_data.data['legado_server']
 
-    -- logger.info('reader3_un', self.settings_data.data.reader3_un)
     local accessToken = nil
     if self.settings_data.data.reader3_un ~= '' then
         local status, err = self:_reader3Login()
         if status ~= true then
-            return wrap_response(nil, err or '接口鉴权出错')
+            return wrap_response(nil, H.errorHandler(err))
         else
             accessToken = err
         end
@@ -952,6 +994,7 @@ function M:refreshLibraryCache()
             url = legado_server .. '/getBookshelf',
             timeout = 6,
             query_params = {
+                refresh = 0,
                 accessToken = accessToken,
                 v = os.time()
             }
@@ -963,13 +1006,11 @@ function M:refreshLibraryCache()
         return wrap_response(nil, '请求出错,请检查服务后重试')
     end
 
-    local response = err
-
-    if H.is_tbl(response) and response.isSuccess == true and response.data == "NEED_LOGIN" then
-        self.settings_data.data.accessToken = nil
-        return wrap_response(nil, '请再次操作,刷新token并继续')
+    if H.is_tbl(err) and err.data == "NEED_LOGIN" and err.isSuccess == false then
+        self:resetReader3Token()
+        return wrap_response(nil, 'token过期,请再次操作,刷新并继续')
     end
-
+    local response = err
     if not response or not H.is_tbl(response.data) then
 
         return wrap_response(nil, response.errorMsg or "服务器返回了无效的数据结构")
@@ -980,11 +1021,10 @@ function M:refreshLibraryCache()
     end)
 
     if not status then
-        dbg.log('refreshLibraryCache数据写入', tostring(err))
-        return wrap_response(nil, '写入数据库出错,请重试')
+        dbg.log('refreshLibraryCache数据写入', H.errorHandler(err))
+        return wrap_response(nil, '写入数据出错,请重试')
     end
 
-    self.settings_data.data.ui_refresh_time = os.time()
     return wrap_response(true)
 end
 
@@ -1018,7 +1058,7 @@ function M:cleanAllBookCaches()
 
     local bookShelfId = self:getServerPathCode()
     self.dbManager:clearBooks(bookShelfId)
-    self.dbManager:closeDB()
+    self:closeDbManager()
     local books_cache = H.getTempDirectory()
     ffiUtil.purgeDir(books_cache)
     H.getTempDirectory()
@@ -1047,7 +1087,7 @@ function M:ChangeChapterCache(chapter)
         if status == true then
             return wrap_response(true)
         else
-            return wrap_response(nil, '下载任务添加失败:' .. tostring(err))
+            return wrap_response(nil, '下载任务添加失败:' .. H.errorHandler(err))
         end
     else
 
@@ -1055,10 +1095,12 @@ function M:ChangeChapterCache(chapter)
             util.removeFile(cacheFilePath)
         end
 
-        self.dbManager:dynamicUpdateChapters(chapter, {
-            content = '_NULL',
-            cacheFilePath = '_NULL'
-        })
+        self.dbManager:transaction(function()
+            self.dbManager:dynamicUpdateChapters(chapter, {
+                content = '_NULL',
+                cacheFilePath = '_NULL'
+            })
+        end)()
 
         return wrap_response(true)
     end
@@ -1226,9 +1268,7 @@ function M:isExtractingInBackground(task_pid)
     end
 end
 
-M.saveBookProgress = function(self, chapter)
-
-    local msTime = time.to_ms(time.now())
+function M:saveBookProgress(chapter)
     local chapter_index = chapter.chapters_index
 
     local legado_server = self.settings_data.data['legado_server']
@@ -1237,17 +1277,17 @@ M.saveBookProgress = function(self, chapter)
     if self.settings_data.data.reader3_un ~= '' then
         local status, err = self:_reader3Login()
         if status ~= true then
-            return wrap_response(nil, err or '接口鉴权出错')
+            return wrap_response(nil, H.errorHandler(err))
         else
             accessToken = err
         end
     end
 
+    local msTime = time.to_ms(time.now())
     local mark_chapter = {
         name = chapter.name,
         author = chapter.author,
         durChapterPos = 0,
-        accessToken = accessToken,
         durChapterIndex = chapter_index,
         durChapterTime = msTime,
         durChapterTitle = chapter.title or '',
@@ -1255,22 +1295,34 @@ M.saveBookProgress = function(self, chapter)
         url = chapter.bookUrl
     }
 
-    local task_pid, err = ffiUtil.runInSubProcess(function()
-        local status, err = pcall(function()
-            return requestJson({
-                url = legado_server .. '/saveBookProgress',
-                body = mark_chapter,
-                method = 'POST',
-                timeout = 3
-            })
-        end)
-        if not status then
-            dbg.log('Reading progress synchronization failed:', tostring(err))
-        end
+    local status, err = pcall(function()
+        return requestJsonAutoRedirect({
+            url = table.concat({legado_server, '/saveBookProgress'}),
+            body = mark_chapter,
+            query_params = {
+                accessToken = accessToken,
+                v = os.time()
+            },
+            method = 'POST',
+            timeout = 3
+        })
+    end)
 
-    end, nil, true)
+    if not status or not H.is_tbl(err) then
+        dbg.log('Reading progress synchronization failed:', tostring(err))
+        return wrap_response(nil, H.errorHandler(err))
+    end
 
-    return wrap_response({})
+    if H.is_tbl(err) and err.data == "NEED_LOGIN" and err.isSuccess == false then
+        self:resetReader3Token()
+        return wrap_response(nil, 'token过期,请再次操作,刷新并继续')
+    end
+
+    if err and err.isSuccess == true then
+        return wrap_response(true)
+    else
+        return wrap_response(nil, err.errorMsg or '出错')
+    end
 
 end
 
@@ -1279,58 +1331,59 @@ function M:after_reader_chapter_show(chapter)
     local chapters_index = chapter.chapters_index
     local cache_file_path = chapter.cacheFilePath
     local book_cache_id = chapter.book_cache_id
+    local update_state = {}
 
     local status, err = pcall(function()
-        if chapter.isRead ~= true or chapter.isDownLoaded ~= true or chapter.cacheFilePath == nil then
-
-            self.dbManager:dynamicUpdateChapters(chapter, {
-                content = 'downloaded',
-                isRead = true,
-                cacheFilePath = cache_file_path
-            })
-
-            chapter.isRead = true
-            chapter.isDownLoaded = true
-            chapter.cacheFilePath = cache_file_path
+        if chapter.isDownLoaded ~= true then
+            update_state.content = 'downloaded'
+            update_state.cacheFilePath = cache_file_path
         end
 
+        if chapter.isRead ~= true then
+            update_state.isRead = true
+        end
+        self.dbManager:transaction(function()
+            self.dbManager:dynamicUpdateChapters(chapter, update_state)
+        end)()
     end)
+
     if not status then
-        dbg.log('An error occurred when updating the read download flag:', tostring(err))
+        dbg.log('updating the read download flag err:', tostring(err))
     end
 
     if cache_file_path ~= nil and chapter.cacheExt == nil then
 
-        local cache_name = select(2, util.splitFilePathName(cache_file_path))
-        local _, extension = util.splitFileNameSuffix(cache_name)
-
-        local bookShelfId = self:getServerPathCode()
-
-        status, err = pcall(function()
-            self.dbManager:dynamicUpdateBooks({
-                book_cache_id = book_cache_id,
-                bookShelfId = bookShelfId
-            }, {
-                cacheExt = extension
-            })
+        local status, err = pcall(function()
+            local cache_name = select(2, util.splitFilePathName(cache_file_path))
+            local _, extension = util.splitFileNameSuffix(cache_name)
+            local bookShelfId = self:getServerPathCode()
+            self.dbManager:transaction(function()
+                return self.dbManager:dynamicUpdateBooks({
+                    book_cache_id = book_cache_id,
+                    bookShelfId = bookShelfId
+                }, {
+                    cacheExt = extension
+                })
+            end)()
         end)
         if not status then
-            dbg.log('An error occurred when updating cache ext:', tostring(err))
+            dbg.log('updating cache ext err:', tostring(err))
         end
     end
 
-    UIManager:unschedule(M.saveBookProgress)
-    UIManager:scheduleIn(5, M.saveBookProgress, self, chapter)
-
-    local preDownloadNum = 2
-    if chapter.cacheExt and chapter.cacheExt == 'txt' then
-        preDownloadNum = 4
+    if chapter.isRead ~= true then
+        local complete_count = self:getcompleteReadAheadChapters(chapter)
+        if complete_count < 40 then
+            local preDownloadNum = 3
+            if chapter.cacheExt and chapter.cacheExt == 'txt' then
+                preDownloadNum = 5
+            end
+            self:preLoadingChapters(chapter, preDownloadNum)
+        end
     end
-    local complete_count = self:getcompleteReadAheadChapters(chapter)
 
-    if complete_count < 40 then
-        self:preLoadingChapters(chapter, preDownloadNum)
-    end
+    chapter.isRead = true
+    chapter.isDownLoaded = true
 end
 
 function M:pDownloadChapter(chapter, message_dialog, is_recursive)
@@ -1350,7 +1403,7 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
     end
 
     if bookUrl == nil or not book_cache_id then
-        error('pDownloadChapter An error occurred in input parameters' .. tostring(bookUrl) .. tostring(book_cache_id))
+        error('pDownloadChapter input parameters err' .. tostring(bookUrl) .. tostring(book_cache_id))
     end
 
     local cache_chapter = self:getCacheChapterFilePath(chapter)
@@ -1388,9 +1441,9 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
     end
 
     local response = err
-    
-    if is_recursive ~= true and H.is_tbl(response) and response.isSuccess == true and response.data == "NEED_LOGIN" then
-        self.settings_data.data.accessToken = nil
+
+    if is_recursive ~= true and H.is_tbl(response) and response.data == "NEED_LOGIN" and response.isSuccess == false then
+        self:resetReader3Token()
         self:pDownloadChapter(chapter, message_dialog, true)
     end
 
@@ -1403,17 +1456,27 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
 
         local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index)
 
-        local is_img_sources = get_img_src(content)
+        local first_line = string.match(content, "(.-)\n") or content
 
-        if type(is_img_sources) == 'table' and #is_img_sources > 0 then
+        if string.find(first_line, "<img") then
+            -- img
+            local is_img_sources = get_img_src(content)
 
-            local img_sources = self:getProxyImageUrl(bookUrl, is_img_sources)
+            if type(is_img_sources) == 'table' and #is_img_sources > 0 then
 
-            filePath = filePath .. '.cbz'
+                local img_sources = self:getProxyImageUrl(bookUrl, is_img_sources)
 
-            if img_sources and #img_sources > 0 then
-                local status, err = pDownload_CreateCBZ(filePath, img_sources)
-                if status == true then
+                filePath = filePath .. '.cbz'
+
+                if img_sources and #img_sources > 0 then
+
+                    local status, err = pcall(function()
+                        pDownload_CreateCBZ(filePath, img_sources)
+                    end)
+
+                    if not status then
+                        error('CreateCBZ err:' .. tostring(err))
+                    end
 
                     if chapter.is_pre_loading == true then
                         dbg.v('Cache task completed chapter.title:', chapter_title)
@@ -1421,18 +1484,35 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
 
                     chapter.cacheFilePath = filePath
                     return chapter
-                elseif err then
 
-                    error(err)
+                else
+                    error('生成图片列表失败')
                 end
             else
-                error('生成代理图片列表失败')
+                error('提取图片链接失败')
             end
         else
 
-            filePath = filePath .. '.txt'
+            if string.match((first_line or ''):lower(), "%.x?html$") then
+                -- epub
+                local html_url = self:getProxyEpubUrl(bookUrl, first_line)
+                if html_url == nil or html_url == '' then
+                    error('转换失败')
+                end
+                local status, err = pcall(pDownload_Image, html_url)
+                if not status then
+                    error('下载失败:' .. tostring(err))
+                end
+                local ext = first_line:match("[^%.]+$") or "html"
+                content = err['data'] or '下载失败'
+                filePath = filePath .. '.' .. ext
 
-            content = tostring(chapter_title) .. "\r\n" .. content
+            else
+                -- txt
+                filePath = filePath .. '.txt'
+
+                content = table.concat({tostring(chapter_title), "\r\n", content})
+            end
 
             if util.fileExists(filePath) then
                 if chapter.is_pre_loading == true then
@@ -1479,14 +1559,13 @@ function M:downloadChapter(chapter, message_dialog)
     end)
     if not status then
         dbg.log(err)
-        return wrap_response(nil, "下载章节失败,请检查服务")
+        return wrap_response(nil, "下载章节失败,请检查服务" .. H.errorHandler(err))
     end
     return wrap_response(err)
 
 end
 
 function M:getServerPathCode()
-
     if self.settings_data.data['server_address_md5'] == nil then
         local server_address_md5 = socket_url.parse(self.settings_data.data['legado_server']).host
         self.settings_data.data['server_address_md5'] = md5(server_address_md5)
@@ -1500,8 +1579,6 @@ function M:getSettings()
 end
 
 function M:saveSettings(settings)
-    self.settings_data.data.accessToken = nil
-    self.settings_data.data.ui_refresh_time = nil
     if H.is_nil(settings) and H.is_str(self.settings_data.data.legado_server) then
         self.settings_data:flush()
         return wrap_response(true)
@@ -1540,8 +1617,6 @@ function M:setEndpointUrl(new_setting_url)
             return wrap_response(nil, "端口号不正确")
         end
     end
-
-    -- logger.info("userinfo", parsed.userinfo)
 
     local settings = self.settings_data.data
 
@@ -1610,7 +1685,7 @@ function M:deleteBook(bookinfo)
         })
     end)
     if not status then
-        return wrap_response(nil, err or '数据请求出错')
+        return wrap_response(nil, H.errorHandler(err))
     end
     return wrap_response(true)
 end
@@ -1630,7 +1705,7 @@ function M:addBookToLibrary(bookinfo)
         })
     end)
     if not status then
-        return wrap_response(nil, err or '数据请求出错')
+        return wrap_response(nil, H.errorHandler(err))
     end
 
     local response = err
@@ -1644,9 +1719,9 @@ function M:addBookToLibrary(bookinfo)
 end
 
 function M:onExitClean()
-    dbg.v('Backend对象释放,onExitClean执行清理工作')
+    dbg.v('Backend call onExitClean')
 
-    self.dbManager:closeDB()
+    self:closeDbManager()
 
     if util.fileExists(self.task_pid_file) then
         util.removeFile(self.task_pid_file)

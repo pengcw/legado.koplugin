@@ -239,7 +239,7 @@ function M:loading(message, runnable, callback, options)
 
     Trapper:wrap(function()
 
-        local completed, return_values = Trapper:dismissableRunInSubprocess(runnable, true)
+        local completed, return_values = Trapper:dismissableRunInSubprocess(runnable, message_dialog)
 
         UIManager:unschedule(updateText)
 

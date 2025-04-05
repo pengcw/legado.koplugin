@@ -222,10 +222,8 @@ function M:closeDB()
     local success, err = pcall(function()
         self.db:close()
     end)
-    if success then
-        dbg.v("Database closed successfully.")
-    else
-        dbg.log("Error closing database: " .. tostring(err))
+    if not success then
+       dbg.log("Error closing database: " .. tostring(err))
     end
     self.db = nil
     self.isConnected = false
@@ -508,10 +506,12 @@ function M:upsertBooks(bookShelfId, legado_data)
         item.name = util.trim(item.name)
         item.author = util.trim(item.author)
 
-        if item.name == '' or item.author == '' then
+        if item.name == '' then
             goto continue
         end
-
+        if item.author == '' then
+            item.author = '未知'
+        end
         local show_book_title = ("%s (%s)"):format(item.name, item.author)
         item.cache_id = tostring(md5(show_book_title))
 
@@ -609,7 +609,7 @@ function M:getAllBooksByUI(bookShelfId)
     ]]
     local result = self:execute(sql_stmt, {bookShelfId})
     local books = {}
-    if result and #result > 0 then
+    if H.is_tbl(result) and #result > 0 then
         for i = 1, #result, 1 do
             local row = result[i]
             books[i] = {
@@ -1234,7 +1234,7 @@ function M:isDownloading(bookCacheId, chapterIndex)
 
     sql_stmt = string.format(sql_stmt, bookCacheId, chapterIndex)
     local ok, ret = pcall(function()
-        self:getDB():rowexec(sql_stmt)
+        return self:getDB():rowexec(sql_stmt)
     end)
     local is_downing = ret == 1
 
@@ -1387,6 +1387,8 @@ function M:dynamicUpdate(tableName, updateData, conditions)
 
         if #where_parts > 0 then
             where_clause = " WHERE " .. table.concat(where_parts, " AND ")
+        else
+            return
         end
 
     end
