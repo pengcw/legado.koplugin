@@ -24,7 +24,8 @@ local LibraryView = Menu:extend{
     is_popout = false,
     title = "Library",
     with_context_menu = true,
-    disk_available = nil
+    disk_available = nil,
+    ui_refresh_time=os.time()
 }
 
 function LibraryView:init()
@@ -44,7 +45,7 @@ function LibraryView:init()
         self.key_events.FocusRight = {{"Right"}}
     end
 
-    -- 防御性编码,koreader太容易崩了
+    -- 防御性编码,koreader又又崩了
     local status, err = pcall(self.updateItems, self)
     if not status then
         MessageBox.error('初始化失败')
@@ -84,7 +85,7 @@ end
 function LibraryView:updateItems(no_recalculate_dimen)
 
     local books_cache_data = Backend:getBookShelfCache()
-    if books_cache_data and #books_cache_data > 0 then
+    if H.is_tbl(books_cache_data) and #books_cache_data > 0 then
         self.item_table = self:generateItemTableFromMangas(books_cache_data)
         self.multilines_show_more_text = false
         self.items_per_page = nil
@@ -93,15 +94,14 @@ function LibraryView:updateItems(no_recalculate_dimen)
         self.multilines_show_more_text = true
         self.items_per_page = 1
     end
-
     Menu.updateItems(self, nil, no_recalculate_dimen)
 end
 
 function LibraryView:onRefreshLibrary()
     NetworkMgr:runWhenOnline(function()
-
+        Backend:closeDbManager()
         MessageBox:loading("Refreshing Library", function()
-            return Backend:refreshLibraryCache()
+            return Backend:refreshLibraryCache(self.ui_refresh_time)
         end, function(state, response)
             if state == true then
 
@@ -110,6 +110,7 @@ function LibraryView:onRefreshLibrary()
                 else
                     Backend:show_notice('刷新成功')
                     self:updateItems(true)
+                    self.ui_refresh_time = os.time()
                 end
             end
         end)
@@ -209,7 +210,8 @@ function LibraryView:openInstalledReadSource()
         if input_text then
             local new_setting_url = util.trim(input_text)
             Backend:HandleResponse(Backend:setEndpointUrl(new_setting_url), function(data)
-                Backend:show_notice('设置成功,下拉刷新')
+                self:updateItems(true)
+                self:onRefreshLibrary()
             end, function(err_msg)
                 MessageBox:error('设置失败:', err_msg)
             end)
@@ -226,7 +228,6 @@ function LibraryView:openInstalledReadSource()
 https://username:password@127.0.0.1:1122/reader3
 ]]
     })
-
 end
 
 function LibraryView:openMenu()
@@ -242,8 +243,7 @@ function LibraryView:openMenu()
         text = Icons.FA_GLOBE .. " legado web地址",
         callback = function()
             UIManager:close(dialog)
-
-            LibraryView:openInstalledReadSource()
+            self:openInstalledReadSource()
         end
     }}, {{
         text = Icons.FA_TIMES .. ' ' .. "Clear All caches",
@@ -251,6 +251,7 @@ function LibraryView:openMenu()
             UIManager:close(dialog)
             MessageBox:confirm('确认清空所有缓存书籍?', function(result)
                 if result then
+                    Backend:closeDbManager()
                     MessageBox:loading("清除中", function()
                         return Backend:cleanAllBookCaches()
                     end, function(state, response)
@@ -258,6 +259,8 @@ function LibraryView:openMenu()
                             Backend:HandleResponse(response, function(data)
                                 Backend:show_notice("已清除")
                                 self:onClose()
+                            end,function(err_msg)
+                                    MessageBox:error('操作失败:', tostring(err_msg))
                             end)
                         end
                     end)

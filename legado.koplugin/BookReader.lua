@@ -27,10 +27,11 @@ function M:show(options)
     dbg.v('ReaderUI.instance', type(ReaderUI.instance))
     dbg.v('ReaderRolling.c8:', ReaderRolling.c8eeb679b)
 
-    if self.is_showing then
+    if self.is_showing and ReaderUI.instance then
         if ReaderRolling.c8eeb679b ~= true then
             M.overriderollingHandler()
         end
+        
         ReaderUI.instance:switchDocument(options.path, true)
 
     else

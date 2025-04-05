@@ -32,7 +32,7 @@ local ChapterListing = Menu:extend{
     chapter_sorting_mode = nil,
 
     on_return_callback = nil,
-    call_event = '_nil'
+    ui_refresh_time = os.time()
 }
 
 function ChapterListing:init()
@@ -107,14 +107,14 @@ function ChapterListing:generateItemTableFromChapters(chapters)
     local item_table = {}
 
     for _, chapter in ipairs(chapters) do
-       
+
         local mandatory = (chapter.index == self.bookinfo.durChapterIndex and Icons.FA_THUMB_TACK or '') ..
                               (chapter.isRead and Icons.FA_CHECK_CIRCLE or "") ..
                               (chapter.isDownLoaded ~= true and Icons.FA_DOWNLOAD or "")
 
         table.insert(item_table, {
             chapters_index = chapter.chapters_index,
-            text = chapter.title or  tostring(chapter.chapters_index),
+            text = chapter.title or tostring(chapter.chapters_index),
             mandatory = mandatory
         })
 
@@ -124,6 +124,7 @@ function ChapterListing:generateItemTableFromChapters(chapters)
 end
 
 function ChapterListing:closeUI()
+
     Menu.onClose(self)
 end
 
@@ -134,7 +135,7 @@ end
 
 function ChapterListing:onReturn()
     local path = table.remove(self.paths)
-    Menu.onClose(self)
+    self:closeUI()
     path.callback()
 end
 
@@ -165,7 +166,6 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallback, accept_cached_r
         covers_fullscreen = true,
         title = string.format("%s (%s)", bookinfo.name, bookinfo.author)
     })
-
 end
 
 function ChapterListing:onMenuChoice(item)
@@ -225,6 +225,18 @@ function ChapterListing:onMenuHold(item)
             end)
         end
     }}, {{
+        text = table.concat({Icons.FA_THUMB_TACK, " 上传进度"}),
+        callback = function()
+            UIManager:close(dialog)
+            Backend:HandleResponse(
+                Backend:saveBookProgress(chapter),
+            function(data)
+                Backend:show_notice('同步成功')
+            end, function(err_msg)
+                MessageBox:error('同步失败 ', err_msg)
+            end)
+        end
+    }},{{
         text = table.concat({Icons.FA_INFO_CIRCLE, " 向后缓存"}),
         callback = function()
             UIManager:close(dialog)
@@ -244,7 +256,7 @@ function ChapterListing:onMenuHold(item)
                         self:ChapterDownManager(tonumber(chapters_index), 'next', autoturn_spin.value)
                     end)
                     if not status and err then
-                        dbg.log('向后下载出错:', tostring(err))
+                        dbg.log('向后下载出错:', H.errorHandler(err))
                     end
                 end
             }
@@ -289,7 +301,7 @@ function ChapterListing:onBookReaderCallback(chapter)
 
         g_chapter_call_event = chapter.call_event
 
-        self:openChapterOnReader(nextChapter)
+        self:openChapterOnReader(nextChapter, true)
     else
 
         BookReader:closeReaderUi(function()
@@ -302,17 +314,18 @@ end
 
 function ChapterListing:onRefreshChapters()
     NetworkMgr:runWhenOnline(function()
-
+        Backend:closeDbManager()
         MessageBox:loading("正在刷新章节数据", function()
             return Backend:refreshChaptersCache({
                 cache_id = self.bookinfo.cache_id,
                 bookUrl = self.bookinfo.bookUrl
-            })
+            }, self.ui_refresh_time)
         end, function(state, response)
             if state == true then
                 if response and response.type == 'ERROR' then
                     Backend:show_notice(response.message or '刷新失败')
                 else
+                    self.ui_refresh_time = os.time()
                     Backend:show_notice('刷新成功')
                     self:updateItems(true)
                 end
@@ -322,17 +335,54 @@ function ChapterListing:onRefreshChapters()
     end)
 end
 
-function ChapterListing:openChapterOnReader(chapter, is_callblack)
+
+function ChapterListing:showReaderUI(chapter)
+
+    ChapterListing.onReturnCallback = function()
+        self:updateItems(true)
+        UIManager:show(self)
+    end
+
+    ChapterListing.onStartOfBookCallback = function()
+        chapter.call_event = 'pre'
+        self:onBookReaderCallback(chapter)
+    end
+
+    ChapterListing.onEndOfBookCallback = function()
+        chapter.call_event = 'next'
+        self:onBookReaderCallback(chapter)
+    end
+    --[[
+    UIManager:scheduleIn(0.5, function()
+        Backend:saveBookProgress(chapter)
+    end)
+     ]]
+
+    BookReader:show({
+        path = chapter.cacheFilePath,
+        on_end_of_book_callback = ChapterListing.onEndOfBookCallback,
+        on_start_of_book_callback = ChapterListing.onStartOfBookCallback,
+        on_return_callback = ChapterListing.onReturnCallback,
+        chapter_call_event = chapter.call_event
+    })
+
+    Backend:after_reader_chapter_show(chapter)
+
+end
+
+function ChapterListing:openChapterOnReader(chapter,is_callback)
 
     local cache_chapter = Backend:getCacheChapterFilePath(chapter)
 
-    if (not cache_chapter or not H.is_str(cache_chapter.cacheFilePath)) and is_callblack ~= true then
-
-        local start_time = time.now()
-
+    if (H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)) then
+        if is_callback ~= true then self:closeUI() end 
+        self:showReaderUI(cache_chapter)
+    else
+        Backend:closeDbManager()
         return MessageBox:loading("正在下载正文", function()
             return Backend:downloadChapter(chapter)
         end, function(state, response)
+            if is_callback ~= true then self:closeUI() end 
             if not H.is_tbl(response) then
                 MessageBox:error('下载返回数据格式错误')
                 return
@@ -344,41 +394,12 @@ function ChapterListing:openChapterOnReader(chapter, is_callblack)
             end
 
             if response.body and response.body.cacheFilePath then
-                self:openChapterOnReader(response.body, true)
+                self:showReaderUI(response.body)
             end
 
         end)
 
     end
-
-    chapter = cache_chapter
-
-    local onReturnCallback = function()
-        self:updateItems(true)
-        UIManager:show(self)
-    end
-
-    local onStartOfBookCallback = function()
-        chapter.call_event = 'pre'
-        self:onBookReaderCallback(chapter)
-    end
-
-    local onEndOfBookCallback = function()
-        chapter.call_event = 'next'
-        self:onBookReaderCallback(chapter)
-    end
-
-    self:closeUI()
-
-    BookReader:show({
-        path = chapter.cacheFilePath,
-        on_end_of_book_callback = onEndOfBookCallback,
-        on_start_of_book_callback = onStartOfBookCallback,
-        on_return_callback = onReturnCallback,
-        chapter_call_event = chapter.call_event
-    })
-
-    Backend:after_reader_chapter_show(chapter)
 
 end
 
@@ -489,14 +510,14 @@ function ChapterListing:openMenu()
                 self:ChapterDownManager(0, 'next')
             end)
             if not status then
-                dbg.log('缓存全部章节出错:', tostring(err))
+                dbg.log('缓存全部章节出错:', H.errorHandler(err))
             end
         end
     }}, {{
         text = Icons.FA_TRASH .. " 清空本书缓存",
         callback = function()
             UIManager:close(dialog)
-
+            Backend:closeDbManager()
             MessageBox:loading("清理中...", function()
                 return Backend:cleanBookCache(self.bookinfo.cache_id)
             end, function(state, response)

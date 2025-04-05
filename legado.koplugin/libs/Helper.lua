@@ -257,6 +257,13 @@ M.n_to_b = function(n)
     return n == 1
 end
 
+M.errorHandler = function(err)
+    err = tostring(err)
+    -- remove stacktrace
+    err = err:gsub("\n.*", "")
+    return err
+end
+
 M.isFileOlderThan = function(filepath, seconds)
 
     local attributes = lfs.attributes(filepath)
