@@ -1,22 +1,15 @@
 local logger = require("logger")
 local Device = require("device")
 local ffiUtil = require("ffi/util")
-local setmetatable_gc = require("ffi/__gc")
 local md5 = require("ffi/sha2").md5
-local Notification = require("ui/widget/notification")
 local dbg = require("dbg")
 
 local socket_url = require("socket.url")
-
 local util = require("util")
 local time = require("ui/time")
-local JSON = require("json")
-local LuaSettings = require("luasettings")
+
 local UIManager = require("ui/uimanager")
-
 local H = require("libs/Helper")
-
-local BookInfoDB = require("BookInfoDB")
 
 local function wrap_response(data, err_message)
     return data ~= nil and {
@@ -28,182 +21,275 @@ local function wrap_response(data, err_message)
     }
 end
 
-local function requestJson(request)
+local function get_img_src(html)
+    if type(html) ~= "string" then
+        return {}
+    end
 
-    local ltn12 = require("ltn12")
-    local http = require("socket.http")
-    local socketutil = require("socketutil")
+    local img_sources = {}
+    -- local img_pattern = "<img[^>]*src%s*=%s*([\"']?)([^%s\"'>]+)%1[^>]*>"
+    local img_pattern = '<img[^>]-src%s*=%s*["\']?([^"\'>%s]+)["\']?[^>]*>'
 
-    local parsed_url = socket_url.parse(request.url)
-
-    local query_params = request.query_params or {}
-    local built_query_params = ""
-    for name, value in pairs(query_params) do
-        if built_query_params ~= "" then
-            built_query_params = built_query_params .. "&"
+    for src in html:gmatch(img_pattern) do
+        if src and src ~= "" then
+            table.insert(img_sources, src)
         end
-        built_query_params = built_query_params .. name .. "=" .. socket_url.escape(value)
     end
 
-    parsed_url.query = built_query_params ~= "" and built_query_params or nil
-    local built_url = socket_url.build(parsed_url)
-
-    local headers = request.headers or {}
-    local serialized_body = nil
-    if request.body ~= nil then
-        serialized_body = JSON.encode(request.body)
-        headers["Content-Type"] = "application/json"
-        headers["Content-Length"] = serialized_body:len()
-    end
-
-    local timeout = request.timeout or 15
-    socketutil:set_timeout(timeout, timeout)
-
-    local sink = {}
-    local _, status_code, response_headers = http.request({
-        url = built_url,
-        method = request.method or "GET",
-        headers = headers,
-        source = serialized_body ~= nil and ltn12.source.string(serialized_body) or nil,
-        sink = ltn12.sink.table(sink),
-        create = socketutil.tcp
-    })
-
-    socketutil:reset_timeout()
-
-    local response_body = table.concat(sink)
-
-    if status_code == 200 and response_body ~= "" then
-        local _, parsed_body = pcall(JSON.decode, response_body)
-        if type(parsed_body) ~= 'table' then
-            error("Expected to be able to decode the response body as JSON: " .. response_body .. "(status code: " ..
-                      status_code .. ")")
-        end
-        return parsed_body
-    end
-
-    logger.warn("requestJson: cannot get access token:", status_code)
-    logger.warn("requestJson: error:", response_body)
-    error("Connection error, please check the server")
+    return img_sources
 end
 
-local function requestJsonAutoRedirect(request)
+local function get_extension_from_content_type(content_type)
+    local extensions = {
+        ["image/jpeg"] = "jpg",
+        ["image/png"] = "png",
+        ["image/gif"] = "gif",
+        ["image/bmp"] = "bmp",
+        ["image/webp"] = "webp",
+        ["image/tiff"] = "tiff",
+        ["image/svg+xml"] = "svg"
+    }
+
+    return extensions[content_type]
+end
+
+local function get_image_format_head8(image_data)
+    if type(image_data) ~= "string" then
+        return
+    end
+
+    local header = image_data:sub(1, 8)
+
+    if header:sub(1, 3) == "\xFF\xD8\xFF" then
+        return "jpg"
+    elseif header:sub(1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then
+        return "png"
+    elseif header:sub(1, 4) == "\x47\x49\x46\x38" then
+        return "gif"
+    elseif header:sub(1, 2) == "\x42\x4D" then
+        return "bmp"
+    elseif header:sub(1, 4) == "\x52\x49\x46\x46" then
+        return "webp"
+    else
+
+        return
+    end
+end
+
+local function pDownload_Image(img_src, timeout, maxtime)
+
     local ltn12 = require("ltn12")
-    local https = require("ssl.https")
+    local socket = require("socket")
     local http = require("socket.http")
     local socketutil = require("socketutil")
 
-    local max_redirects = 5
-    local current_redirect = 0
-    local final_url = request.url
-    local response_body, status_code, response_headers
-    local method = request.method or "GET"
-    local original_method = method
+    timeout = timeout or 600
 
-    repeat
-
-        local parsed_url = socket_url.parse(final_url)
-
-        if current_redirect == 0 then
-            local query_params = request.query_params or {}
-            local built_query = ""
-            for name, value in pairs(query_params) do
-                if built_query ~= "" then
-                    built_query = built_query .. "&"
-                end
-                built_query = built_query .. name .. "=" .. socket_url.escape(value)
-            end
-            parsed_url.query = built_query ~= "" and built_query or nil
-        end
-
-        local http_client = parsed_url.scheme:lower() == "https" and https or http
-
-        local built_url = socket_url.build(parsed_url)
-
-        local headers = request.headers or {}
-        local serialized_body = nil
-
-        if request.body and method ~= "GET" and method ~= "HEAD" then
-            serialized_body = JSON.encode(request.body)
-            headers["Content-Type"] = "application/json"
-            headers["Content-Length"] = tostring(#serialized_body)
-        end
-
-        socketutil:set_timeout(request.timeout or 15)
-
-        local sink = {}
-        local _, code, headers = http_client.request({
-            url = built_url,
-            method = method,
-            headers = headers,
-            source = serialized_body and ltn12.source.string(serialized_body) or nil,
-            sink = ltn12.sink.table(sink)
-        })
-        status_code = code
-        response_headers = headers
-        response_body = table.concat(sink)
-
-        socketutil:reset_timeout()
-
-        if status_code >= 300 and status_code < 400 then
-            current_redirect = current_redirect + 1
-            if current_redirect > max_redirects then
-                error("Too many redirects (" .. max_redirects .. ")")
-            end
-
-            local location = response_headers.location
-            if not location then
-                error("Redirect without Location header (status " .. status_code .. ")")
-            end
-
-            final_url = socket_url.absolute(built_url, location)
-
-            -- RFC 7231
-            if status_code == 303 then
-                method = "GET"
-            elseif status_code == 307 or status_code == 308 then
-                method = original_method
-            elseif status_code == 301 or status_code == 302 then
-                -- method = (original_method == "POST") and "GET" or original_method
-                method = original_method
-            end
-
-            if method == "GET" then
-                request.body = nil
-            end
-        end
-    until not (status_code >= 300 and status_code < 400)
-
-    if status_code == 200 then
-        local ok, parsed = pcall(JSON.decode, response_body)
-        if not ok or type(parsed) ~= "table" then
-            error("Invalid JSON response: " .. tostring(response_body))
-        end
-        return parsed
-    else
-        error("Request failed (status " .. status_code .. "): " .. tostring(response_body))
+    local parsed = socket_url.parse(img_src)
+    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
+        error("Unsupported protocol")
     end
+
+    local imageData = {}
+    local request = {
+        url = img_src,
+        method = "GET",
+        sink = maxtime and socketutil.table_sink(imageData) or ltn12.sink.table(imageData),
+        create = socketutil.tcp
+    }
+
+    socketutil:set_timeout(timeout, maxtime or 700)
+    local code, headers, status = socket.skip(1, http.request(request))
+    socketutil:reset_timeout()
+
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        logger.err("request interrupted:", code)
+        error("request interrupted:" .. tostring(code))
+    end
+
+    if headers == nil then
+        logger.warn("No HTTP headers:", status or code or "network unreachable")
+        error("Network or remote server unavailable")
+    end
+    if type(code) ~= 'number' or code < 200 or code > 299 then
+        logger.warn("HTTP status not okay:", status or code or "network unreachable")
+        logger.dbg("Response headers:", headers)
+        error("Remote server error or unavailable")
+    end
+
+    local merge_image_data = table.concat(imageData)
+    if headers and headers["content-length"] then
+        local content_length = tonumber(headers["content-length"])
+        if #merge_image_data ~= content_length then
+            error("Incomplete content received")
+        end
+    end
+
+    local extension = 'bin'
+
+    local contentType = headers["content-type"]
+
+    if contentType and contentType:match("^image/") then
+        extension = get_extension_from_content_type(contentType) or 'bin'
+    else
+        extension = get_image_format_head8(merge_image_data) or 'bin'
+    end
+
+    return {
+        data = merge_image_data,
+        ext = extension
+    }
+end
+
+local function pDownload_CreateCBZ(filePath, img_sources)
+
+    dbg.v('CreateCBZ strat:')
+
+    if not filePath or not H.is_tbl(img_sources) then
+        error('Cbz generates input parameters error')
+    end
+
+    local is_convertToGrayscale = false
+
+    local cbz_path_tmp = filePath .. '.downloading'
+
+    if util.fileExists(cbz_path_tmp) then
+        if M:isExtractingInBackground() == true then
+            error('There are other threads downloading, cancelled')
+        else
+            util.removeFile(cbz_path_tmp)
+        end
+    end
+
+    local ZipWriter = require("ffi/zipwriter")
+
+    local cbz = ZipWriter:new{}
+    if not cbz:open(cbz_path_tmp) then
+        error('CreateCBZ cbz:open err')
+    end
+    cbz:add("mimetype", "application/vnd.comicbook+zip", true)
+
+    local no_compression = true
+
+    for i, img_src in ipairs(img_sources) do
+
+        dbg.v('Download_Image start', i, img_src)
+        local status, err = pcall(pDownload_Image, img_src)
+
+        if status and H.is_tbl(err) and err['data'] then
+
+            local imgdata = err['data']
+            local img_extension = err['ext'] or "jpg"
+
+            local img_name = string.format("%d.%s", i, img_extension)
+            if is_convertToGrayscale == true and img_extension == 'png' then
+                local success, imgdata_new = convertToGrayscale(imgdata)
+                if success ~= true then
+
+                    goto continue
+                end
+                imgdata = imgdata_new.data
+            end
+
+            cbz:add(img_name, imgdata, no_compression)
+
+        else
+            dbg.v('Download_Image err', tostring(err))
+        end
+        ::continue::
+    end
+
+    cbz:close()
+    dbg.v('CreateCBZ cbz:close')
+
+    if util.fileExists(filePath) ~= true then
+        os.rename(cbz_path_tmp, filePath)
+    else
+        if util.fileExists(cbz_path_tmp) == true then
+            util.removeFile(cbz_path_tmp)
+        end
+        error('exist target file, cancelled')
+    end
+
+    return filePath
+end
+
+local function convertToGrayscale(image_data)
+    local Png = require("lib/Png")
+    return Png.processImage(Png.toGrayscale, image_data, 1)
+
 end
 
 local M = {
     dbManager = {},
     settings_data = nil,
-    task_pid_file = nil
+    task_pid_file = nil,
+    apiClient = nil
 }
 
 function M:HandleResponse(response, on_success, on_error)
-    if response == nil and on_error then
-        return on_error("Response is nil")
+    if not response then
+        return on_error and on_error("Response is nil")
     end
-    if response.type == 'SUCCESS' and on_success then
-        return on_success(response.body)
-    elseif response.type == 'ERROR' and on_error then
-        return on_error(response.message or '')
+
+    local rtype = response.type
+    if rtype == "SUCCESS" then
+        return on_success and on_success(response.body)
+    elseif rtype == "ERROR" then
+        return on_error and on_error(response.message or "")
+    end
+    return on_error and on_error("Unknown response type: " .. tostring(rtype))
+end
+
+function M:loadSpore()
+    local Spore = require("Spore")
+    local legadoSpec = require("libs/LegadoSpec")
+    self.apiClient = Spore.new_from_lua(legadoSpec, {
+        base_url = self.settings_data.data.legado_server .. '/'
+        -- base_url = 'http://eu.httpbin.org/'
+    })
+    package.loaded["Spore.Middleware.ForceJSON"] = {}
+    require("Spore.Middleware.ForceJSON").call = function(args, req)
+        -- req.env.HTTP_USER_AGENT = ""
+        req.headers["user-agent"] =
+            "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+        return function(res)
+            res.headers["content-type"] = 'application/json'
+            return res
+        end
+    end
+    package.loaded["Spore.Middleware.Legado3Auth"] = {}
+    require("Spore.Middleware.Legado3Auth").call = function(args, req)
+        local spore = req.env.spore
+
+        if self.settings_data.data.reader3_un ~= '' then
+
+            local loginSuccess, token = self:_reader3Login()
+            if loginSuccess == true and type(token) == 'string' and token ~= '' then
+
+                local accessToken = string.format("accessToken=%s", token)
+                if type(req.env.QUERY_STRING) == 'string' and #req.env.QUERY_STRING > 0 then
+                    req.env.QUERY_STRING = req.env.QUERY_STRING .. '&' .. accessToken
+                else
+                    req.env.QUERY_STRING = accessToken
+                end
+            else
+                logger.warn('Spore.Legado3Auth', '登录失败', token or 'nil')
+            end
+        end
+
+        return function(res)
+            if type(res.body) == 'table' and res.body.data == "NEED_LOGIN" and res.body.isSuccess == false then
+                self:resetReader3Token()
+            end
+            return res
+        end
     end
 end
 
 function M:initialize()
 
+    local LuaSettings = require("luasettings")
     self.settings_data = LuaSettings:open(H.getUserSettingsPath())
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
 
@@ -214,7 +300,8 @@ function M:initialize()
             server_address_md5 = 'f528764d624db129b32c21fbca0cb8d6',
             setting_url = 'http://127.0.0.1:1122',
             reader3_un = '',
-            reader3_pwd = ''
+            reader3_pwd = '',
+            stream_image_view = false
         }
         self.settings_data:flush()
     end
@@ -225,21 +312,556 @@ function M:initialize()
         self.settings_data.data.setting_url = self.settings_data.data.legado_server
     end
 
+    self:loadSpore()
+
+    local BookInfoDB = require("BookInfoDB")
     self.dbManager = BookInfoDB:new({
         dbPath = H.getTempDirectory() .. "/bookinfo.db"
     })
 end
 
 function M:show_notice(msg, timeout)
-    Notification:notify(msg, Notification.SOURCE_ALWAYS_SHOW)
+    local Notification = require("ui/widget/notification")
+    Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
 end
 
 function M:backgroundCacheConfig()
+    local LuaSettings = require("luasettings")
     return LuaSettings:open(H.getTempDirectory() .. '/cache.lua')
 end
 function M:resetReader3Token()
     self:backgroundCacheConfig():delSetting('r3k'):flush()
 end
+
+function M:_reader3Login()
+    local cache_config = self:backgroundCacheConfig()
+    if H.is_str(cache_config.data.r3k) then
+        return true, cache_config.data.r3k
+    end
+
+    local socketutil = require("socketutil")
+    local legado_server = self.settings_data.data['legado_server']
+    local reader3_un = self.settings_data.data.reader3_un
+    local reader3_pwd = self.settings_data.data.reader3_pwd
+
+    if not H.is_str(reader3_un) or not H.is_str(reader3_pwd) or reader3_pwd == '' or reader3_un == '' then
+        return false, '认证信息设置不全'
+    end
+
+    self.apiClient:reset_middlewares()
+    self.apiClient:enable("Format.JSON")
+    self.apiClient:enable("ForceJSON")
+    socketutil:set_timeout(8, 10)
+
+    local status, res = pcall(function()
+        return self.apiClient:reader3Login({
+            username = reader3_un,
+            password = reader3_pwd,
+            code = "",
+            isLogin = true,
+            v = os.time()
+        })
+    end)
+    socketutil:reset_timeout()
+
+    if not status then
+        return false, H.errorHandler(res) or '获取用户信息出错'
+    end
+
+    if not H.is_tbl(res.body) or not H.is_tbl(res.body.data) then
+        return false,
+            (res.body and res.body.errorMsg) and res.body.errorMsg or "服务器返回了无效的数据结构"
+    end
+
+    if not H.is_str(res.body.data.accessToken) then
+        return false, '获取Token失败'
+    end
+
+    logger.info('get legado3token:', res.body.data.accessToken)
+
+    cache_config:saveSetting("r3k", res.body.data.accessToken):flush()
+
+    return true, res.body.data.accessToken
+end
+
+function M:legadoSporeApi(requestFunc, callback, opts, logName)
+    local socketutil = require("socketutil")
+
+    local legado_server = self.settings_data.data['legado_server']
+    logName = logName or 'legadoSporeApi'
+    opts = opts or {}
+
+    local isServerOnly = opts.isServerOnly
+    local timeouts = opts.timeouts
+    if not H.is_tbl(timeouts) or not H.is_num(timeouts[1]) or not H.is_num(timeouts[2]) then
+        timeouts = {8, 12}
+    end
+
+    if isServerOnly == true and not string.find(string.lower(legado_server), "/reader3") then
+        return wrap_response(nil, "仅支持服务器版本\r\n其它请在app操作后刷新")
+    end
+
+    self.apiClient:reset_middlewares()
+    self.apiClient:enable("Legado3Auth")
+    self.apiClient:enable("Format.JSON")
+    self.apiClient:enable("ForceJSON")
+
+    socketutil:set_timeout(timeouts[1], timeouts[2])
+    local status, res = pcall(requestFunc)
+    socketutil:reset_timeout()
+
+    if not status or not H.is_tbl(res.body) then
+
+        local err_msg = H.errorHandler(res)
+        if err_msg == "wantread" then
+            err_msg = '连接超时'
+        end
+        logger.err(logName, 'requestFunc err:', tostring(res))
+        return wrap_response(nil, 'requestFunc: ' .. err_msg)
+    end
+
+    if H.is_tbl(res.body) and res.body.data == "NEED_LOGIN" and res.body.isSuccess == false then
+        self:resetReader3Token()
+        self:_reader3Login()
+        return wrap_response(nil, 'NEED_LOGIN,刷新并继续')
+    end
+
+    if H.is_tbl(res.body) and res.body.isSuccess == true and not H.is_nil(res.body.data) then
+        if H.is_func(callback) then
+            return callback(res.body)
+        else
+            return wrap_response(res.body.data)
+        end
+    else
+        return wrap_response(nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错')
+    end
+end
+
+function M:refreshChaptersCache(bookinfo, last_refresh_time)
+
+    if last_refresh_time and os.time() - last_refresh_time < 2 then
+        dbg.v('ui_refresh_time prevent refreshChaptersCache')
+        return wrap_response(nil, '处理中')
+    end
+
+    local book_cache_id = bookinfo.cache_id
+    local bookUrl = bookinfo.bookUrl
+
+    if not bookUrl or not H.is_str(book_cache_id) then
+        return wrap_response(nil, "获取目录参数错误")
+    end
+    return self:legadoSporeApi(function()
+        return self.apiClient:getChapterList({
+            url = bookUrl,
+            v = os.time()
+        })
+    end, function(response)
+
+        local status, err = pcall(function()
+            return self.dbManager:upsertChapters(book_cache_id, response.data)
+        end)
+
+        if not status then
+            dbg.log('refreshChaptersCache数据写入', tostring(err))
+            return wrap_response(nil, '数据写入出错,请重试')
+        end
+        return wrap_response(true)
+    end, {
+        timeouts = {12, 12}
+    }, 'refreshChaptersCache')
+end
+
+function M:refreshLibraryCache(last_refresh_time)
+
+    if last_refresh_time and os.time() - last_refresh_time < 2 then
+        dbg.v('ui_refresh_time prevent refreshChaptersCache')
+        return wrap_response(nil, '处理中')
+    end
+
+    return self:legadoSporeApi(function()
+        -- data=bookinfos
+        return self.apiClient:getBookshelf({
+            refresh = 0,
+
+            v = os.time()
+        })
+    end, function(response)
+        local bookShelfId = self:getServerPathCode()
+        local status, err = pcall(function()
+            return self.dbManager:upsertBooks(bookShelfId, response.data)
+        end)
+
+        if not status then
+            dbg.log('refreshLibraryCache数据写入', H.errorHandler(err))
+            return wrap_response(nil, '写入数据出错,请重试')
+        end
+
+        return wrap_response(true)
+    end, {
+        timeouts = {6, 10}
+    }, 'refreshLibraryCache')
+end
+
+function M:pGetChapterContent(chapter)
+    local bookUrl = chapter.bookUrl
+    local chapters_index = chapter.chapters_index
+    local down_chapters_index = chapter.chapters_index
+
+    if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
+        return wrap_response(nil, 'GetChapterContent参数错误')
+    end
+
+    return self:legadoSporeApi(function()
+        -- data=string
+        return self.apiClient:getBookContent({
+
+            url = bookUrl,
+            index = down_chapters_index,
+            v = os.time()
+        })
+    end, nil, {
+        timeouts = {18, 25}
+    }, 'GetChapterContent')
+end
+
+function M:saveBookProgress(chapter)
+    local chapters_index = chapter.chapters_index
+
+    return self:legadoSporeApi(function()
+        return self.apiClient:saveBookProgress({
+            name = chapter.name,
+            author = chapter.author,
+            durChapterPos = 0,
+            durChapterIndex = chapters_index,
+            durChapterTime = time.to_ms(time.now()),
+            durChapterTitle = chapter.title or '',
+            index = chapters_index,
+            url = chapter.bookUrl,
+            v = os.time()
+        })
+    end, nil, {
+        timeouts = {3, 3}
+    }, 'saveBookProgress')
+
+end
+
+function M:getAvailableBookSource(bookUrl)
+
+    -- return bookinfo
+    if not H.is_str(bookUrl) then
+        return wrap_response(nil, '获取可用书源参数错误')
+    end
+
+    return self:legadoSporeApi(function()
+        -- data.list data.lastindex
+        return self.apiClient:getAvailableBookSource({
+            refresh = 0,
+            url = bookUrl,
+            v = os.time()
+        })
+    end, nil, {
+        timeouts = {25, 30},
+        isServerOnly = true
+    }, 'getAvailableBookSource')
+
+end
+
+function M:setBookSource(newBookSource)
+    -- origin = bookSourceUrl
+    -- return bookinfo
+    if not H.is_tbl(newBookSource) or not H.is_str(newBookSource.bookUrl) or not H.is_str(newBookSource.newUrl) or
+        not H.is_str(newBookSource.bookSourceUrl) then
+        return wrap_response(nil, '更换书源参数错误')
+    end
+
+    return self:legadoSporeApi(function()
+        -- data=bookinfo
+        return self.apiClient:setBookSource({
+            bookUrl = newBookSource.bookUrl,
+            bookSourceUrl = newBookSource.bookSourceUrl,
+            newUrl = newBookSource.newUrl,
+            v = os.time()
+        })
+    end, function(response)
+        if H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
+            local bookShelfId = self:getServerPathCode()
+            local response = {response.data}
+            local status, err = pcall(function()
+                return self.dbManager:upsertBooks(bookShelfId, response, true)
+            end)
+
+            if not status then
+                dbg.log('setBookSource数据写入', tostring(err))
+                return wrap_response(nil, '数据写入出错,请重试')
+            end
+            return wrap_response(true)
+        else
+            return wrap_response(nil, '接口返回数据格式错误')
+        end
+    end, {
+        timeouts = {10, 12},
+        isServerOnly = true
+    }, 'setBookSource')
+
+end
+
+function M:searchBookSource(bookUrl, lastIndex)
+    if not H.is_str(bookUrl) then
+        return wrap_response(nil, '获取更多书源参数错误')
+    end
+    if not H.is_num(lastIndex) then
+        lastIndex = 1
+    end
+
+    return self:legadoSporeApi(function()
+        -- data.list data.lastindex
+        return self.apiClient:searchBookSource({
+
+            url = bookUrl,
+            bookSourceGroup = '',
+            lastIndex = lastIndex,
+            v = os.time()
+        })
+
+    end, nil, {
+        timeouts = {100, 120},
+        isServerOnly = true
+    }, 'searchBook')
+
+end
+
+function M:searchBookMulti(search_text, lastIndex)
+
+    if not H.is_str(search_text) or search_text == '' then
+        return wrap_response(nil, "输入参数错误")
+    end
+
+    lastIndex = lastIndex or -1
+
+    return self:legadoSporeApi(function()
+        -- data.list data.lastindex
+        return self.apiClient:searchBookMulti({
+
+            key = search_text,
+            bookSourceUrl = '',
+            bookSourceGroup = '',
+            -- 并发
+            concurrentCount = 4,
+            lastIndex = lastIndex,
+            page = 1,
+            v = os.time()
+        })
+    end, nil, {
+        timeouts = {60, 80},
+        isServerOnly = true
+    }, 'searchBook')
+end
+
+function M:addBookToLibrary(bookinfo)
+    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.name) or not H.is_str(bookinfo.origin) then
+        return wrap_response(nil, "输入参数错误")
+    end
+
+    local nowTime = time.now()
+    bookinfo.time = time.to_ms(nowTime)
+
+    return self:legadoSporeApi(function()
+        -- data=bookinfo
+        return self.apiClient:saveBook({
+
+            v = os.time(),
+            name = bookinfo.name,
+            author = bookinfo.author,
+            bookUrl = bookinfo.bookUrl,
+            origin = bookinfo.origin,
+            originName = bookinfo.originName,
+            originOrder = bookinfo.originOrder or 0,
+            durChapterIndex = bookinfo.durChapterIndex or 0,
+            durChapterPos = bookinfo.durChapterPos or 0,
+            durChapterTime = bookinfo.durChapterTime or 0,
+            durChapterTitle = bookinfo.durChapterTitle or '',
+            wordCount = bookinfo.wordCount or '',
+            intro = bookinfo.intro or '',
+            totalChapterNum = bookinfo.totalChapterNum or 0,
+            kind = bookinfo.kind or '',
+            type = bookinfo.type or 0
+        })
+
+    end, function(response)
+        if H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
+            local bookShelfId = self:getServerPathCode()
+            local db_save = {response.data}
+            local status, err = pcall(function()
+                return self.dbManager:upsertBooks(bookShelfId, db_save, true)
+            end)
+
+            if not status then
+                dbg.log('addBookToLibrary数据写入', tostring(err))
+                return wrap_response(nil, '数据写入出错,请重试')
+            end
+            return wrap_response(true)
+        else
+            return wrap_response(nil, '接口返回数据格式错误')
+        end
+    end, {
+        timeouts = {10, 12}
+    }, 'addBookToLibrary')
+
+end
+
+function M:deleteBook(bookinfo)
+    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.name) or not H.is_str(bookinfo.origin) then
+        return wrap_response(nil, "输入参数错误")
+    end
+
+    return self:legadoSporeApi(function()
+        -- {"isSuccess":true,"errorMsg":"","data":"删除书籍成功"}
+        return self.apiClient:deleteBook({
+
+            v = os.time(),
+            name = bookinfo.name,
+            author = bookinfo.author,
+            bookUrl = bookinfo.bookUrl,
+            origin = bookinfo.origin,
+            originName = bookinfo.originName,
+            originOrder = bookinfo.originOrder or 0,
+            durChapterIndex = bookinfo.durChapterIndex or 0,
+            durChapterPos = bookinfo.durChapterPos or 0,
+            durChapterTime = bookinfo.durChapterTime or 0,
+            durChapterTitle = bookinfo.durChapterTitle or '',
+            wordCount = bookinfo.wordCount or '',
+            intro = bookinfo.intro or '',
+            totalChapterNum = bookinfo.totalChapterNum or 0,
+            kind = bookinfo.kind or '',
+            type = bookinfo.type or 0
+        })
+    end, nil, {
+        timeouts = {6, 8}
+    }, 'deleteBook')
+end
+
+function M:pDownloadChapter(chapter, message_dialog, is_recursive)
+
+    local bookUrl = chapter.bookUrl
+    local book_cache_id = chapter.book_cache_id
+    local chapters_index = chapter.chapters_index
+    local chapter_title = chapter.title or ''
+    local down_chapters_index = chapter.chapters_index
+
+    local function message_show(msg)
+        if message_dialog then
+            message_dialog.text = msg
+            UIManager:setDirty(message_dialog, "ui")
+            UIManager:forceRePaint()
+        end
+    end
+
+    if bookUrl == nil or not book_cache_id then
+        error('pDownloadChapter input parameters err' .. tostring(bookUrl) .. tostring(book_cache_id))
+    end
+
+    local cache_chapter = self:getCacheChapterFilePath(chapter)
+    if cache_chapter and cache_chapter.cacheFilePath then
+        return cache_chapter
+    end
+
+    local response = self:pGetChapterContent(chapter)
+
+    if is_recursive ~= true and H.is_tbl(response) and response.type == 'ERROR' and
+        string.find(tostring(response.message), 'NEED_LOGIN') then
+        self:resetReader3Token()
+        self:pDownloadChapter(chapter, message_dialog, true)
+    end
+
+    if not H.is_tbl(response) or response.type ~= 'SUCCESS' then
+        error(response.message or '章节下载失败')
+    end
+
+    local content = response.body
+
+    if type(content) ~= "string" then
+        content = tostring(content)
+    end
+
+    local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index)
+
+    local first_line = string.match(content, "(.-)\n") or content
+
+    if string.find(first_line, "<img") then
+
+        local img_sources = self:getProxyImageUrl(bookUrl, content)
+        if H.is_tbl(img_sources) and #img_sources > 0 then
+
+            filePath = filePath .. '.cbz'
+            local status, err = pcall(function()
+                pDownload_CreateCBZ(filePath, img_sources)
+            end)
+
+            if not status then
+                error('CreateCBZ err:' .. tostring(err))
+            end
+
+            if chapter.is_pre_loading == true then
+                dbg.v('Cache task completed chapter.title:', chapter_title)
+            end
+
+            chapter.cacheFilePath = filePath
+            return chapter
+
+        else
+            error('生成图片列表失败')
+        end
+
+    else
+
+        if string.match((first_line or ''):lower(), "%.x?html$") then
+            -- epub
+            local html_url = self:getProxyEpubUrl(bookUrl, first_line)
+            if html_url == nil or html_url == '' then
+                error('转换失败')
+            end
+            local status, err = pcall(pDownload_Image, html_url)
+            if not status then
+                error('下载失败:' .. tostring(err))
+            end
+            local ext = first_line:match("[^%.]+$") or "html"
+            content = err['data'] or '下载失败'
+            filePath = filePath .. '.' .. ext
+
+        else
+
+            filePath = filePath .. '.txt'
+
+            content = table.concat({tostring(chapter_title), "\r\n", content})
+        end
+
+        if util.fileExists(filePath) then
+            if chapter.is_pre_loading == true then
+
+                error('存在目标任务,本次任务取消')
+            else
+
+                chapter.cacheFilePath = filePath
+                return chapter
+            end
+        end
+
+        if util.writeToFile(content, filePath, true) then
+
+            if chapter.is_pre_loading == true then
+                dbg.v('Cache task completed chapter.title', chapter_title)
+            end
+
+            chapter.cacheFilePath = filePath
+            return chapter
+        else
+
+            error('下载content写入失败')
+        end
+    end
+
+end
+
 function M:getCacheChapterFilePath(chapter)
 
     if not H.is_tbl(chapter) or chapter.book_cache_id == nil or chapter.chapters_index == nil then
@@ -335,67 +957,6 @@ function M:findNextChapter(current_chapter, is_downloaded)
 
 end
 
-local function convertToGrayscale(image_data)
-    local Png = require("lib/Png")
-    return Png.processImage(Png.toGrayscale, image_data, 1)
-
-end
-
-local function get_img_src(html)
-    if not H.is_str(html) then
-        return {}
-    end
-    local img_sources = {}
-    -- local img_pattern = '<img[^>]*src%s*=%s*(["\']?)(.-)%1[^>]*>'
-    local img_pattern = "<img[^>]*src%s*=%s*([\"']?)([^%s\"'>]+)%1[^>]*>"
-    local quote, nsrc = html:match(img_pattern)
-    if nsrc then
-        for _, src in html:gmatch(img_pattern) do
-            if src ~= nil and src ~= "" then
-                table.insert(img_sources, src)
-            end
-        end
-    end
-    return img_sources
-end
-
-local function get_extension_from_content_type(content_type)
-    local extensions = {
-        ["image/jpeg"] = "jpg",
-        ["image/png"] = "png",
-        ["image/gif"] = "gif",
-        ["image/bmp"] = "bmp",
-        ["image/webp"] = "webp",
-        ["image/tiff"] = "tiff",
-        ["image/svg+xml"] = "svg"
-    }
-
-    return extensions[content_type]
-end
-
-local function get_image_format_head8(image_data)
-    if not H.is_str(image_data) then
-        return
-    end
-
-    local header = image_data:sub(1, 8)
-
-    if header:sub(1, 3) == "\xFF\xD8\xFF" then
-        return "jpg"
-    elseif header:sub(1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then
-        return "png"
-    elseif header:sub(1, 4) == "\x47\x49\x46\x38" then
-        return "gif"
-    elseif header:sub(1, 2) == "\x42\x4D" then
-        return "bmp"
-    elseif header:sub(1, 4) == "\x52\x49\x46\x46" then
-        return "webp"
-    else
-
-        return nil
-    end
-end
-
 function M:getProxyCoverUrl(coverUrl)
     if not H.is_str(coverUrl) then
         return coverUrl
@@ -421,14 +982,15 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
     end
 end
 
-function M:getProxyImageUrl(bookUrl, picUrls)
+function M:getProxyImageUrl(bookUrl, content)
 
-    if not H.is_tbl(picUrls) then
+    local picUrls = get_img_src(content)
+    if not H.is_tbl(picUrls) or #picUrls < 1 then
         return {}
     end
+
     local new_porxy_picurls = {}
 
-    local width = Device.screen:getWidth() or 800
     local legado_server = self.settings_data.data['legado_server']
 
     if legado_server:match("/reader3$") then
@@ -444,6 +1006,7 @@ function M:getProxyImageUrl(bookUrl, picUrls)
             table.insert(new_porxy_picurls, new_url)
         end
     else
+        local width = Device.screen:getWidth() or 800
         for i, img_src in ipairs(picUrls) do
             local new_url = legado_server .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' ..
                                 util.urlEncode(img_src) .. '&width=' .. width
@@ -454,124 +1017,46 @@ function M:getProxyImageUrl(bookUrl, picUrls)
     return new_porxy_picurls
 end
 
-local function pDownload_Image(img_src, timeout)
-
-    local ltn12 = require("ltn12")
-    local http = require("socket.http")
-    local socketutil = require("socketutil")
-
-    timeout = timeout or 600
-
-    local imageData = {}
-
-    socketutil:set_timeout(timeout, timeout)
-
-    local success, statusCode, headers, statusLine = http.request {
-        url = img_src,
-        sink = ltn12.sink.table(imageData),
-        create = socketutil.tcp
-    }
-
-    socketutil:reset_timeout()
-
-    if not success then
-        error("Request failed:" .. (statusLine or "Unknown error"))
-    end
-
-    if statusCode ~= 200 then
-        error("Download failed, HTTP status code:" .. tostring(statusCode))
-    end
-
-    local merge_image_data = table.concat(imageData)
-
-    local extension = ''
-
-    local contentType = headers["content-type"]
-
-    if contentType and contentType:match("^image/") then
-        extension = get_extension_from_content_type(contentType) or 'bin'
+function M:pDownload_Image(img_src, timeout)
+    local status, err = pcall(pDownload_Image, img_src, timeout)
+    if status and H.is_tbl(err) and err['data'] then
+        return wrap_response(err)
     else
-        extension = get_image_format_head8(merge_image_data) or 'bin'
+        return wrap_response(nil, H.errorHandler(err))
     end
-
-    return {
-        data = merge_image_data,
-        ext = extension
-    }
 end
 
-local function pDownload_CreateCBZ(filePath, img_sources)
+function M:getChapterImgList(chapter)
+    local chapters_index = chapter.chapters_index
+    local bookUrl = chapter.bookUrl
+    local down_chapters_index = chapters_index
 
-    dbg.v('CreateCBZ strat:')
-
-    if not filePath or not H.is_tbl(img_sources) then
-        error('Cbz generates input parameters error')
+    if not H.is_str(bookUrl) and not H.is_str(chapter.book_cache_id) then
+        return
     end
 
-    local is_convertToGrayscale = false
-
-    local cbz_path_tmp = filePath .. '.downloading'
-
-    if util.fileExists(cbz_path_tmp) then
-        if M:isExtractingInBackground() == true then
-            error('There are other threads downloading, cancelled')
-        else
-            util.removeFile(cbz_path_tmp)
-        end
-    end
-
-    local ZipWriter = require("ffi/zipwriter")
-
-    local cbz = ZipWriter:new{}
-    if not cbz:open(cbz_path_tmp) then
-        error('CreateCBZ cbz:open err')
-    end
-    cbz:add("mimetype", "application/vnd.comicbook+zip", true)
-
-    local no_compression = true
-
-    for i, img_src in ipairs(img_sources) do
-
-        dbg.v('Download_Image start', i, img_src)
-        local status, err = pcall(pDownload_Image, img_src)
-
-        if status and H.is_tbl(err) and err['data'] then
-
-            local imgdata = err['data']
-            local img_extension = err['ext']
-
-            local img_name = i .. '.' .. img_extension
-
-            if is_convertToGrayscale == true and img_extension == 'png' then
-                local success, imgdata_new = convertToGrayscale(imgdata)
-                if success ~= true then
-
-                    goto continue
+    return self:HandleResponse(self:pGetChapterContent({
+        bookUrl = bookUrl,
+        chapters_index = down_chapters_index
+    }), function(data)
+        if H.is_str(data) then
+            local img_sources = self:getProxyImageUrl(bookUrl, data)
+            if H.is_tbl(img_sources) and #img_sources > 0 then
+                if chapter.isRead ~= true then
+                    self.dbManager:updateIsRead(chapter, true, true)
                 end
-                imgdata = imgdata_new.data
+                return img_sources
+            else
+                logger.dbg('获取图片列表失败 ')
+                return
             end
-
-            cbz:add(img_name, imgdata, no_compression)
-
         else
-            dbg.v('Download_Image err', tostring(err))
+            logger.dbg('返回数据格式出错')
+            return
         end
-        ::continue::
-    end
-
-    cbz:close()
-    dbg.v('CreateCBZ cbz:close')
-
-    if util.fileExists(filePath) ~= true then
-        os.rename(cbz_path_tmp, filePath)
-    else
-        if util.fileExists(cbz_path_tmp) == true then
-            util.removeFile(cbz_path_tmp)
-        end
-        error('exist target file, cancelled')
-    end
-
-    return filePath
+    end, function(err_msg)
+        return
+    end)
 end
 
 function M:DownAllChapter(chapters)
@@ -662,7 +1147,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
 
                             if not status then
                                 dbg.log('An error occurred when cleaning the download task to write to the database:',
-                                H.errorHandler(err))
+                                    H.errorHandler(err))
                             end
                         end
                     end
@@ -756,7 +1241,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
         return true
 
     end, nil, true)
-    --logger.info('pid', task_pid, ffiUtil.isSubProcessDone(task_pid))
+
     if not task_pid then
         dbg.log("Multithreaded task creation failed:" .. tostring(err))
         pcall(function()
@@ -813,12 +1298,31 @@ function M:getcompleteReadAheadChapters(current_chapter)
     return self.dbManager:getcompleteReadAheadChapters(current_chapter)
 end
 
-function M:setBooksTopUp(bookCacheId)
-    if not H.is_str(bookCacheId) then
-        return
-    end
+function M:setBooksTopUp(bookCacheId, sortOrder)
     local bookShelfId = self:getServerPathCode()
-    return self.dbManager:setBooksTopUp(bookShelfId, bookCacheId)
+    if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
+        return wrap_response(nil, '参数错误')
+    end
+
+    local set_sortorder = 0
+    local where_sortorder = {
+        _where = ' > 0'
+    }
+    if sortOrder == 0 then
+        set_sortorder = {
+            _set = "= strftime('%s', 'now')"
+        }
+        where_sortorder = 0
+    end
+
+    self.dbManager:dynamicUpdate('books', {
+        sortOrder = set_sortorder
+    }, {
+        bookCacheId = bookCacheId,
+        bookShelfId = bookShelfId,
+        sortOrder = where_sortorder
+    })
+    return wrap_response(true)
 end
 
 function M:getBookShelfCache()
@@ -826,14 +1330,26 @@ function M:getBookShelfCache()
     return self.dbManager:getAllBooksByUI(bookShelfId)
 end
 
-function M:getBookSelfLastUpdateTime()
+function M:onBookOpening(bookCacheId)
+    if not H.is_str(bookCacheId) then
+        return
+    end
     local bookShelfId = self:getServerPathCode()
-    return self.dbManager:getBookSelfLastUpdateTime(bookShelfId)
+    return self.dbManager:dynamicUpdate('books', {
+        sortOrder = {
+            _set = "= strftime('%s', 'now')"
+        }
+    }, {
+        bookCacheId = bookCacheId,
+        bookShelfId = bookShelfId,
+        sortOrder = {
+            _where = " > 0"
+        }
+    })
 end
 
-function M:getBookLastUpdateTime(bookCacheId)
-    local bookShelfId = self:getServerPathCode()
-    return self.dbManager:getBookLastUpdateTime(bookShelfId, bookCacheId)
+function M:getLastReadChapter(bookCacheId)
+    return self.dbManager:getLastReadChapter(bookCacheId)
 end
 
 function M:getChapterLastUpdateTime(bookCacheId)
@@ -855,177 +1371,6 @@ function M:getBookChapterPlusCache(bookCacheId)
     local bookShelfId = self:getServerPathCode()
     local chapter_data = self.dbManager:getAllChapters(bookCacheId)
     return chapter_data
-end
-
-function M:refreshChaptersCache(bookinfo, last_refresh_time)
-
-    if last_refresh_time and os.time() - last_refresh_time < 2 then
-        dbg.v('ui_refresh_time prevent refreshChaptersCache')
-        return wrap_response(nil, '处理中')
-    end
-
-    local book_cache_id = bookinfo.cache_id
-    local bookUrl = bookinfo.bookUrl
-
-    local legado_server = self.settings_data.data['legado_server']
-
-    if not bookUrl or not H.is_str(book_cache_id) then
-        return wrap_response(nil, "获取目录参数错误")
-    end
-
-    local accessToken = nil
-    if self.settings_data.data.reader3_un ~= '' then
-        local status, err = self:_reader3Login()
-        if status ~= true then
-            return wrap_response(nil, tostring(err) or '接口鉴权出错')
-        else
-            accessToken = err
-        end
-    end
-
-    local status, err = pcall(function()
-        return requestJson({
-            url = table.concat({legado_server, '/getChapterList'}),
-            query_params = {
-                accessToken = accessToken,
-                url = bookUrl,
-                v = os.time()
-            },
-            timeout = 10
-        })
-    end)
-
-    if not status then
-        dbg.log(err)
-        return wrap_response(nil, '请求出错,请检查服务')
-    end
-
-    if H.is_tbl(err) and err.data == "NEED_LOGIN" and err.isSuccess == false then
-        self:resetReader3Token()
-        return wrap_response(nil, 'token过期,请再次操作,刷新并继续')
-    end
-
-    if not err or not H.is_tbl(err.data) then
-        return wrap_response(nil, err.errorMsg or "无效的服务器响应格式")
-    end
-
-    local response = err.data
-    status, err = pcall(function()
-        return self.dbManager:upsertChapters(book_cache_id, response)
-    end)
-
-    if not status then
-        dbg.log('refreshChaptersCache数据写入', tostring(err))
-        return wrap_response(nil, '数据写入出错,请重试')
-    end
-    return wrap_response(true)
-
-end
-
-function M:_reader3Login()
-    local cache_config = self:backgroundCacheConfig()
-    if H.is_str(cache_config.data.r3k) then
-        return true, cache_config.data.r3k
-    end
-    local legado_server = self.settings_data.data['legado_server']
-    local reader3_un = self.settings_data.data.reader3_un
-    local reader3_pwd = self.settings_data.data.reader3_pwd
-
-    if reader3_pwd == '' or reader3_un == '' or not H.is_str(reader3_un) or not H.is_str(reader3_pwd) then
-        return false, '认证信息设置不全'
-    end
-
-    local auth_info = {
-        username = reader3_un,
-        password = reader3_pwd,
-        code = "",
-        isLogin = true
-    }
-
-    local status, err = pcall(function()
-        return requestJsonAutoRedirect({
-            url = legado_server .. '/login?v=' .. os.time(),
-            body = auth_info,
-            method = 'POST',
-            timeout = 6
-        })
-    end)
-
-    if not status then
-        return false, err or '获取用户信息出错'
-    end
-
-    if not H.is_tbl(err) or not H.is_tbl(err.data) then
-        return false, err.errorMsg or "服务器返回了无效的数据结构"
-    end
-
-    if not H.is_str(err.data.accessToken) then
-        return false, '获取Token失败'
-    end
-
-    cache_config:saveSetting("r3k", err.data.accessToken):flush()
-
-    return true, err.data.accessToken
-end
-
-function M:refreshLibraryCache(last_refresh_time)
-
-    if last_refresh_time and os.time() - last_refresh_time < 2 then
-        dbg.v('ui_refresh_time prevent refreshChaptersCache')
-        return wrap_response(nil, '处理中')
-    end
-
-    local bookShelfId = self:getServerPathCode()
-
-    local legado_server = self.settings_data.data['legado_server']
-
-    local accessToken = nil
-    if self.settings_data.data.reader3_un ~= '' then
-        local status, err = self:_reader3Login()
-        if status ~= true then
-            return wrap_response(nil, H.errorHandler(err))
-        else
-            accessToken = err
-        end
-    end
-
-    local status, err = pcall(function()
-        return requestJson({
-            url = legado_server .. '/getBookshelf',
-            timeout = 6,
-            query_params = {
-                refresh = 0,
-                accessToken = accessToken,
-                v = os.time()
-            }
-        })
-    end)
-
-    if not status then
-        dbg.log('refreshLibraryCache请求出错', tostring(err))
-        return wrap_response(nil, '请求出错,请检查服务后重试')
-    end
-
-    if H.is_tbl(err) and err.data == "NEED_LOGIN" and err.isSuccess == false then
-        self:resetReader3Token()
-        return wrap_response(nil, 'token过期,请再次操作,刷新并继续')
-    end
-    local response = err
-    if not response or not H.is_tbl(response.data) then
-
-        return wrap_response(nil, response.errorMsg or "服务器返回了无效的数据结构")
-    end
-
-    status, err = pcall(function()
-        return self.dbManager:upsertBooks(bookShelfId, response.data)
-    end)
-
-    if not status then
-        dbg.log('refreshLibraryCache数据写入', H.errorHandler(err))
-        return wrap_response(nil, '写入数据出错,请重试')
-    end
-
-    return wrap_response(true)
 end
 
 function M:closeDbManager()
@@ -1065,14 +1410,11 @@ function M:cleanAllBookCaches()
     return wrap_response(true)
 end
 
-function M:MarkReadChapter(chapter)
+function M:MarkReadChapter(chapter, is_update_timestamp)
     local chapters_index = chapter.chapters_index
-
     chapter.isRead = not chapter.isRead
-    self.dbManager:updateIsRead(chapter, chapter.isRead)
-
+    self.dbManager:updateIsRead(chapter, chapter.isRead, is_update_timestamp)
     return wrap_response(true)
-
 end
 
 function M:ChangeChapterCache(chapter)
@@ -1253,77 +1595,17 @@ function M:check_the_background_download_job(chapter_down_tasks)
 end
 
 function M:isExtractingInBackground(task_pid)
-
-    if util.fileExists(self.task_pid_file) then
-        if H.isFileOlderThan(self.task_pid_file, 24 * 60 * 60) then
-            util.removeFile(self.task_pid_file)
-
-            return false
-        else
-            return true
-        end
-    else
-
+    -- ffiUtil.isSubProcessDone(task_pid)
+    local pid_file = self.task_pid_file
+    if not util.fileExists(pid_file) then
         return false
     end
-end
-
-function M:saveBookProgress(chapter)
-    local chapter_index = chapter.chapters_index
-
-    local legado_server = self.settings_data.data['legado_server']
-
-    local accessToken = nil
-    if self.settings_data.data.reader3_un ~= '' then
-        local status, err = self:_reader3Login()
-        if status ~= true then
-            return wrap_response(nil, H.errorHandler(err))
-        else
-            accessToken = err
-        end
+    if H.isFileOlderThan(pid_file, 24 * 60 * 60) then
+        util.removeFile(pid_file)
+        return false
     end
 
-    local msTime = time.to_ms(time.now())
-    local mark_chapter = {
-        name = chapter.name,
-        author = chapter.author,
-        durChapterPos = 0,
-        durChapterIndex = chapter_index,
-        durChapterTime = msTime,
-        durChapterTitle = chapter.title or '',
-        index = chapter_index,
-        url = chapter.bookUrl
-    }
-
-    local status, err = pcall(function()
-        return requestJsonAutoRedirect({
-            url = table.concat({legado_server, '/saveBookProgress'}),
-            body = mark_chapter,
-            query_params = {
-                accessToken = accessToken,
-                v = os.time()
-            },
-            method = 'POST',
-            timeout = 3
-        })
-    end)
-
-    if not status or not H.is_tbl(err) then
-        dbg.log('Reading progress synchronization failed:', tostring(err))
-        return wrap_response(nil, H.errorHandler(err))
-    end
-
-    if H.is_tbl(err) and err.data == "NEED_LOGIN" and err.isSuccess == false then
-        self:resetReader3Token()
-        return wrap_response(nil, 'token过期,请再次操作,刷新并继续')
-    end
-
-    if err and err.isSuccess == true then
-        return wrap_response(true)
-    else
-        return wrap_response(nil, err.errorMsg or '出错')
-    end
-
+    return true
 end
 
 function M:after_reader_chapter_show(chapter)
@@ -1341,6 +1623,9 @@ function M:after_reader_chapter_show(chapter)
 
         if chapter.isRead ~= true then
             update_state.isRead = true
+            update_state.lastUpdated = {
+                _set = "= strftime('%s', 'now')"
+            }
         end
         self.dbManager:transaction(function()
             self.dbManager:dynamicUpdateChapters(chapter, update_state)
@@ -1386,165 +1671,6 @@ function M:after_reader_chapter_show(chapter)
     chapter.isDownLoaded = true
 end
 
-function M:pDownloadChapter(chapter, message_dialog, is_recursive)
-
-    local bookUrl = chapter.bookUrl
-    local book_cache_id = chapter.book_cache_id
-    local chapters_index = chapter.chapters_index
-    local chapter_title = chapter.title or ''
-    local down_chapter_index = chapter.chapters_index
-
-    local function message_show(msg)
-        if message_dialog then
-            message_dialog.text = msg
-            UIManager:setDirty(message_dialog, "ui")
-            UIManager:forceRePaint()
-        end
-    end
-
-    if bookUrl == nil or not book_cache_id then
-        error('pDownloadChapter input parameters err' .. tostring(bookUrl) .. tostring(book_cache_id))
-    end
-
-    local cache_chapter = self:getCacheChapterFilePath(chapter)
-    if cache_chapter and cache_chapter.cacheFilePath then
-        return cache_chapter
-    end
-
-    local legado_server = self.settings_data.data['legado_server']
-
-    local accessToken = nil
-    if H.is_str(self.settings_data.data.reader3_un) and self.settings_data.data.reader3_un ~= '' then
-        local status, err = self:_reader3Login()
-        if status ~= true then
-            error(err or '接口鉴权出错')
-        else
-            accessToken = err
-        end
-    end
-
-    local status, err = pcall(function()
-        return requestJson({
-            url = table.concat({legado_server, '/getBookContent'}),
-            query_params = {
-                accessToken = accessToken,
-                url = bookUrl,
-                index = down_chapter_index,
-                v = os.time()
-            },
-            timeout = 12
-        })
-    end)
-
-    if not status then
-        error(type(err) == 'string' and err or 'getBookContent数据请求出错')
-    end
-
-    local response = err
-
-    if is_recursive ~= true and H.is_tbl(response) and response.data == "NEED_LOGIN" and response.isSuccess == false then
-        self:resetReader3Token()
-        self:pDownloadChapter(chapter, message_dialog, true)
-    end
-
-    if response and response.data then
-        local content = response.data
-
-        if type(content) ~= "string" then
-            content = tostring(content)
-        end
-
-        local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index)
-
-        local first_line = string.match(content, "(.-)\n") or content
-
-        if string.find(first_line, "<img") then
-            -- img
-            local is_img_sources = get_img_src(content)
-
-            if type(is_img_sources) == 'table' and #is_img_sources > 0 then
-
-                local img_sources = self:getProxyImageUrl(bookUrl, is_img_sources)
-
-                filePath = filePath .. '.cbz'
-
-                if img_sources and #img_sources > 0 then
-
-                    local status, err = pcall(function()
-                        pDownload_CreateCBZ(filePath, img_sources)
-                    end)
-
-                    if not status then
-                        error('CreateCBZ err:' .. tostring(err))
-                    end
-
-                    if chapter.is_pre_loading == true then
-                        dbg.v('Cache task completed chapter.title:', chapter_title)
-                    end
-
-                    chapter.cacheFilePath = filePath
-                    return chapter
-
-                else
-                    error('生成图片列表失败')
-                end
-            else
-                error('提取图片链接失败')
-            end
-        else
-
-            if string.match((first_line or ''):lower(), "%.x?html$") then
-                -- epub
-                local html_url = self:getProxyEpubUrl(bookUrl, first_line)
-                if html_url == nil or html_url == '' then
-                    error('转换失败')
-                end
-                local status, err = pcall(pDownload_Image, html_url)
-                if not status then
-                    error('下载失败:' .. tostring(err))
-                end
-                local ext = first_line:match("[^%.]+$") or "html"
-                content = err['data'] or '下载失败'
-                filePath = filePath .. '.' .. ext
-
-            else
-                -- txt
-                filePath = filePath .. '.txt'
-
-                content = table.concat({tostring(chapter_title), "\r\n", content})
-            end
-
-            if util.fileExists(filePath) then
-                if chapter.is_pre_loading == true then
-
-                    error('存在目标任务,本次任务取消')
-                else
-
-                    chapter.cacheFilePath = filePath
-                    return chapter
-                end
-            end
-
-            if util.writeToFile(content, filePath, true) then
-
-                if chapter.is_pre_loading == true then
-                    dbg.v('Cache task completed chapter.title', chapter_title)
-                end
-
-                chapter.cacheFilePath = filePath
-                return chapter
-            else
-
-                error('下载content写入失败')
-            end
-        end
-
-    else
-        error(response.errorMsg or '章节下载失败')
-    end
-
-end
-
 function M:downloadChapter(chapter, message_dialog)
 
     local bookCacheId = chapter.book_cache_id
@@ -1558,8 +1684,8 @@ function M:downloadChapter(chapter, message_dialog)
         return self:pDownloadChapter(chapter, message_dialog)
     end)
     if not status then
-        dbg.log(err)
-        return wrap_response(nil, "下载章节失败,请检查服务" .. H.errorHandler(err))
+        logger.err('下载章节失败:', err)
+        return wrap_response(nil, "下载章节失败:" .. H.errorHandler(err))
     end
     return wrap_response(err)
 
@@ -1645,77 +1771,9 @@ function M:setEndpointUrl(new_setting_url)
     self.settings_data.data.server_address_md5 = md5(parsed.host)
     self:saveSettings()
 
+    self:loadSpore()
+
     return wrap_response(self.settings_data.data)
-end
-
-function M:searchBookSource(search_text, lastIndex)
-
-    if not search_text or search_text == '' then
-        return wrap_response(nil, "输入参数错误")
-    end
-    lastIndex = lastIndex or 0
-    local legado_server = self.settings_data.data['legado_server']
-
-    if string.find(string.lower(legado_server), "/reader3/") then
-        local status, err = pcall(function()
-            return requestJson({
-                url = legado_server .. '/searchBookSource?name=' .. search_text .. '&lastIndex=' .. lastIndex,
-                query_params = {
-                    name = search_text,
-                    lastIndex = lastIndex
-                },
-                timeout = 20
-            })
-        end)
-        if status then
-            return err
-        end
-    else
-        return wrap_response(nil, "仅支持服务器版本,其他请在app操作")
-    end
-end
-
-function M:deleteBook(bookinfo)
-    local status, err = pcall(function()
-        return requestJson({
-            url = legado_server .. '/deleteBook',
-            body = bookinfo,
-            method = 'POST',
-            timeout = 5
-        })
-    end)
-    if not status then
-        return wrap_response(nil, H.errorHandler(err))
-    end
-    return wrap_response(true)
-end
-
-function M:addBookToLibrary(bookinfo)
-    local legado_server = self.settings_data.data['legado_server']
-
-    local nowTime = time.now()
-    bookinfo.time = time.to_ms(nowTime)
-
-    local status, err = pcall(function()
-        return requestJson({
-            url = legado_server .. '/saveBook',
-            body = bookinfo,
-            method = 'POST',
-            timeout = 5
-        })
-    end)
-    if not status then
-        return wrap_response(nil, H.errorHandler(err))
-    end
-
-    local response = err
-
-    if not response or response.isSuccess ~= true then
-        return wrap_response(nil, response.errorMsg or "无效的服务器响应格式")
-    end
-
-    return wrap_response(nil, "暂不支持,请从阅读客户端操作")
-
 end
 
 function M:onExitClean()
@@ -1732,7 +1790,7 @@ function M:onExitClean()
     return true
 end
 
-setmetatable_gc(M, {
+require("ffi/__gc")(M, {
     __gc = function(t)
         M:onExitClean()
     end

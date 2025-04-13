@@ -31,14 +31,10 @@ function M:show(options)
         if ReaderRolling.c8eeb679b ~= true then
             M.overriderollingHandler()
         end
-        
         ReaderUI.instance:switchDocument(options.path, true)
-
     else
-
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
         ReaderUI:showReader(options.path, nil, true)
-
     end
 
     self.is_showing = true
@@ -59,7 +55,7 @@ function M:hookWithPriorityOntoReaderUiEvents(ui)
 
     assert(ui.name == "ReaderUI", "expected to be inside ReaderUI")
 
-    local eventListener = WidgetContainer:new({})
+    local eventListener = WidgetContainer:new{}
 
     eventListener.onEndOfBook = function()
 
@@ -79,7 +75,7 @@ end
 
 function M:addToMainMenu(menu_items)
     menu_items.go_back_to_legado = {
-        text = "返回 legado...",
+        text = "返回 Legado...",
         sorting_hint = "main",
         callback = function()
             self:onReturn()
@@ -91,6 +87,10 @@ function M:onReturn()
     self:closeReaderUi(function()
         self.on_return_callback()
     end)
+end
+
+function M:getIsShowing()
+    return self.is_showing
 end
 
 function M:closeReaderUi(done_callback)

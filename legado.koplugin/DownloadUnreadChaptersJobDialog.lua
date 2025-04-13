@@ -9,7 +9,7 @@ local logger = require('logger')
 --- @field show_parent unknown
 --- @field cancellation_requested boolean
 --- @field dismiss_callback fun():nil|nil
-local DownloadUnreadChaptersJobDialog = InputContainer:extend{
+local M = InputContainer:extend{
     show_parent = nil,
     modal = true,
     -- The `DownloadUnreadChapters` job.
@@ -21,7 +21,7 @@ local DownloadUnreadChaptersJobDialog = InputContainer:extend{
     job_inspection_interval = 1
 }
 
-function DownloadUnreadChaptersJobDialog:init()
+function M:init()
     local widget, _ = self:pollAndCreateTextWidget()
     self[1] = widget
 end
@@ -43,7 +43,7 @@ local function overrideInfoMessageDismissHandler(widget, new_dismiss_handler)
     end
 end
 
-function DownloadUnreadChaptersJobDialog:pollAndCreateTextWidget()
+function M:pollAndCreateTextWidget()
     local state = self.job:poll()
     local message = '正在下载章节'
 
@@ -90,13 +90,13 @@ function DownloadUnreadChaptersJobDialog:pollAndCreateTextWidget()
     return widget, is_finished
 end
 
-function DownloadUnreadChaptersJobDialog:show()
+function M:show()
     UIManager:show(self)
 
     UIManager:nextTick(self.updateProgress, self)
 end
 
-function DownloadUnreadChaptersJobDialog:updateProgress()
+function M:updateProgress()
     -- Unschedule any remaining update calls we might have.
     UIManager:unschedule(self.updateProgress)
 
@@ -118,14 +118,14 @@ function DownloadUnreadChaptersJobDialog:updateProgress()
     end
 end
 
-function DownloadUnreadChaptersJobDialog:onCancellationRequested()
+function M:onCancellationRequested()
     self.job:requestCancellation()
     self.cancellation_requested = true
 
     UIManager:nextTick(self.updateProgress, self)
 end
 
-function DownloadUnreadChaptersJobDialog:onDismiss()
+function M:onDismiss()
     UIManager:close(self)
 
     if self.dismiss_callback ~= nil then
@@ -133,4 +133,4 @@ function DownloadUnreadChaptersJobDialog:onDismiss()
     end
 end
 
-return DownloadUnreadChaptersJobDialog
+return M

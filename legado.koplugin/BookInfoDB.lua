@@ -33,7 +33,7 @@ local function custom_concat(tbl, sep)
     return table.concat(result, sep)
 end
 
-local BOOKINFO_DB_VERSION = 20250320
+local BOOKINFO_DB_VERSION = 20250328
 
 local BOOKINFO_DB_SCHEMA = [[
 
@@ -77,43 +77,28 @@ CREATE TABLE IF NOT EXISTS chapters (
     chapterIndex INTEGER NOT NULL,    
     title TEXT DEFAULT '',             
     
-    isVolume INTEGER, 
+    isVolume INTEGER DEFAULT 0, 
     
     
     isRead INTEGER DEFAULT 0,       
     cacheFilePath TEXT DEFAULT NUll,   
     content TEXT DEFAULT NUll,          
-    lastUpdated INTEGER DEFAULT (strftime('%s', 'now')), 
+    lastUpdated INTEGER DEFAULT 0, 
 
     
     UNIQUE (bookCacheId, chapterIndex)
 );
 
-
-
 CREATE INDEX IF NOT EXISTS idx_book_main ON books (bookShelfId, bookCacheId, isEnabled);
 CREATE INDEX IF NOT EXISTS idx_books_bookcacheid ON books (bookCacheId);
 CREATE INDEX IF NOT EXISTS idx_books_bookCacheId_isenabled ON books (bookCacheId, isEnabled);
 CREATE INDEX IF NOT EXISTS idx_chapter_basic ON chapters (bookCacheId, chapterIndex);
-CREATE INDEX IF NOT EXISTS idx_chapters_book_cacheid_chapterindex_desc ON chapters (bookCacheId, chapterIndex DESC);
-CREATE INDEX IF NOT EXISTS idx_chapters_book_cacheid_chapterindex_asc ON chapters (bookCacheId, chapterIndex ASC);
-CREATE INDEX IF NOT EXISTS idx_book_sortorder ON books ( sortOrder ASC );
-CREATE INDEX IF NOT EXISTS idx_chapter_lastupdated ON chapters (lastUpdated DESC);
+CREATE INDEX IF NOT EXISTS idx_chapters_book_cacheid_chapterindex ON chapters (bookCacheId, chapterIndex);
+CREATE INDEX IF NOT EXISTS idx_book_sortorder_Lastread ON books ( sortOrder );
 CREATE INDEX IF NOT EXISTS idx_chapters_chapterindex ON chapters (chapterIndex);
 CREATE INDEX IF NOT EXISTS idx_chapters_cachefilepath ON chapters (cacheFilePath);
 CREATE INDEX IF NOT EXISTS idx_chapters_content_cache ON chapters(content, cacheFilePath);
-
-
-
-CREATE TRIGGER IF NOT EXISTS update_books_timestamp
-AFTER UPDATE ON books
-FOR EACH ROW
-WHEN NEW.totalChapterNum IS NOT OLD.totalChapterNum
-BEGIN
-    UPDATE books
-    SET lastUpdated = strftime('%s', 'now')
-    WHERE id = OLD.id;
-END;
+CREATE INDEX IF NOT EXISTS idx_Lastread_chapters ON chapters (lastUpdated);
 ]]
 
 function M:new(o)
@@ -215,7 +200,6 @@ end
 
 function M:closeDB()
     if not self.isConnected or not self.db then
-        dbg.log("Database is not connected, skipping close.")
         return
     end
 
@@ -223,7 +207,7 @@ function M:closeDB()
         self.db:close()
     end)
     if not success then
-       dbg.log("Error closing database: " .. tostring(err))
+        dbg.log("Error closing database: " .. tostring(err))
     end
     self.db = nil
     self.isConnected = false
@@ -489,7 +473,7 @@ function M:safe_rows(sql, params, fetch_size)
     end
 end
 
-function M:upsertBooks(bookShelfId, legado_data)
+function M:upsertBooks(bookShelfId, legado_data, isUpdate)
     if not H.is_str(bookShelfId) or not H.is_tbl(legado_data) then
         dbg.log('BookInfoDB:upsertBooks Incorrect input parameters')
         return false
@@ -542,22 +526,27 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
     totalChapterNum = CASE WHEN excluded.totalChapterNum != books.totalChapterNum THEN excluded.totalChapterNum ELSE books.totalChapterNum END,
     btype = CASE WHEN excluded.btype != books.btype THEN excluded.btype ELSE books.btype END,
     isEnabled = CASE WHEN excluded.isEnabled != books.isEnabled THEN excluded.isEnabled ELSE books.isEnabled END,
-    kind = CASE WHEN excluded.kind != books.kind THEN excluded.kind ELSE books.kind END;    
+    kind = CASE WHEN excluded.kind != books.kind THEN excluded.kind ELSE books.kind END, 
+    lastUpdated = CASE WHEN (
+    excluded.bookUrl != books.bookUrl OR
+    excluded.wordCount != books.wordCount
+) THEN strftime('%s', 'now') ELSE books.lastUpdated END
     ]]
 
     local batch_data = {}
     for index, book in ipairs(bookData) do
+
         batch_data[index] = {bookShelfId, book.cache_id, book.name, book.author, book.bookUrl, book.origin or "",
                              book.originName or "", book.originOrder or 0, book.durChapterIndex or 0,
                              book.durChapterPos or 0, book.durChapterTime or 0, book.durChapterTitle or "",
-                             book.wordCount or 0, book.coverUrl or "", book.intro or "", book.totalChapterNum or 0,
+                             book.wordCount or "", book.coverUrl or "", book.intro or "", book.totalChapterNum or 0,
                              book.type or 0, 1, book.kind or ''}
     end
 
     if batch_data and #batch_data > 0 then
-
-        self:getDB():exec("UPDATE books SET isEnabled = 0;")
-
+        if isUpdate ~= true then
+            self:getDB():exec("UPDATE books SET isEnabled = 0;")
+        end
         self:batch_insert(sql_stmt, batch_data, 0)
     end
 
@@ -605,7 +594,7 @@ function M:getAllBooksByUI(bookShelfId)
         return {}
     end
     local sql_stmt = [[
-    SELECT bookCacheId, name, author, originName FROM books WHERE isEnabled = 1 AND bookShelfId = ? ORDER BY sortOrder ASC;
+    SELECT bookCacheId, name, author, originName FROM books WHERE isEnabled = 1 AND bookShelfId = ? ORDER BY sortOrder = 0 DESC, sortOrder DESC;
     ]]
     local result = self:execute(sql_stmt, {bookShelfId})
     local books = {}
@@ -631,7 +620,7 @@ function M:getBookinfo(bookShelfId, bookCacheId)
     local sql_stmt = [[
     SELECT bookCacheId, name, author, bookUrl, origin, originName, 
     originOrder, durChapterIndex, durChapterPos, durChapterTime, durChapterTitle, 
-    wordCount, intro, totalChapterNum, kind FROM books WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId =? ;
+    wordCount, intro, totalChapterNum, kind, sortOrder, cacheExt FROM books WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId =? ;
     ]]
     local result = self:execute(sql_stmt, {bookShelfId, bookCacheId})
     local book = {}
@@ -642,9 +631,7 @@ function M:getBookinfo(bookShelfId, bookCacheId)
 
             book[i] = {
                 book_self_id = bookShelfId,
-
                 cache_id = row[1],
-
                 name = row[2],
                 author = row[3],
                 bookUrl = row[4],
@@ -653,12 +640,14 @@ function M:getBookinfo(bookShelfId, bookCacheId)
                 originOrder = tonumber(row[7]),
                 durChapterIndex = tonumber(row[8]),
                 durChapterPos = tonumber(row[9]),
-                durChapterTime = row[10],
+                durChapterTime = tonumber(row[10]),
                 durChapterTitle = row[11],
                 wordCount = row[12],
                 intro = row[13],
                 totalChapterNum = tonumber(row[14]),
-                kind = row[15]
+                kind = row[15],
+                sortOrder = tonumber(row[16]),
+                cacheExt = row[17]
             }
         end
     end
@@ -737,8 +726,7 @@ ORDER BY c.chapterIndex ASC;
 
             chapters[i] = {
                 book_cache_id = bookCacheId,
-
-                index = tonumber(row[1]),
+                chapters_index = tonumber(row[1]),
                 title = row[2],
                 isRead = row[3] == 1,
                 cacheFilePath = row[4],
@@ -747,9 +735,9 @@ ORDER BY c.chapterIndex ASC;
                 author = row[6],
                 bookUrl = row[7],
                 durChapterIndex = tonumber(row[8]),
-                durChapterTime = row[9],
-                totalChapterNum = tonumber(row[10]),
-                chapters_index = tonumber(row[1])
+                durChapterTime = tonumber(row[9]),
+                totalChapterNum = tonumber(row[10])
+
             }
         end
     end
@@ -767,8 +755,7 @@ function M:getAllChaptersByUI(bookCacheId, is_desc_sort)
     c.title, 
     c.isRead, 
     c.cacheFilePath,
-    b.durChapterIndex,
-    strftime('%s', 'now') - b.lastUpdated AS updateIntervalTime 
+    b.durChapterIndex 
 FROM chapters AS c
 INNER JOIN books AS b
     ON c.bookCacheId = b.bookCacheId 
@@ -787,19 +774,14 @@ ORDER BY c.chapterIndex ]]
 
         for i = 1, #result, 1 do
             local row = result[i]
-            local chapters_index = tonumber(row[1])
-
+            local chapterIndex = tonumber(row[1])
             chapters[i] = {
-
-                index = chapters_index,
-
+                chapters_index = chapterIndex,
                 title = row[2],
                 isRead = row[3] == 1,
                 isDownLoaded = not not row[4],
                 durChapterIndex = tonumber(row[5]),
-                chapters_index = chapters_index,
-                cacheFilePath = row[4],
-                updateIntervalTime = row[6]
+                cacheFilePath = row[4]
             }
         end
     end
@@ -814,26 +796,19 @@ function M:getChapterCount(bookCacheId)
     return tonumber(totalChapterNum)
 end
 
-function M:getBookSelfLastUpdateTime(bookShelfId)
-    local sql_stmt = "SELECT MAX(lastUpdated) AS max_last_updated FROM books WHERE bookShelfId = '%s';"
-    sql_stmt = string.format(sql_stmt, bookShelfId)
-    local lastUpdated = self:getDB():rowexec(sql_stmt)
-    return tonumber(lastUpdated)
-end
-
-function M:getBookLastUpdateTime(bookShelfId, bookCacheId)
-    local sql_stmt = "SELECT lastUpdated FROM books WHERE bookShelfId = '%s' AND bookCacheId = '%s';"
-    sql_stmt = string.format(sql_stmt, bookShelfId, bookCacheId)
-    local ok, ret = pcall(function()
-        self:getDB():rowexec(sql_stmt)
-    end)
-
-    local lastUpdated = ret
-
-    if not ok then
-        lastUpdated = time.now()
+function M:getLastReadChapter(bookCacheId)
+    if not H.is_str(bookCacheId) then
+        return 0
     end
-
+    local sql_stmt = [[
+            SELECT  COALESCE(chapterIndex, 0) AS chapterIndex 
+FROM chapters
+WHERE lastUpdated IS NOT NULL AND bookCacheId = '%s'
+ORDER BY lastUpdated DESC
+LIMIT 1;
+    ]]
+    sql_stmt = string.format(sql_stmt, bookCacheId)
+    local lastUpdated = self:getDB():rowexec(sql_stmt)
     return tonumber(lastUpdated)
 end
 
@@ -888,13 +863,9 @@ WHERE
             local row = result[i]
 
             local chapterIndex = tonumber(row[1])
-            local totalChapterNum = tonumber(row[10])
-            local durChapterIndex = tonumber(row[8])
-
             chapter[i] = {
                 book_cache_id = bookCacheId,
-
-                index = chapterIndex,
+                chapters_index = chapterIndex,
                 title = row[2],
                 isRead = row[3] == 1,
                 cacheFilePath = row[4],
@@ -902,11 +873,9 @@ WHERE
                 name = row[5],
                 author = row[6],
                 bookUrl = row[7],
-                durChapterIndex = durChapterIndex,
-                durChapterTime = row[9],
-                totalChapterNum = totalChapterNum,
-
-                chapters_index = chapterIndex,
+                durChapterIndex = tonumber(row[8]),
+                durChapterTime = tonumber(row[9]),
+                totalChapterNum = tonumber(row[10]),
                 cacheExt = row[11]
             }
         end
@@ -1045,7 +1014,6 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
             local chapterIndex = tonumber(row[1])
             chapters[i] = {
                 book_cache_id = bookCacheId,
-                index = chapterIndex,
                 title = row[2],
                 bookUrl = row[3],
                 chapters_index = chapterIndex
@@ -1118,13 +1086,8 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
             local row = result[i]
 
             local chapterIndex = tonumber(row[1])
-            local totalChapterNum = tonumber(row[10])
-            local durChapterIndex = tonumber(row[8])
-
             chapter[i] = {
                 book_cache_id = bookCacheId,
-
-                index = chapterIndex,
                 title = row[2],
                 isRead = row[3] == 1,
                 cacheFilePath = row[4],
@@ -1132,9 +1095,9 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
                 name = row[5],
                 author = row[6],
                 bookUrl = row[7],
-                durChapterIndex = durChapterIndex,
-                durChapterTime = row[9],
-                totalChapterNum = totalChapterNum,
+                durChapterIndex = tonumber(row[8]),
+                durChapterTime = tonumber(row[9]), -- type cdata?
+                totalChapterNum = tonumber(row[10]),
                 chapters_index = chapterIndex,
                 cacheExt = row[11]
             }
@@ -1148,15 +1111,21 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
     return chapter[1]
 end
 
-function M:updateIsRead(chapter, isRead)
+function M:updateIsRead(chapter, isRead, is_update_timestamp)
     local bookCacheId = chapter.book_cache_id
     local chapterIndex = chapter.chapters_index
+    if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
+        return
+    end
     chapter.isRead = isRead
-
-    local sql_stmt = "UPDATE chapters SET isRead = ? WHERE bookCacheId = ? AND chapterIndex = ? ;"
-
-    local params = {isRead, bookCacheId, chapterIndex}
-    return self:execute(sql_stmt, params)
+    local update_state = {}
+    update_state.isRead = isRead
+    if is_update_timestamp == true then
+        update_state.lastUpdated = {
+            _set = "= strftime('%s', 'now')"
+        }
+    end
+    return self:dynamicUpdateChapters(chapter, update_state)
 end
 
 function M:updateDownloadState(chapter, is_downloaded)
@@ -1326,23 +1295,6 @@ function M:dynamicUpdateBooks(book, updateData)
     })
 end
 
-function M:setBooksTopUp(bookShelfId, bookCacheId)
-
-    self:dynamicUpdate('books', {
-        sortOrder = 1
-    }, {
-        bookShelfId = bookShelfId
-    })
-
-    self:dynamicUpdate('books', {
-        sortOrder = 0
-    }, {
-        bookCacheId = bookCacheId,
-        bookShelfId = bookShelfId
-    })
-    return true
-end
-
 function M:dynamicUpdate(tableName, updateData, conditions)
     if not H.is_tbl(updateData) or not H.is_str(tableName) then
         error('Error entering necessary parameters')
@@ -1354,15 +1306,15 @@ function M:dynamicUpdate(tableName, updateData, conditions)
     local param_count = 0
 
     for key, value in pairs(updateData) do
-
-        table.insert(set_clause, key .. " = ?")
-
         if value == '_NULL' then
-
-            value = self.nil_object()
+            table.insert(set_clause, string.format("%s = ?", key))
+            table.insert(params, self.nil_object())
+        elseif H.is_tbl(value) and H.is_str(value._set) then
+            table.insert(set_clause, table.concat({key, ' ', value._set}))
+        else
+            table.insert(set_clause, string.format("%s = ?", key))
+            table.insert(params, value)
         end
-
-        table.insert(params, value)
         param_count = param_count + 1
     end
 
@@ -1376,9 +1328,8 @@ function M:dynamicUpdate(tableName, updateData, conditions)
         for field, value in pairs(conditions) do
             if value == '_NULL' then
                 table.insert(where_parts, string.format("%s IS NULL", field))
-            elseif H.is_tbl(value) and not H.is_str(value._where) then
-
-                table.insert(where_parts, value._where)
+            elseif H.is_tbl(value) and H.is_str(value._where) then
+                table.insert(where_parts, table.concat({field, ' ', value._where}))
             else
                 table.insert(where_parts, string.format("%s = ?", field))
                 table.insert(params, value)
@@ -1395,6 +1346,7 @@ function M:dynamicUpdate(tableName, updateData, conditions)
 
     local sql_stmt = table.concat({"UPDATE ", tableName, " SET ", table.concat(set_clause, ", "), where_clause})
 
+    -- logger.info(sql_stmt)
     return self:execute(sql_stmt, params)
 end
 
