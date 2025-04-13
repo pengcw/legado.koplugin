@@ -244,7 +244,26 @@ end
 function LibraryView:openInstalledReadSource()
 
     local setting_data = Backend:getSettings()
+    local servers_history = setting_data.servers_history or {}
+    local setting_url = tostring(setting_data.setting_url)
+    local history_lines = {}
+    for k, _ in pairs(servers_history) do
+        if k ~= setting_url then table.insert(history_lines, tostring(k)) end
+    end
+    local servers_history_str = table.concat(history_lines, '\r\n')
+    local description = [[
+        (书架与接口地址关联，换地址原缓存信息会隐藏，建议静态IP或域名使用)
+        格式符合RFC3986，服务器版本需加/reader3
+        
+        示例:
+        → 手机APP     http://127.0.0.1:1122
+        → 服务器版    http://127.0.0.1:1122/reader3
+        → 带认证服务  https://username:password@127.0.0.1:1122/reader3
+    ]]
 
+    if #history_lines > 0 then 
+        description = description .. "\r\n历史记录:\r\n" .. servers_history_str
+    end
     MessageBox:input(nil, function(input_text)
         if input_text then
             local new_setting_url = util.trim(input_text)
@@ -257,15 +276,8 @@ function LibraryView:openInstalledReadSource()
         end
     end, {
         title = "设置阅读api接口地址",
-        input = tostring(setting_data.setting_url),
-        description = [[
-(书架与接口地址关联,换地址原缓存信息会隐藏,建议静态IP或域名使用)
-格式符合RFC3986,服务器版本需加/reader3
-例:手机app http://127.0.0.1:1122
-服务器版 http://127.0.0.1:1122/reader3
-服务器版有账号 
-https://username:password@127.0.0.1:1122/reader3
-]]
+        input = setting_url,
+        description = description
     })
 end
 
