@@ -301,6 +301,7 @@ function M:initialize()
             setting_url = 'http://127.0.0.1:1122',
             reader3_un = '',
             reader3_pwd = '',
+            servers_history = {},
             stream_image_view = false
         }
         self.settings_data:flush()
@@ -1404,9 +1405,11 @@ function M:cleanAllBookCaches()
     local bookShelfId = self:getServerPathCode()
     self.dbManager:clearBooks(bookShelfId)
     self:closeDbManager()
-    local books_cache = H.getTempDirectory()
-    ffiUtil.purgeDir(books_cache)
+    local books_cache_dir = H.getTempDirectory()
+    ffiUtil.purgeDir(books_cache_dir)
     H.getTempDirectory()
+    self.settings_data.data.servers_history = {}
+    self:saveSettings()
     return wrap_response(true)
 end
 
@@ -1769,6 +1772,10 @@ function M:setEndpointUrl(new_setting_url)
     self.settings_data.data.legado_server = clean_url
     self.settings_data.data.setting_url = new_setting_url
     self.settings_data.data.server_address_md5 = md5(parsed.host)
+    if not H.is_tbl(self.settings_data.data.servers_history) then 
+        self.settings_data.data.servers_history ={}
+    end
+    self.settings_data.data.servers_history[new_setting_url] = 1
     self:saveSettings()
 
     self:loadSpore()

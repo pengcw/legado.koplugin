@@ -1,8 +1,10 @@
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
+local Dispatcher = require("dispatcher")
 local UIManager = require("ui/uimanager")
-local _ = require("gettext")
 local logger = require("logger")
-
+local _ = require("gettext")
+local Backend = require("Backend")
+local BookReader = require("BookReader")
 local LibraryView = require("LibraryView")
 
 local Legado = WidgetContainer:extend({
@@ -10,8 +12,9 @@ local Legado = WidgetContainer:extend({
 })
 
 function Legado:init()
+    Backend:initialize()
     if self.ui.name == "ReaderUI" then
-        require("BookReader"):initializeFromReaderUI(self.ui)
+        BookReader:initializeFromReaderUI(self.ui)
     else
         self.ui.menu:registerToMainMenu(self)
     end
@@ -35,14 +38,11 @@ function Legado:openLibraryView()
     LibraryView:fetchAndShow()
 end
 
-local Dispatcher = require("dispatcher")
 function Legado:onDispatcherRegisterActions()
     Dispatcher:registerAction("show_legado_libraryview", {
         category = "none",
         event = "ShowLegadoLibraryView",
         title = _("Legado 书目"),
-        -- general = true,
-        -- separator=true,
         filemanager = true
     })
     Dispatcher:registerAction("return_legado_chapterlisting", {
@@ -53,5 +53,4 @@ function Legado:onDispatcherRegisterActions()
     })
 end
 
-require("Backend"):initialize()
 return Legado
