@@ -260,8 +260,11 @@ end
 M.errorHandler = function(err)
     err = tostring(err)
     -- remove stacktrace
-    err = err:gsub("\n.*", "")
-    return err
+    local detail = err:match("%.lua:%d+:%s*(.*)")
+    if not detail then
+        detail = err:match(".*%.lua:%d+:%s*(.*)")
+    end
+    return detail or err
 end
 
 M.isFileOlderThan = function(filepath, seconds)

@@ -75,7 +75,7 @@ ReaderRolling.c8eeb679b = true
 local ReadHistory = require("readhistory")
 local original_addItem = ReadHistory.addItem
 function ReadHistory:addItem(file, ts, no_flush)
-    if type(file) == 'string' and file:lower():find('/legado.cache/') then
+    if type(file) == 'string' and file:lower():find('/legado.cache/', 1, true) then
         return true
     end
     return original_addItem(self, file, ts, no_flush)

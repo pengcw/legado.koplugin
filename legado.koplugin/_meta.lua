@@ -1,8 +1,8 @@
 local _ = require("gettext")
 
 return {
-    name = _("legado阅读插件"),
-    fullname = _("legado阅读插件"),
-    description = _("legado api koreader reader!"),
-    version = 1.035
+    name = "legado阅读书库",
+    fullname = "legado阅读书库",
+    description = "reading Legado's book library plugin",
+    version = 1.048
 }
