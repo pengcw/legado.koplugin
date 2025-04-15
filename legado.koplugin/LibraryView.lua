@@ -9,6 +9,7 @@ local NetworkMgr = require("ui/network/manager")
 local Menu = require("libs/Menu")
 local Device = require("device")
 local T = ffiUtil.template
+local _ = require("gettext")
 
 local ChapterListing = require("ChapterListing")
 local Icons = require("libs/Icons")
@@ -248,9 +249,11 @@ function LibraryView:openInstalledReadSource()
     local setting_url = tostring(setting_data.setting_url)
     local history_lines = {}
     for k, _ in pairs(servers_history) do
-        if k ~= setting_url then table.insert(history_lines, tostring(k)) end
+        if k ~= setting_url then
+            table.insert(history_lines, tostring(k))
+        end
     end
-    local servers_history_str = table.concat(history_lines, '\r\n')
+
     local description = [[
         (书架与接口地址关联，换地址原缓存信息会隐藏，建议静态IP或域名使用)
         格式符合RFC3986，服务器版本需加/reader3
@@ -261,24 +264,49 @@ function LibraryView:openInstalledReadSource()
         → 带认证服务  https://username:password@127.0.0.1:1122/reader3
     ]]
 
-    if #history_lines > 0 then 
+    local dialog
+    local reset_callback
+    local history_cur = 0
+    if #history_lines > 0 then
+        local servers_history_str = table.concat(history_lines, '\r\n')
         description = description .. "\r\n历史记录:\r\n" .. servers_history_str
+        reset_callback = function()
+            history_cur = history_cur + 1
+            if history_cur > #history_lines then
+                history_cur = 1
+            end
+            dialog.button_table:getButtonById("reset"):enable()
+            dialog:refreshButtons()
+            return history_lines[history_cur]
+        end
     end
-    MessageBox:input(nil, function(input_text)
-        if input_text then
+    local save_callback = function(input_text)
+        if H.is_str(input_text) then
             local new_setting_url = util.trim(input_text)
-            Backend:HandleResponse(Backend:setEndpointUrl(new_setting_url), function(data)
-                Backend:show_notice("设置成功")
+            return Backend:HandleResponse(Backend:setEndpointUrl(new_setting_url), function(data)
                 self:onRefreshLibrary()
+                return true
             end, function(err_msg)
-                MessageBox:error('设置失败:', err_msg)
+                Backend:show_notice('设置失败:' .. tostring(err_msg))
+                return false
             end)
         end
-    end, {
+        Backend:show_notice('输入为空')
+        return false
+    end
+    dialog = MessageBox:input(nil, nil, {
         title = "设置阅读api接口地址",
         input = setting_url,
-        description = description
+        description = description,
+        save_callback = save_callback,
+        allow_newline = false,
+        reset_button_text = '填入历史',
+        reset_callback = reset_callback
     })
+    if H.is_func(reset_callback) then
+        dialog.button_table:getButtonById("reset"):enable()
+        dialog:refreshButtons()
+    end
 end
 
 function LibraryView:openMenu()
@@ -321,27 +349,39 @@ function LibraryView:openMenu()
         text = Icons.FA_TIMES .. ' ' .. "Clear All caches",
         callback = function()
             UIManager:close(dialog)
-            MessageBox:confirm('确认清空所有缓存书籍?', function(result)
-                if result then
-                    Backend:closeDbManager()
-                    MessageBox:loading("清除中", function()
-                        return Backend:cleanAllBookCaches()
-                    end, function(state, response)
-                        if state == true then
-                            Backend:HandleResponse(response, function(data)
-                                Backend:show_notice("已清除")
-                                self:onClose()
-                            end, function(err_msg)
-                                MessageBox:error('操作失败:', tostring(err_msg))
-                            end)
-                        end
-                    end)
-                end
-            end, {
-                ok_text = "清空",
-                cancel_text = "取消",
-                timeout = 5
+            MessageBox:confirm('请选择要执行的操作:', nil, {
+                no_ok_button = true,
+                other_buttons_first = true,
+                other_buttons = {{{
+                    text = '清除接口历史',
+                    callback = function()
+                        settings.servers_history = {}
+                        Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                            Backend:show_notice("清除成功")
+                        end, function(err_msg)
+                            MessageBox:error('操作失败:', err_msg)
+                        end)
+                    end
+                }}, {{
+                    text = '清除所有缓存',
+                    callback = function()
+                        Backend:closeDbManager()
+                        MessageBox:loading("清除中", function()
+                            return Backend:cleanAllBookCaches()
+                        end, function(state, response)
+                            if state == true then
+                                Backend:HandleResponse(response, function(data)
+                                    Backend:show_notice("已清除")
+                                    self:onClose()
+                                end, function(err_msg)
+                                    MessageBox:error('操作失败:', tostring(err_msg))
+                                end)
+                            end
+                        end)
+                    end
+                }}}
             })
+
         end
     }}, {{
         text = Icons.FA_QUESTION_CIRCLE .. ' ' .. "关于",
@@ -428,17 +468,9 @@ function LibraryView:openMenu()
 end
 
 function LibraryView:openSearchBooksDialog()
-    MessageBox:input("键入要搜索的书籍名称", function(input_text)
-        if input_text then
-            require("BookSourceResults"):searchAndShow(input_text, function()
-                self:onRefreshLibrary()
-            end)
-        end
-    end, {
-        title = '搜索书源',
-        input_hint = "剑来"
-    })
-
+    require("BookSourceResults"):searchAndShow(function()
+        self:onRefreshLibrary()
+    end)
 end
 
 function LibraryView:onClose()

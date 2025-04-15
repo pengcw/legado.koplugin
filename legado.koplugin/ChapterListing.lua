@@ -16,6 +16,7 @@ local Backend = require("Backend")
 local Icons = require("libs/Icons")
 local MessageBox = require("libs/MessageBox")
 local BookReader = require("BookReader")
+local StreamImageView = require("StreamImageView")
 local H = require("libs/Helper")
 
 local ChapterListing = Menu:extend{
@@ -181,7 +182,7 @@ function ChapterListing:onMenuChoice(item)
         end
         NetworkMgr:runWhenOnline(function()
             UIManager:nextTick(function()
-                require("StreamImageView"):fetchAndShow({
+                StreamImageView:fetchAndShow({
                     bookinfo = self.bookinfo,
                     chapter = chapter,
                     on_return_callback = ChapterListing.onReturnCallback
@@ -487,7 +488,11 @@ function ChapterListing:syncProgressShow(chapter)
     Backend:closeDbManager()
     MessageBox:loading("同步中 ", function()
         if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
-            Backend:saveBookProgress(chapter)
+            local response = Backend:saveBookProgress(chapter)
+            if not (type(response) == 'table' and response.type == 'SUCCESS') then
+                local message = (type(response) == 'table' and response.message) or "进度上传失败，请稍后重试"
+                return { type = 'ERROR', message = message }
+            end
         end
         return Backend:refreshLibraryCache(self.ui_refresh_time)
     end, function(state, response)
@@ -550,12 +555,20 @@ function ChapterListing:openMenu()
     }}, {{
         text = table.concat({Icons.FA_THUMB_TACK, " 拉取网络进度"}),
         callback = function()
+            if self.multilines_show_more_text == true then 
+                Backend:show_notice('章节列表为空')
+                return 
+            end
             UIManager:close(dialog)
             self:syncProgressShow()
         end
     }}, {{
         text = Icons.FA_DOWNLOAD .. " 缓存全部章节",
         callback = function()
+            if self.multilines_show_more_text == true then 
+                Backend:show_notice('章节列表为空')
+                return 
+            end
             UIManager:close(dialog)
             MessageBox:confirm("请确认缓存全部章节 (短时间大量下载有可能触发反爬)",
                 function(result)

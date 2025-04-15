@@ -3,7 +3,7 @@ local Device = require("device")
 local ffiUtil = require("ffi/util")
 local md5 = require("ffi/sha2").md5
 local dbg = require("dbg")
-
+local LuaSettings = require("luasettings")
 local socket_url = require("socket.url")
 local util = require("util")
 local time = require("ui/time")
@@ -245,15 +245,17 @@ function M:loadSpore()
     local Spore = require("Spore")
     local legadoSpec = require("libs/LegadoSpec")
     self.apiClient = Spore.new_from_lua(legadoSpec, {
-        base_url = self.settings_data.data.legado_server .. '/'
+        base_url = self.settings_data.data.server_address .. '/'
         -- base_url = 'http://eu.httpbin.org/'
     })
     package.loaded["Spore.Middleware.ForceJSON"] = {}
     require("Spore.Middleware.ForceJSON").call = function(args, req)
         -- req.env.HTTP_USER_AGENT = ""
+        req.headers = req.headers or {}
         req.headers["user-agent"] =
             "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
         return function(res)
+            res.headers = res.headers or {}
             res.headers["content-type"] = 'application/json'
             return res
         end
@@ -274,7 +276,7 @@ function M:loadSpore()
                     req.env.QUERY_STRING = accessToken
                 end
             else
-                logger.warn('Spore.Legado3Auth', '登录失败', token or 'nil')
+                logger.warn('Legado3Auth', '登录失败', token or 'nil')
             end
         end
 
@@ -288,16 +290,32 @@ function M:loadSpore()
 end
 
 function M:initialize()
-
-    local LuaSettings = require("luasettings")
     self.settings_data = LuaSettings:open(H.getUserSettingsPath())
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
 
-    if self.settings_data and not self.settings_data.data['legado_server'] then
+    -- 兼容历史版本 <1.038
+    if H.is_nil(self.settings_data.data.setting_url) and H.is_nil(self.settings_data.data.reader3_un) and
+        H.is_str(self.settings_data.data.legado_server) then
+        self.settings_data.data.setting_url = self.settings_data.data.legado_server
+    end
+    -- <1.049
+    if not self.settings_data.data.server_address and H.is_str(self.settings_data.data.legado_server) then
+        self.settings_data.data.server_address = self.settings_data.data.legado_server
+        if string.find(string.lower(self.settings_data.data.server_address), "/reader3$") then
+            self.settings_data.data.server_type = 2
+        else
+            self.settings_data.data.server_type = 1
+        end
+        self.settings_data.data.legado_server = nil
+        self.settings_data:flush()
+    end
+
+    if self.settings_data and not self.settings_data.data['server_address'] then
         self.settings_data.data = {
-            legado_server = 'http://127.0.0.1:1122',
             chapter_sorting_mode = "chapter_descending",
+            server_address = 'http://127.0.0.1:1122',
             server_address_md5 = 'f528764d624db129b32c21fbca0cb8d6',
+            server_type = 1,
             setting_url = 'http://127.0.0.1:1122',
             reader3_un = '',
             reader3_pwd = '',
@@ -305,12 +323,6 @@ function M:initialize()
             stream_image_view = false
         }
         self.settings_data:flush()
-    end
-
-    -- 兼容上个版本
-    if H.is_nil(self.settings_data.data.setting_url) and H.is_nil(self.settings_data.data.reader3_un) and
-        H.is_str(self.settings_data.data.legado_server) then
-        self.settings_data.data.setting_url = self.settings_data.data.legado_server
     end
 
     self:loadSpore()
@@ -327,7 +339,6 @@ function M:show_notice(msg, timeout)
 end
 
 function M:backgroundCacheConfig()
-    local LuaSettings = require("luasettings")
     return LuaSettings:open(H.getTempDirectory() .. '/cache.lua')
 end
 function M:resetReader3Token()
@@ -341,7 +352,7 @@ function M:_reader3Login()
     end
 
     local socketutil = require("socketutil")
-    local legado_server = self.settings_data.data['legado_server']
+    local server_address = self.settings_data.data['server_address']
     local reader3_un = self.settings_data.data.reader3_un
     local reader3_pwd = self.settings_data.data.reader3_pwd
 
@@ -388,7 +399,7 @@ end
 function M:legadoSporeApi(requestFunc, callback, opts, logName)
     local socketutil = require("socketutil")
 
-    local legado_server = self.settings_data.data['legado_server']
+    local server_address = self.settings_data.data['server_address']
     logName = logName or 'legadoSporeApi'
     opts = opts or {}
 
@@ -398,7 +409,7 @@ function M:legadoSporeApi(requestFunc, callback, opts, logName)
         timeouts = {8, 12}
     end
 
-    if isServerOnly == true and not string.find(string.lower(legado_server), "/reader3") then
+    if isServerOnly == true and self.settings_data.data.server_type ~= 2 then
         return wrap_response(nil, "仅支持服务器版本\r\n其它请在app操作后刷新")
     end
 
@@ -526,12 +537,16 @@ function M:pGetChapterContent(chapter)
 end
 
 function M:saveBookProgress(chapter)
+
+    if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl) ) then
+        return wrap_response(nil, '参数错误')
+    end
     local chapters_index = chapter.chapters_index
 
     return self:legadoSporeApi(function()
         return self.apiClient:saveBookProgress({
             name = chapter.name,
-            author = chapter.author,
+            author = chapter.author or '',
             durChapterPos = 0,
             durChapterIndex = chapters_index,
             durChapterTime = time.to_ms(time.now()),
@@ -547,24 +562,34 @@ function M:saveBookProgress(chapter)
 end
 
 function M:getAvailableBookSource(bookUrl)
-
-    -- return bookinfo
     if not H.is_str(bookUrl) then
         return wrap_response(nil, '获取可用书源参数错误')
     end
 
     return self:legadoSporeApi(function()
-        -- data.list data.lastindex
+        -- data=bookinfos
         return self.apiClient:getAvailableBookSource({
             refresh = 0,
             url = bookUrl,
             v = os.time()
         })
     end, nil, {
-        timeouts = {25, 30},
+        timeouts = {30, 50},
         isServerOnly = true
     }, 'getAvailableBookSource')
 
+end
+
+function M:getBookSourcesList()
+    return self:legadoSporeApi(function()
+        return self.apiClient:getBookSources({
+            simple = 1,
+            v = os.time()
+        })
+    end, nil, {
+        timeouts = {8, 10},
+        isServerOnly = true
+    }, 'getBookSourcesList')
 end
 
 function M:setBookSource(newBookSource)
@@ -600,27 +625,29 @@ function M:setBookSource(newBookSource)
             return wrap_response(nil, '接口返回数据格式错误')
         end
     end, {
-        timeouts = {10, 12},
+        timeouts = {10, 18},
         isServerOnly = true
     }, 'setBookSource')
 
 end
 
-function M:searchBookSource(bookUrl, lastIndex)
+function M:searchBookSource(bookUrl, lastIndex, searchSize)
     if not H.is_str(bookUrl) then
         return wrap_response(nil, '获取更多书源参数错误')
     end
     if not H.is_num(lastIndex) then
-        lastIndex = 1
+        lastIndex = -1
     end
-
+    if not H.is_num(lastIndex) then
+        searchSize = 5
+    end
     return self:legadoSporeApi(function()
         -- data.list data.lastindex
         return self.apiClient:searchBookSource({
-
             url = bookUrl,
             bookSourceGroup = '',
             lastIndex = lastIndex,
+            searchSize = searchSize,
             v = os.time()
         })
 
@@ -630,26 +657,45 @@ function M:searchBookSource(bookUrl, lastIndex)
     }, 'searchBook')
 
 end
+function M:searchBook(search_text, bookSourceUrl, concurrentCount)
+    if not (H.is_str(search_text) and search_text ~= '' and H.is_str(bookSourceUrl)) then
+        return wrap_response(nil, "输入参数错误")
+    end
+    concurrentCount = concurrentCount or 32
+    return self:legadoSporeApi(function()
+        -- data = bookinfolist
+        return self.apiClient:searchBook({
+            key = search_text,
+            bookSourceGroup = '',
+            concurrentCount = concurrentCount,
+            bookSourceUrl = bookSourceUrl,
+            lastIndex = -1,
+            page = 1,
+            v = os.time()
+        })
+    end, nil, {
+        timeouts = {20, 30},
+        isServerOnly = true
+    }, 'searchBook')
+end
 
-function M:searchBookMulti(search_text, lastIndex)
+function M:searchBookMulti(search_text, lastIndex, searchSize, concurrentCount)
 
     if not H.is_str(search_text) or search_text == '' then
         return wrap_response(nil, "输入参数错误")
     end
 
     lastIndex = lastIndex or -1
-
+    searchSize = searchSize or 20
+    concurrentCount = concurrentCount or 32
     return self:legadoSporeApi(function()
         -- data.list data.lastindex
         return self.apiClient:searchBookMulti({
-
             key = search_text,
-            bookSourceUrl = '',
             bookSourceGroup = '',
-            -- 并发
-            concurrentCount = 4,
+            concurrentCount = concurrentCount,
             lastIndex = lastIndex,
-            page = 1,
+            searchSize = searchSize,
             v = os.time()
         })
     end, nil, {
@@ -659,7 +705,8 @@ function M:searchBookMulti(search_text, lastIndex)
 end
 
 function M:addBookToLibrary(bookinfo)
-    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.name) or not H.is_str(bookinfo.origin) then
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl) and
+        H.is_str(bookinfo.originName)) then
         return wrap_response(nil, "输入参数错误")
     end
 
@@ -711,7 +758,7 @@ function M:addBookToLibrary(bookinfo)
 end
 
 function M:deleteBook(bookinfo)
-    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.name) or not H.is_str(bookinfo.origin) then
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl)) then
         return wrap_response(nil, "输入参数错误")
     end
 
@@ -962,17 +1009,17 @@ function M:getProxyCoverUrl(coverUrl)
     if not H.is_str(coverUrl) then
         return coverUrl
     end
-    local legado_server = self.settings_data.data['legado_server']
-    return table.concat({legado_server, '/cover?path=', util.urlEncode(coverUrl)})
+    local server_address = self.settings_data.data['server_address']
+    return table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
 end
 
 function M:getProxyEpubUrl(bookUrl, htmlUrl)
     if not H.is_str(htmlUrl) then
         return htmlUrl
     end
-    local legado_server = self.settings_data.data['legado_server']
-    if legado_server:match("/reader3$") and htmlUrl:match("%.x?html$") then
-        local api_root_url = legado_server:gsub("/reader3$", "")
+    local server_address = self.settings_data.data['server_address']
+    if server_address:match("/reader3$") and htmlUrl:match("%.x?html$") then
+        local api_root_url = server_address:gsub("/reader3$", "")
         htmlUrl = htmlUrl:gsub("([^%w%-%.%_%~%/])", function(c)
             return string.format("%%%02X", string.byte(c))
         end)
@@ -992,10 +1039,10 @@ function M:getProxyImageUrl(bookUrl, content)
 
     local new_porxy_picurls = {}
 
-    local legado_server = self.settings_data.data['legado_server']
+    local server_address = self.settings_data.data['server_address']
 
-    if legado_server:match("/reader3$") then
-        local api_root_url = legado_server:gsub("/reader3$", "")
+    if server_address:match("/reader3$") then
+        local api_root_url = server_address:gsub("/reader3$", "")
 
         for i, img_src in ipairs(picUrls) do
             img_src = img_src:gsub("([^%w%-%.%_%~%/])", function(c)
@@ -1009,7 +1056,7 @@ function M:getProxyImageUrl(bookUrl, content)
     else
         local width = Device.screen:getWidth() or 800
         for i, img_src in ipairs(picUrls) do
-            local new_url = legado_server .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' ..
+            local new_url = server_address .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' ..
                                 util.urlEncode(img_src) .. '&width=' .. width
             table.insert(new_porxy_picurls, new_url)
         end
@@ -1696,7 +1743,7 @@ end
 
 function M:getServerPathCode()
     if self.settings_data.data['server_address_md5'] == nil then
-        local server_address_md5 = socket_url.parse(self.settings_data.data['legado_server']).host
+        local server_address_md5 = socket_url.parse(self.settings_data.data['server_address']).host
         self.settings_data.data['server_address_md5'] = md5(server_address_md5)
         self.saveSettings()
     end
@@ -1708,17 +1755,15 @@ function M:getSettings()
 end
 
 function M:saveSettings(settings)
-    if H.is_nil(settings) and H.is_str(self.settings_data.data.legado_server) then
-        self.settings_data:flush()
-        return wrap_response(true)
-    else
-        if not H.is_str(settings.legado_server) or not H.is_str(settings.chapter_sorting_mode) then
+    if H.is_tbl(settings) and H.is_str(self.settings_data.data.server_address) then
+        if not H.is_str(settings.server_address) or not H.is_str(settings.chapter_sorting_mode) then
             return wrap_response(nil, '参数校检错误，保存失败')
         end
         self.settings_data.data = settings
-        self.settings_data:flush()
-        return wrap_response(true)
     end
+    self.settings_data:flush()
+    self.settings_data = LuaSettings:open(H.getUserSettingsPath())
+    return wrap_response(true)
 end
 
 function M:setEndpointUrl(new_setting_url)
@@ -1765,17 +1810,22 @@ function M:setEndpointUrl(new_setting_url)
         parsed.port and (":" .. parsed.port) or "", parsed.path or "", parsed.query and ("?" .. parsed.query) or "",
         parsed.params and (";" .. parsed.params) or "", parsed.fragment and ("#" .. parsed.fragment) or "")
 
-    dbg.log("clean_url", clean_url)
+    dbg.log("server_address:", clean_url)
 
     self.settings_data.data.reader3_un = username
     self.settings_data.data.reader3_pwd = password
-    self.settings_data.data.legado_server = clean_url
+    self.settings_data.data.server_address = clean_url
     self.settings_data.data.setting_url = new_setting_url
     self.settings_data.data.server_address_md5 = md5(parsed.host)
-    if not H.is_tbl(self.settings_data.data.servers_history) then 
-        self.settings_data.data.servers_history ={}
+    if not H.is_tbl(self.settings_data.data.servers_history) then
+        self.settings_data.data.servers_history = {}
     end
     self.settings_data.data.servers_history[new_setting_url] = 1
+    if string.find(string.lower(self.settings_data.data.server_address), "/reader3$") then
+        self.settings_data.data.server_type = 2
+    else
+        self.settings_data.data.server_type = 1
+    end
     self:saveSettings()
 
     self:loadSpore()

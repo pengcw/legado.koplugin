@@ -10,28 +10,8 @@ return {
             required_params = {"username", "password", "code", "isLogin", "v"},
             expected_status = {200}
         },
-        getUserConfig ={
+        getUserConfig = {
             path = "/getUserConfig",
-            method = "GET",
-            required_params = {"v"},
-            expected_status = {200}
-        },
-        getBookSources={
-            path = "/getBookSources",
-            method = "GET",
-            required_params = {"v","simple"},
-            expected_status = {200}
-        },
-        getBookInfo = {
-            path = "/getBookInfo",
-            method = "POST",
-            required_params = {"bookSourceUrl","url"},
-            payload = {"bookSourceUrl","url"},
-            optional_params = {"v"},
-            expected_status = {200} 
-        },
-        getBookmarks ={
-            path = "/getBookmarks",
             method = "GET",
             required_params = {"v"},
             expected_status = {200}
@@ -48,7 +28,12 @@ return {
             required_params = {"v", "refresh"},
             expected_status = {200}
         },
-
+        getShelfBook = {
+            path = "getShelfBook",
+            method = "GET",
+            required_params = {"v", "url"},
+            expected_status = {200}
+        },
         getBookContent = {
             path = "/getBookContent",
             method = "GET",
@@ -56,7 +41,6 @@ return {
             optional_params = {"v", "cache"},
             expected_status = {200}
         },
-
         saveBookProgress = {
             path = "/saveBookProgress",
             method = "POST",
@@ -89,24 +73,37 @@ return {
         searchBookSource = {
             path = "/searchBookSource",
             method = "GET",
-            required_params = {"v", "url", "bookSourceGroup", "lastIndex"},
+            required_params = {"url", "bookSourceGroup"},
+            optional_params = {"v", "searchSize", "lastIndex"},
             expected_status = {200}
         },
-
-        searchBookSourceSSE = {
-            path = "/searchBookSourceSSE",
-            method = "GET",
-            required_params = {"v", "url", "bookSourceGroup"},
-            expected_status = {200}
-        },
-
         searchBookMulti = {
             path = "/searchBookMulti",
+            method = "GET",
+            required_params = {"v", "key", "bookSourceGroup", "concurrentCount", "lastIndex"},
+            optional_params = {"searchSize", "bookSourceUrl"},
+            expected_status = {200}
+        },
+        getBookSources = {
+            path = "/getBookSources",
+            method = "GET",
+            required_params = {"v", "simple"},
+            expected_status = {200}
+        },
+        searchBook = {
+            path = "/searchBook",
             method = "GET",
             required_params = {"v", "key", "bookSourceUrl", "bookSourceGroup", "concurrentCount", "lastIndex", "page"},
             expected_status = {200}
         },
-
+        getBookInfo = {
+            path = "/getBookInfo",
+            method = "POST",
+            required_params = {"bookSourceUrl", "url"},
+            payload = {"bookSourceUrl", "url"},
+            optional_params = {"v"},
+            expected_status = {200}
+        },
         saveBook = {
             path = "/saveBook",
             method = "POST",
@@ -130,6 +127,21 @@ return {
                        "durChapterPos", "durChapterTime", "durChapterTitle", "wordCount", "intro", "totalChapterNum",
                        "kind", "type"},
             unattended_params = true,
+            expected_status = {200}
+        },
+        getTxtTocRules = {
+            path = "/getTxtTocRules",
+            method = "GET",
+            expected_status = {200}
+        },
+        getSystemInfo = {
+            path = "/getSystemInfo",
+            method = "GET",
+            expected_status = {200}
+        },
+        getCover = {
+            path = "/getCover",
+            method = "GET",
             expected_status = {200}
         }
     }
