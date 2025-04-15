@@ -183,6 +183,10 @@ function M:input(message, callback, options)
 
     }
 
+    if not callback then
+        defaultOptions.buttons = nil
+    end
+
     if options then
         for key, value in pairs(options) do
             defaultOptions[key] = value
@@ -202,13 +206,10 @@ function M:input(message, callback, options)
 end
 
 function M:loading(message, runnable, callback, options)
-
     local defaultOptions = {
         text = "\u{231B}  " .. message,
         dismissable = false,
-
-        update_interval = 0.8
-
+        update_interval = 0.2
     }
 
     if type(options) == 'table' then
@@ -217,42 +218,39 @@ function M:loading(message, runnable, callback, options)
         end
     end
 
-    local start_time = os.time() - 1
+    local spinner_styles = {{"|", "/", "-", "\\"}, {"\u{25D0}", "\u{25D3}", "\u{25D1}", "\u{25D2}"}}
+    math.randomseed(os.time())
+    local spinner_chars = spinner_styles[math.random(1, #spinner_styles)]
+    local spinner_index = 1
     local updateText
     local message_dialog
 
     updateText = function()
+        local spinner = spinner_chars[spinner_index]
+        spinner_index = (spinner_index % #spinner_chars) + 1
 
-        local elapsed_time = os.time() - start_time
-        defaultOptions.text = string.format("%s [%d] ...", message, elapsed_time)
+        defaultOptions.text = string.format("%s %s ...", message, spinner)
 
         message_dialog = InfoMessage:new(defaultOptions)
-
         UIManager:show(message_dialog)
-
         UIManager:scheduleIn(defaultOptions.update_interval, updateText)
-
     end
 
     updateText()
 
     Trapper:wrap(function()
-
         local completed, return_values = Trapper:dismissableRunInSubprocess(runnable, message_dialog)
 
         UIManager:unschedule(updateText)
-
         UIManager:close(message_dialog)
 
         if type(callback) == 'function' then
-
             if not completed then
                 callback(false, "Task was cancelled or failed to complete")
             else
                 callback(true, return_values)
             end
         end
-
     end)
 end
 
