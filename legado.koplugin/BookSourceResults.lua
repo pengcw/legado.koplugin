@@ -1,5 +1,6 @@
 local ConfirmBox = require("ui/widget/confirmbox")
 local UIManager = require("ui/uimanager")
+local CenterContainer = require("ui/widget/container/centercontainer")
 local Menu = require("ui/widget/menu")
 local Screen = require("device").screen
 local Device = require("device")
@@ -16,12 +17,12 @@ local H = require("libs/Helper")
 
 local M = Menu:extend{
     name = "book_search_results",
-    single_line = false,
     is_enable_shortcut = false,
-    is_popout = false,
     title = "Search results",
+    
     fullscreen = true,
-
+    covers_fullscreen = true,
+    single_line = true,
     results = nil,
     bookinfo = nil,
     search_text = nil,
@@ -29,14 +30,15 @@ local M = Menu:extend{
     call_mode = nil,
     last_index = nil,
     -- callback to be called when pressing the back button
-    on_return_callback = nil
+    on_return_callback = nil,
+    results_menu_container = nil
 }
 
 function M:init()
     self.results = self.results or {}
-    self.width = self.width or Screen:getWidth() - Screen:scaleBySize(50)
-    self.width = math.min(self.width, Screen:scaleBySize(600))
-    self.height = Screen:getHeight() - Screen:scaleBySize(50)
+
+    self.width = math.floor(Screen:getWidth() * 0.9)
+    self.height = math.floor(Screen:getHeight() * 0.9)
 
     Menu.init(self)
 
@@ -58,6 +60,16 @@ end
 function M:refreshItems(no_recalculate_dimen, append_data)
     self.item_table = self:generateItemTableFromSearchResults(append_data)
     Menu.updateItems(self, nil, no_recalculate_dimen)
+end
+
+function M:menuCenterShow(menuObj)
+    local menu_container = CenterContainer:new{
+        dimen = Screen:getSize(),
+        menuObj
+    }
+    menuObj.show_parent = menu_container
+    UIManager:show(menu_container)
+    return menu_container
 end
 
 function M:generateItemTableFromSearchResults(append_data)
@@ -82,10 +94,16 @@ function M:generateItemTableFromSearchResults(append_data)
     end
 
     for source_index, new_bookinfo in ipairs(self.results) do
+        local item_table_txt
+        if self.call_mode == 1 then
+            item_table_txt = string.format("%s (%s)", new_bookinfo.name, new_bookinfo.author or "")
+        else
+            item_table_txt = string.format("%s (%s)[%s]", new_bookinfo.name, new_bookinfo.author or "",
+                new_bookinfo.originName or "")
+        end
         table.insert(item_table, {
             source_index = source_index,
-            text = string.format("%s (%s)[%s]", new_bookinfo.name, new_bookinfo.author or "",
-                new_bookinfo.originName or "")
+            text = item_table_txt
         })
     end
 
@@ -93,7 +111,7 @@ function M:generateItemTableFromSearchResults(append_data)
         -- insert comand item_tabl
         table.insert(item_table, {
             source_index = 0,
-            text = string.format("%s 点击加载更多 l:%s",Icons.FA_DOWNLOAD, tostring(self.last_index))
+            text = string.format("%s 点击加载更多 l:%s", Icons.FA_DOWNLOAD, tostring(self.last_index))
         })
     end
 
@@ -110,6 +128,7 @@ function M:fetchAndShow(bookinfo, onReturnCallback)
         return Backend:getAvailableBookSource(bookUrl)
     end, function(state, response)
         if state == true then
+            local results_data = {}
             Backend:HandleResponse(response, function(data)
 
                 if not H.is_tbl(data) then
@@ -118,19 +137,20 @@ function M:fetchAndShow(bookinfo, onReturnCallback)
                 if #data == 0 then
                     return MessageBox:error('没有可用源')
                 end
-
-                UIManager:show(M:new{
-                    results = data,
-                    bookinfo = bookinfo,
-                    call_mode = 11,
-                    covers_fullscreen = true,
-                    on_return_callback = onReturnCallback,
-                    title = string.format("换源 %s (%s)", bookinfo.name, bookinfo.author)
-                })
-
+                results_data = data
             end, function(err_msg)
-                MessageBox:error(err_msg or '加载失败')
+                Backend:show_notice(err_msg or '加载失败')
             end)
+
+            self.results_menu_container = self:menuCenterShow(M:new{
+                results = results_data,
+                bookinfo = bookinfo,
+                call_mode = 11,
+                on_return_callback = onReturnCallback,
+                subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
+                title = "换源",
+                items_font_size = Menu.getItemFontSize(8)
+            })
         end
     end)
 end
@@ -215,6 +235,7 @@ end
 function M:handleSingleSourceSearch(searchText)
     self:selectBookSource(function(item, sourceMenu)
         local bookSourceUrl = item.url
+        local bookSourceName = item.name
         MessageBox:loading(string.format("%s 查询中 ", item.text or ""), function()
             return Backend:searchBook(searchText, bookSourceUrl)
         end, function(state, response)
@@ -227,15 +248,17 @@ function M:handleSingleSourceSearch(searchText)
                         return Backend:show_notice('未找到相关书籍')
                     end
 
-                    UIManager:close(sourceMenu)
-
-                    UIManager:show(M:new{
+                    self.results_menu_container = self:menuCenterShow(M:new{
                         results = data,
+                        call_mode = 1,
                         search_text = searchText,
-                        title = string.format('单源搜索 [%s]', searchText),
-                        covers_fullscreen = true,
-                        call_mode = 1
+                        title = string.format('单源搜索 [%s]', bookSourceName),
+                        subtitle = string.format("key: %s", searchText),
+                        items_font_size = Menu.getItemFontSize(8)
                     })
+
+                    self.results_menu_container.show_parent = sourceMenu.show_parent
+
                 end, function(err_msg)
                     Backend:show_notice(err_msg or '搜索请求失败')
                 end)
@@ -267,13 +290,14 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
                 logger.dbg("当前data.lastIndex:", data.lastIndex)
 
                 self.last_index = data.lastIndex
-                self.call_mode = 2
 
                 if is_more_call ~= true then
-                    self.results = data.list
-                    UIManager:show(M:new{
-                        title = string.format('多源搜索 [%s]', search_text),
-                        covers_fullscreen = true
+                    self.results_menu_container = self:menuCenterShow(M:new{
+                        results = data.list,
+                        call_mode = 2,
+                        title = '多源搜索',
+                        subtitle = string.format("key: %s", search_text),
+                        items_font_size = Menu.getItemFontSize(8)
                     })
                 else
                     self:refreshItems(false, data.list)
@@ -287,53 +311,57 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
 end
 
 function M:selectBookSource(selectCallback)
-    local book_source_list = Backend:getBookSourcesList()
-    Backend:HandleResponse(book_source_list, function(data)
 
-        if not H.is_tbl(data) then
-            return Backend:show_notice('返回数据错误')
-        end
-        if #data == 0 then
-            return MessageBox:error('没有可用源')
-        end
-
-        local source_list_menu
-        local source_list_menu_table = {}
-
-        for _, v in ipairs(data) do
-            if H.is_tbl(v) and H.is_str(v.bookSourceName) and H.is_str(v.bookSourceUrl) then
-                table.insert(source_list_menu_table, {
-                    text = string.format("%s [%s]", v.bookSourceName, v.bookSourceGroup or ""),
-                    url = v.bookSourceUrl
-                })
-            end
-        end
-
-        source_list_menu = Menu:new{
-            title = "请指定要搜索的源",
-            item_table = source_list_menu_table,
-            is_popout = false,
-            single_line = false,
-            is_enable_shortcut = false,
-            fullscreen = true,
-            width = math.min(Screen:getWidth() - Screen:scaleBySize(50), Screen:scaleBySize(600)),
-            height = Screen:getHeight() - Screen:scaleBySize(50),
-            onMenuSelect = function(self_menu, item)
-                if selectCallback then
-                    selectCallback(item, self_menu)
+    MessageBox:loading("获取源列表 ", function()
+        return Backend:getBookSourcesList()
+    end, function(state, response)
+        if state == true then
+            Backend:HandleResponse(response, function(data)
+                if not H.is_tbl(data) then
+                    return Backend:show_notice('返回数据错误')
                 end
-            end,
-            close_callback = function()
-                UIManager:close(source_list_menu)
-            end
-        }
+                if #data == 0 then
+                    return MessageBox:error('没有可用源')
+                end
 
-        UIManager:nextTick(function()
-            UIManager:show(source_list_menu)
-        end)
+                local source_list_menu_table = {}
+                local source_list_container
+                for _, v in ipairs(data) do
+                    if H.is_tbl(v) and H.is_str(v.bookSourceName) and H.is_str(v.bookSourceUrl) then
+                        table.insert(source_list_menu_table, {
+                            text = string.format("%s [%s]", v.bookSourceName, v.bookSourceGroup or ""),
+                            url = v.bookSourceUrl,
+                            name = v.bookSourceName
+                        })
+                    end
+                end
 
-    end, function(err_msg)
-        MessageBox:error('获取源列表失败:' .. tostring(err_msg))
+                source_list_container = self:menuCenterShow(Menu:new{
+                    title = "请指定要搜索的源",
+                    subtitle = string.format("key: %s", self.search_text or ""),
+                    item_table = source_list_menu_table,
+                    items_per_page = 15,
+                    items_font_size = Menu.getItemFontSize(8),
+                    single_line = true,
+                    covers_fullscreen = true,
+                    fullscreen = true,
+                    width = math.floor(Screen:getWidth() * 0.9),
+                    height = math.floor(Screen:getHeight() * 0.9),
+                    onMenuSelect = function(self_menu, item)
+                        if selectCallback then
+                            selectCallback(item, self_menu)
+                        end
+                    end,
+                    close_callback = function()
+                        UIManager:close(source_list_container)
+                        source_list_container = nil
+                    end
+                })
+
+            end, function(err_msg)
+                Backend:show_notice('列表请求失败' .. tostring(err_msg))
+            end)
+        end
     end)
 end
 
@@ -450,10 +478,18 @@ function M:onClose()
     self.search_text = nil
     self.call_mode = nil
     self.last_index = nil
+    if self.results_menu_container then
+        UIManager:close(self.results_menu_container)
+        self.results_menu_container = nil
+    end
     Menu.onClose(self)
 end
 
 function M:onCloseUI()
+    if self.results_menu_container then
+        UIManager:close(self.results_menu_container)
+        self.results_menu_container = nil
+    end
     local path = table.remove(self.paths)
     Menu.onClose(self)
     path.callback()

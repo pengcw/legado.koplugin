@@ -28,10 +28,9 @@ local ChapterListing = Menu:extend{
 
     bookinfo = nil,
     chapter_sorting_mode = nil,
-    readerui_chapter_event = nil,
     on_return_callback = nil,
-    selected_chapter = nil,
-    ui_refresh_time = os.time()
+    ui_refresh_time = nil,
+    book_reader = nil
 }
 
 function ChapterListing:init()
@@ -56,6 +55,7 @@ function ChapterListing:init()
         self.key_events.Right = {{"Right"}}
     end
 
+    self.ui_refresh_time = os.time()
     self:updateChapterList()
 end
 
@@ -312,15 +312,13 @@ function ChapterListing:onBookReaderCallback(chapter)
     if nextChapter ~= nil then
 
         nextChapter.call_event = chapter.call_event
-
-        self.readerui_chapter_event = chapter.call_event
-
         self:openChapterOnReader(nextChapter, true)
     else
 
         BookReader:closeReaderUi(function()
             self:updateItems(true)
             UIManager:show(self)
+            self.book_reader = nil
         end)
     end
 
@@ -365,8 +363,8 @@ function ChapterListing:showReaderUI(chapter)
         self:onBookReaderCallback(chapter)
     end
 
-    BookReader:show({
-        path = chapter.cacheFilePath,
+    self.book_reader = BookReader:show({
+        chapter = chapter,
         on_end_of_book_callback = ChapterListing.onEndOfBookCallback,
         on_start_of_book_callback = ChapterListing.onStartOfBookCallback,
         on_return_callback = ChapterListing.onReturnCallback,
@@ -391,18 +389,18 @@ function ChapterListing:openChapterOnReader(chapter, is_callback)
         return MessageBox:loading("正在下载正文", function()
             return Backend:downloadChapter(chapter)
         end, function(state, response)
-            if is_callback ~= true then
-                self:closeUI()
-            end
             if state == true then
                 Backend:HandleResponse(response, function(data)
                     if not H.is_tbl(data) or not H.is_str(data.cacheFilePath) then
                         MessageBox:error('下载失败')
                         return
                     end
+                    if is_callback ~= true then
+                        self:closeUI()
+                    end
                     self:showReaderUI(data)
                 end, function(err_msg)
-                    MessageBox:error(err_msg or '刷新失败')
+                    MessageBox:error(err_msg or '错误')
                 end)
             end
 
@@ -490,8 +488,12 @@ function ChapterListing:syncProgressShow(chapter)
         if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
             local response = Backend:saveBookProgress(chapter)
             if not (type(response) == 'table' and response.type == 'SUCCESS') then
-                local message = (type(response) == 'table' and response.message) or "进度上传失败，请稍后重试"
-                return { type = 'ERROR', message = message }
+                local message = (type(response) == 'table' and response.message) or
+                                    "进度上传失败，请稍后重试"
+                return {
+                    type = 'ERROR',
+                    message = message
+                }
             end
         end
         return Backend:refreshLibraryCache(self.ui_refresh_time)
@@ -555,9 +557,9 @@ function ChapterListing:openMenu()
     }}, {{
         text = table.concat({Icons.FA_THUMB_TACK, " 拉取网络进度"}),
         callback = function()
-            if self.multilines_show_more_text == true then 
+            if self.multilines_show_more_text == true then
                 Backend:show_notice('章节列表为空')
-                return 
+                return
             end
             UIManager:close(dialog)
             self:syncProgressShow()
@@ -565,9 +567,9 @@ function ChapterListing:openMenu()
     }}, {{
         text = Icons.FA_DOWNLOAD .. " 缓存全部章节",
         callback = function()
-            if self.multilines_show_more_text == true then 
+            if self.multilines_show_more_text == true then
                 Backend:show_notice('章节列表为空')
-                return 
+                return
             end
             UIManager:close(dialog)
             MessageBox:confirm("请确认缓存全部章节 (短时间大量下载有可能触发反爬)",
