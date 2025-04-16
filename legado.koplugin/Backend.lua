@@ -11,6 +11,8 @@ local time = require("ui/time")
 local UIManager = require("ui/uimanager")
 local H = require("libs/Helper")
 
+local NovelFormatter = require("libs/NovelFormatter")
+
 local function wrap_response(data, err_message)
     return data ~= nil and {
         type = 'SUCCESS',
@@ -146,7 +148,7 @@ local function pDownload_CreateCBZ(filePath, img_sources)
     dbg.v('CreateCBZ strat:')
 
     if not filePath or not H.is_tbl(img_sources) then
-        error('Cbz generates input parameters error')
+        error("Cbz param error:")
     end
 
     local is_convertToGrayscale = false
@@ -155,7 +157,7 @@ local function pDownload_CreateCBZ(filePath, img_sources)
 
     if util.fileExists(cbz_path_tmp) then
         if M:isExtractingInBackground() == true then
-            error('There are other threads downloading, cancelled')
+            error("Other threads downloading, cancelled")
         else
             util.removeFile(cbz_path_tmp)
         end
@@ -389,7 +391,7 @@ function M:_reader3Login()
         return false, '获取Token失败'
     end
 
-    logger.info('get legado3token:', res.body.data.accessToken)
+    logger.dbg('get legado3token:', res.body.data.accessToken)
 
     cache_config:saveSetting("r3k", res.body.data.accessToken):flush()
 
@@ -587,7 +589,7 @@ function M:getBookSourcesList()
             v = os.time()
         })
     end, nil, {
-        timeouts = {8, 10},
+        timeouts = {15, 20},
         isServerOnly = true
     }, 'getBookSourcesList')
 end
@@ -879,7 +881,7 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
         else
 
             filePath = filePath .. '.txt'
-
+            --content = NovelFormatter.indent(content,2," ")
             content = table.concat({tostring(chapter_title), "\r\n", content})
         end
 
@@ -958,7 +960,7 @@ end
 
 function M:findNextChaptersNotDownLoad(current_chapter, count)
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('findNextChaptersNotDownLoad parameters err:', current_chapter)
+        dbg.log('findNextChaptersNotDownLoad: bad params', current_chapter)
         return {}
     end
 
@@ -979,7 +981,7 @@ end
 function M:findNextChapter(current_chapter, is_downloaded)
 
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('findNextChapter Input parameters error:', current_chapter)
+        dbg.log("findNextChapter: bad params", current_chapter)
         return
     end
 
@@ -1127,8 +1129,8 @@ function M:preLoadingChapters(chapter, download_chapter_count)
     end
 
     if self:isExtractingInBackground() == true then
-        dbg.log('There are still tasks in the background that have not been completed. Cannot create new tasks:')
-        return false, 'There are still tasks in the background that have not been completed. Cannot create new tasks:'
+        dbg.log('"Background tasks incomplete. Cannot create new tasks:"')
+        return false, "Background tasks incomplete. Cannot create new tasks:"
     end
 
     if not H.is_num(download_chapter_count) or download_chapter_count < 1 then
@@ -1194,7 +1196,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
                             end)
 
                             if not status then
-                                dbg.log('An error occurred when cleaning the download task to write to the database:',
+                                dbg.log("Error cleaning download task for database write:",
                                     H.errorHandler(err))
                             end
                         end
@@ -1215,14 +1217,14 @@ function M:preLoadingChapters(chapter, download_chapter_count)
             if H.is_tbl(nextChapter) and nextChapter.chapters_index ~= nil and nextChapter.book_cache_id ~= nil then
 
                 nextChapter.is_pre_loading = true
-                dbg.v('Multi-threaded tasks in progress:runInSubProcess_start_title:', nextChapter.title)
+                dbg.v('Threaded tasks running:runInSubProcess_start_title:', nextChapter.title)
 
                 local status, err = pcall(function()
                     return self:pDownloadChapter(nextChapter)
                 end)
 
                 if not status then
-                    dbg.log("Chapter download failed: ", tostring(err))
+                    logger.err("Chapter download failed: ", tostring(err))
                 else
 
                     if H.is_tbl(err) and err.cacheFilePath then
@@ -1233,36 +1235,36 @@ function M:preLoadingChapters(chapter, download_chapter_count)
 
                         task_return_ok_list['ok_' .. chapters_index] = true
 
-                        dbg.v('Download the chapter successfully', book_cache_id, chapters_index, cache_file_path)
+                        dbg.v('Download chapter successfully:', book_cache_id, chapters_index, cache_file_path)
 
                         status, err = pcall(function()
                             return task_return_db_add(book_cache_id, chapters_index, cache_file_path)
                         end)
                         if not status then
-                            dbg.log('An error occurred when downloading successfully to write to the database:',
+                            logger.err('Error saving download to database:',
                                 tostring(err))
                         end
                     end
 
                 end
             else
-                dbg.log("Cache next chapter next chapter data source error")
+                dbg.log("Cache error: next chapter data source")
 
             end
 
             if not util.fileExists(self.task_pid_file) then
-                dbg.v('The downloader receives a mid-way stop signal')
+                dbg.v("Downloader received stop signal")
                 break
             end
 
         end
 
-        dbg.v('Download and clean up the unfinished chapters~')
+        dbg.v("Clean up unfinished downloads")
         local status, err = pcall(function()
             return task_return_db_clear(chapter_down_tasks, task_return_ok_list)
         end)
         if not status and err then
-            dbg.v('Chapters that end the load cleanup are not completed:', tostring(err))
+            dbg.v("Incomplete chapter cleanup after load", tostring(err))
         end
 
         self:closeDbManager()
@@ -1296,10 +1298,10 @@ function M:preLoadingChapters(chapter, download_chapter_count)
             Device:enableCPUCores(1)
             UIManager:allowStandby()
         end)
-        return false, "Failed to create a background download task: " .. tostring(err)
+        return false, "Background download task failed" .. tostring(err)
     else
 
-        dbg.v("The background download task was created successfully, and the task PID: " .. tostring(task_pid))
+        dbg.v("Task started. PID:" .. tostring(task_pid))
 
         local task_return_db_func = self.dbManager:transaction(
             function(task_return_chapter, content)
@@ -1320,7 +1322,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
             task_return_db_func(chapter_down_tasks, 'downloading_')
         end)
         if not status and err then
-            dbg.v('Failed to write to download flag:', tostring(err))
+            dbg.v("Download flag write error:", tostring(err))
         end
 
         return true, chapter_down_tasks
@@ -1501,17 +1503,17 @@ end
 function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
 
     if not H.is_func(taskFunc) then
-        dbg.log("Invalid taskFunc: must be a function")
+        dbg.log("taskFunc must be a function")
         return
     end
 
     if not H.is_num(timeoutMs) or timeoutMs <= 10 then
-        dbg.log("Invalid timeoutMs: must be a positive number")
+        dbg.log("timeoutMs must be > 10")
         return
     end
 
     if not H.is_num(intervalMs) or intervalMs <= 10 then
-        dbg.log("Invalid intervalMs: must be a positive number")
+        dbg.log("intervalMs must be > 0")
         return
     end
 
@@ -1549,7 +1551,7 @@ function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
             dbg.v("Task completed!")
         else
 
-            dbg.v("Task not completed yet. Checking again in %d milliseconds...", currentTime)
+            dbg.v("Retrying in %d ms...", currentTime)
 
             UIManager:scheduleIn(intervalMs / 1000, checkTask)
         end
@@ -1584,7 +1586,7 @@ function M:check_the_background_download_job(chapter_down_tasks)
     end
 
     if not self:isExtractingInBackground() then
-        dbg.v('The inspector receives a stop signal')
+        dbg.v("Inspector stopping...")
         if #chapter_down_tasks ~= 1 then
             return wrap_response(true)
         else

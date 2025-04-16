@@ -545,15 +545,21 @@ function LibraryView:initializeRegisterEvent(legado_main)
 
     function legado_main:onReaderReady(doc_settings)
 
+        if LibraryView.instance and LibraryView.instance.chapter_listing and
+            LibraryView.instance.chapter_listing.book_reader then
+            logger.dbg("test_book_reader.chapter_call_event",
+                LibraryView.instance.chapter_listing.book_reader.chapter_call_event)
+            logger.dbg("test_book_reader.is_showing", LibraryView.instance.chapter_listing.book_reader.is_showing)
+        end
         if not (self.ui.name == "ReaderUI" and doc_settings and LibraryView.instance and
-            LibraryView.instance.chapter_listing and LibraryView.instance.chapter_listing.readerui_chapter_event and
-            type(BookReader.getIsShowing) == 'function' and BookReader:getIsShowing() == true and
-            type(doc_settings.readSetting) == 'function') then
+            LibraryView.instance.chapter_listing and LibraryView.instance.chapter_listing.book_reader and
+            LibraryView.instance.chapter_listing.book_reader.chapter_call_event and type(BookReader.getIsShowing) ==
+            'function' and BookReader:getIsShowing() == true and type(doc_settings.readSetting) == 'function') then
             return
         end
 
         local chapter_listing = LibraryView.instance.chapter_listing
-        local chapter_call_event = chapter_listing.readerui_chapter_event
+        local chapter_call_event = chapter_listing.book_reader.chapter_call_event
         local filepath = doc_settings:readSetting("doc_path") or ""
 
         if not filepath:find('/legado.cache/', 1, true) then

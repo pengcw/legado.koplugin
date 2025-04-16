@@ -15,7 +15,8 @@ local M = {
     on_end_of_book_callback = nil,
     on_start_of_book_callback = nil,
     on_read_settings_callback = nil,
-    is_showing = false
+    is_showing = false,
+    chapter = nil,
 }
 
 function M:show(options)
@@ -23,7 +24,9 @@ function M:show(options)
     self.on_end_of_book_callback = options.on_end_of_book_callback
     self.on_start_of_book_callback = options.on_start_of_book_callback
     self.chapter_call_event = options.chapter_call_event
+    self.chapter = options.chapter
 
+    local book_path = options.chapter.cacheFilePath
     dbg.v('ReaderUI.instance', type(ReaderUI.instance))
     dbg.v('ReaderRolling.c8:', ReaderRolling.c8eeb679b)
 
@@ -31,13 +34,15 @@ function M:show(options)
         if ReaderRolling.c8eeb679b ~= true then
             M.overriderollingHandler()
         end
-        ReaderUI.instance:switchDocument(options.path, true)
+        ReaderUI.instance:switchDocument(book_path, true)
     else
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
-        ReaderUI:showReader(options.path, nil, true)
+        ReaderUI:showReader(book_path, nil, true)
     end
 
     self.is_showing = true
+
+    return self
 end
 
 function M:initializeFromReaderUI(ui)
