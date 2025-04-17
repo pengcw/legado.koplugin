@@ -335,11 +335,12 @@ function ChapterListing:onRefreshChapters()
         end, function(state, response)
             if state == true then
                 Backend:HandleResponse(response, function(data)
-                    Backend:show_notice('刷新成功')
+                    Backend:show_notice('同步成功')
                     self:updateItems(true)
                     self.ui_refresh_time = os.time()
                 end, function(err_msg)
-                    Backend:show_notice(err_msg or '刷新失败')
+                    Backend:show_notice(err_msg or '同步失败')
+                    Backend:show_notice("请检查并刷新书架")
                 end)
             end
         end)
@@ -400,6 +401,7 @@ function ChapterListing:openChapterOnReader(chapter, is_callback)
                     end
                     self:showReaderUI(data)
                 end, function(err_msg)
+                    Backend:show_notice("请检查并刷新书架")
                     MessageBox:error(err_msg or '错误')
                 end)
             end
