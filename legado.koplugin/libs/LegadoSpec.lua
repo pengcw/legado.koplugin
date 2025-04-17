@@ -132,11 +132,19 @@ return {
         getTxtTocRules = {
             path = "/getTxtTocRules",
             method = "GET",
+            required_params = {"v"},
+            expected_status = {200}
+        },
+        getReplaceRules ={
+            path = "/getReplaceRules",
+            method = "GET",
+            required_params = {"v"},
             expected_status = {200}
         },
         getSystemInfo = {
             path = "/getSystemInfo",
             method = "GET",
+            required_params = {"v"},
             expected_status = {200}
         },
         getCover = {

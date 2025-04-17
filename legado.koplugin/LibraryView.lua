@@ -248,11 +248,13 @@ function LibraryView:openInstalledReadSource()
     local servers_history = setting_data.servers_history or {}
     local setting_url = tostring(setting_data.setting_url)
     local history_lines = {}
+
     for k, _ in pairs(servers_history) do
         if k ~= setting_url then
             table.insert(history_lines, tostring(k))
         end
     end
+    servers_history = nil
 
     local description = [[
         (书架与接口地址关联，换地址原缓存信息会隐藏，建议静态IP或域名使用)
@@ -267,9 +269,13 @@ function LibraryView:openInstalledReadSource()
     local dialog
     local reset_callback
     local history_cur = 0
+
     if #history_lines > 0 then
+
         local servers_history_str = table.concat(history_lines, '\r\n')
         description = description .. "\r\n历史记录:\r\n" .. servers_history_str
+
+        table.insert(history_lines, tostring(setting_url))
         reset_callback = function()
             history_cur = history_cur + 1
             if history_cur > #history_lines then
@@ -280,11 +286,19 @@ function LibraryView:openInstalledReadSource()
             return history_lines[history_cur]
         end
     end
+
     local save_callback = function(input_text)
         if H.is_str(input_text) then
             local new_setting_url = util.trim(input_text)
             return Backend:HandleResponse(Backend:setEndpointUrl(new_setting_url), function(data)
+
+                self.item_table = self:generateEmptyViewItemTable()
+                self.multilines_show_more_text = true
+                self.items_per_page = 1
+                Menu.updateItems(self)
+
                 self:onRefreshLibrary()
+
                 return true
             end, function(err_msg)
                 Backend:show_notice('设置失败:' .. tostring(err_msg))
@@ -294,6 +308,7 @@ function LibraryView:openInstalledReadSource()
         Backend:show_notice('输入为空')
         return false
     end
+
     dialog = MessageBox:input(nil, nil, {
         title = "设置阅读api接口地址",
         input = setting_url,
@@ -303,6 +318,7 @@ function LibraryView:openInstalledReadSource()
         reset_button_text = '填入历史',
         reset_callback = reset_callback
     })
+
     if H.is_func(reset_callback) then
         dialog.button_table:getButtonById("reset"):enable()
         dialog:refreshButtons()

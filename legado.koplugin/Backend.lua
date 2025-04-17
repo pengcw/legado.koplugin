@@ -11,8 +11,6 @@ local time = require("ui/time")
 local UIManager = require("ui/uimanager")
 local H = require("libs/Helper")
 
-local NovelFormatter = require("libs/NovelFormatter")
-
 local function wrap_response(data, err_message)
     return data ~= nil and {
         type = 'SUCCESS',
@@ -540,7 +538,7 @@ end
 
 function M:saveBookProgress(chapter)
 
-    if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl) ) then
+    if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
         return wrap_response(nil, '参数错误')
     end
     local chapters_index = chapter.chapters_index
@@ -790,6 +788,49 @@ function M:deleteBook(bookinfo)
     }, 'deleteBook')
 end
 
+local function splitParagraphsPreserveBlank(text)
+    if not text or text == "" then
+        return ""
+    end
+
+    local paragraphs = {}
+    -- Koreader .txt auto add a indentEnglish
+    -- 兼容: 2半角+1全角
+    local indentChinese = "  　"
+    -- local indentChinese = "__"
+    local indentEnglish = "  "
+
+    -- 标准化换行符号，合并连续换行符为最多两个
+    text = text:gsub("\r\n?", "\n"):gsub("\n+", function(s)
+        return (#s >= 2) and "\n\n" or s
+    end)
+
+    local lineCount = select(2, text:gsub("\n", "")) + 1
+    paragraphs = table.create and table.create(lineCount) or paragraphs
+
+    local lines = {}
+    for line in text:gmatch("([^\n]*)\n?") do
+        table.insert(lines, line)
+    end
+    text = nil
+
+    for _, line in ipairs(lines) do
+        -- %s 全角 特殊空格:\u{00A0}
+        local trimmed = line:gsub("^[%s　 ]+", "")
+        -- :gsub("[%s　 ]+$", "") 
+
+        if trimmed ~= "" then
+            -- 非ASCII按中文处理 ffiUtil.utf8charcode
+            local first_byte = trimmed:sub(1, 1):byte()
+            local prefix = (first_byte and first_byte < 128) and indentEnglish or indentChinese
+            table.insert(paragraphs, prefix .. trimmed)
+        end
+    end
+    lines = nil
+    -- return table.concat(paragraphs, "§\n")
+    return table.concat(paragraphs, "\n")
+end
+
 function M:pDownloadChapter(chapter, message_dialog, is_recursive)
 
     local bookUrl = chapter.bookUrl
@@ -818,7 +859,7 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
     local response = self:pGetChapterContent(chapter)
 
     if is_recursive ~= true and H.is_tbl(response) and response.type == 'ERROR' and
-        string.find(tostring(response.message), 'NEED_LOGIN') then
+        string.find(tostring(response.message), 'NEED_LOGIN', 1, true) then
         self:resetReader3Token()
         self:pDownloadChapter(chapter, message_dialog, true)
     end
@@ -835,9 +876,9 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
 
     local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index)
 
-    local first_line = string.match(content, "(.-)\n") or content
+    local first_line = string.match(content, "([^\n]*)\n?") or content
 
-    if string.find(first_line, "<img") then
+    if string.find(first_line, "<img", 1, true) then
 
         local img_sources = self:getProxyImageUrl(bookUrl, content)
         if H.is_tbl(img_sources) and #img_sources > 0 then
@@ -881,8 +922,16 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
         else
 
             filePath = filePath .. '.txt'
-            --content = NovelFormatter.indent(content,2," ")
-            content = table.concat({tostring(chapter_title), "\r\n", content})
+            content = splitParagraphsPreserveBlank(content)
+
+            if content == "" then
+                chapter.content_is_nil = true
+            end
+
+            if not string.find(first_line, chapter_title, 1, true) then
+                content = table.concat({"\t\t", tostring(chapter_title), "\n\n", content})
+            end
+
         end
 
         if util.fileExists(filePath) then
@@ -1196,8 +1245,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
                             end)
 
                             if not status then
-                                dbg.log("Error cleaning download task for database write:",
-                                    H.errorHandler(err))
+                                dbg.log("Error cleaning download task for database write:", H.errorHandler(err))
                             end
                         end
                     end
@@ -1241,8 +1289,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
                             return task_return_db_add(book_cache_id, chapters_index, cache_file_path)
                         end)
                         if not status then
-                            logger.err('Error saving download to database:',
-                                tostring(err))
+                            logger.err('Error saving download to database:', tostring(err))
                         end
                     end
 
