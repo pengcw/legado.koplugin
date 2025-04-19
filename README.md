@@ -27,9 +27,10 @@
 
 ## 安装步骤
 1. 下载插件压缩包或克隆本仓库
-2. 将解压后的插件文件夹（`legado.koplugin`）复制到 KOReader 的插件目录 koreader/plugins/ 
-3. 设置服务接口地址 (分为服务器版和阅读app，按说明填写)
-4. 设置手势快捷键 (比如在文件管理界面长按右下角开启书库，在阅读界面长按右下角返回章节目录)
+2. 将解压后的插件文件夹（`legado.koplugin`）复制到      KOReader 的插件目录 "`koreader/plugins/`"
+3. 安装后在文件管理界面顶部菜单搜索部分找到插件菜单入口
+4. 设置服务接口地址 (分为服务器版和阅读app，按说明填写)
+5. 可在`点击与手势`里设置快捷键 (比如在文件管理界面长按右下角开启书库，在阅读界面长按右下角返回章节目录)
 - [漫画阅读优化设置](https://github.com/hanatsumi/rakuyomi/blob/main/docs/reader-recommended-settings/index.md)
 - [Koreader官方指南](https://koreader.rocks/user_guide/#L1-manga)
 - [文本阅读调整](https://koreader.rocks/user_guide/#L2-styletweaks)

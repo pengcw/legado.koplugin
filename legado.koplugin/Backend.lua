@@ -331,6 +331,7 @@ function M:initialize()
     self.dbManager = BookInfoDB:new({
         dbPath = H.getTempDirectory() .. "/bookinfo.db"
     })
+
 end
 
 function M:show_notice(msg, timeout)
@@ -788,46 +789,125 @@ function M:deleteBook(bookinfo)
     }, 'deleteBook')
 end
 
+---去除多余换行、统一段落缩进、根据部分排版规则将不合理的换行合并成一个
+---仅假设源文本格式混入了错误或多余换行和不标准的段落缩进
+---@param text any
 local function splitParagraphsPreserveBlank(text)
     if not text or text == "" then
         return ""
     end
 
-    local paragraphs = {}
-    -- Koreader .txt auto add a indentEnglish
-    -- 兼容: 2半角+1全角
-    local indentChinese = "  　"
-    -- local indentChinese = "__"
-    local indentEnglish = "  "
-
-    -- 标准化换行符号，合并连续换行符为最多两个
     text = text:gsub("\r\n?", "\n"):gsub("\n+", function(s)
-        return (#s >= 2) and "\n\n" or s
+        return (#s >= 1) and "\n" or s
     end)
 
-    local lineCount = select(2, text:gsub("\n", "")) + 1
-    paragraphs = table.create and table.create(lineCount) or paragraphs
+    -- 兼容: 2半角+1全角,Koreader .txt auto add a indentEnglish
+    local indentChinese = "  　"
+    -- 两半角空格
+    local indentEnglish = "  "
+    local prefix = nil
+    local paragraphs = {}
+    local buffer = ""
 
     local lines = {}
     for line in text:gmatch("([^\n]*)\n?") do
-        table.insert(lines, line)
-    end
-    text = nil
-
-    for _, line in ipairs(lines) do
-        -- %s 全角 特殊空格:\u{00A0}
-        local trimmed = line:gsub("^[%s　 ]+", "")
-        -- :gsub("[%s　 ]+$", "") 
-
-        if trimmed ~= "" then
-            -- 非ASCII按中文处理 ffiUtil.utf8charcode
-            local first_byte = trimmed:sub(1, 1):byte()
-            local prefix = (first_byte and first_byte < 128) and indentEnglish or indentChinese
-            table.insert(paragraphs, prefix .. trimmed)
+        local clean = (line or ""):gsub("^[%s　 ]+", ""):gsub("[%s　 ]+$", "")
+        if clean and clean ~= "" then
+            table.insert(lines, clean)
         end
     end
+
+    local function isPunctuation(char)
+        if not char then
+            return false
+        end
+        local code = ffiUtil.utf8charcode(char)
+        if not code then
+            return false
+        end
+
+        -- 常见标点符号判断
+        local punctuationSet = {
+            [0x0021] = true,
+            [0x002C] = true,
+            [0x002E] = true,
+            [0x003A] = true,
+            [0x003B] = true,
+            [0x003F] = true,
+
+            [0x3001] = true,
+            [0x3002] = true,
+            [0xFF0C] = true,
+            [0xFF0E] = true,
+            [0xFF1A] = true,
+            [0xFF1B] = true,
+            [0xFF1F] = true
+        }
+
+        return punctuationSet[code] or (code >= 0x2000 and code <= 0x206F) or (code >= 0x3000 and code <= 0x303F) or
+                   (code >= 0xFF00 and code <= 0xFFEF)
+    end
+
+    local function lastUtf8Char(str)
+        if type(str) == 'string' and util.splitToChars then
+            local chars_part = str:sub(-9)
+            local chars = util.splitToChars(chars_part) or {}
+            return #chars > 0 and chars[#chars] or nil
+        end
+    end
+
+    local function firstUtf8Char(str)
+        if type(str) == 'string' and util.splitToChars then
+            local chars_part = str:sub(1, 9)
+            local chars = util.splitToChars(chars_part) or {}
+            return #chars > 0 and chars[1] or nil
+        end
+    end
+
+    for i, line in ipairs(lines) do
+
+        local allow_split = true
+
+        if buffer and buffer ~= "" then
+            line = table.concat({buffer, line or ""})
+            buffer = ""
+        end
+
+        if line ~= "" then
+
+            if not prefix then
+                prefix = util.hasCJKChar(line:sub(1, 9)) and indentChinese or indentEnglish
+                -- logger.dbg('isChinese:', prefix == indentChinese)
+            end
+
+            local lastChar = lastUtf8Char(line)
+            local nextChar = firstUtf8Char(lines[i + 1] or "")
+            local lastChar_isPunctuation = isPunctuation(lastChar)
+
+            -- 中文段末没有标点不允许换行, 避免触发koreader的章节标题渲染规则
+            if not lastChar_isPunctuation and prefix == indentChinese then
+                allow_split = false
+            else
+                allow_split = util.isSplittable and util.isSplittable(lastChar, nextChar, lastChar) or true
+            end
+
+            -- logger.dbg(i, 'last:next', lastChar, nextChar, allow_split)
+
+            if not allow_split and i < #lines then
+
+                if prefix == indentEnglish and not lastChar_isPunctuation and not isPunctuation(nextChar) then
+                    -- 非CJK两个单词间补充个空格
+                    line = line .. " "
+                end
+                buffer = table.concat({buffer, line})
+            else
+                table.insert(paragraphs, prefix .. line)
+            end
+        end
+    end
+
     lines = nil
-    -- return table.concat(paragraphs, "§\n")
+
     return table.concat(paragraphs, "\n")
 end
 
