@@ -48,7 +48,7 @@ function M:pollAndCreateTextWidget()
     local message = '正在下载章节'
 
     if state.type == 'SUCCESS' then
-        message = self.cancellation_requested and '下载已取消!' or '下载完成!'
+        message = self.cancellation_requested and '下载已取消！' or '下载完成！'
     elseif state.type == 'PENDING' then
         if self.cancellation_requested then
             message = "正在等待下载被取消…"

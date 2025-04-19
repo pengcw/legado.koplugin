@@ -387,7 +387,7 @@ function M:_reader3Login()
     end
 
     if not H.is_str(res.body.data.accessToken) then
-        return false, '获取Token失败'
+        return false, '获取 Token 失败'
     end
 
     logger.dbg('get legado3token:', res.body.data.accessToken)
@@ -411,7 +411,7 @@ function M:legadoSporeApi(requestFunc, callback, opts, logName)
     end
 
     if isServerOnly == true and self.settings_data.data.server_type ~= 2 then
-        return wrap_response(nil, "仅支持服务器版本\r\n其它请在app操作后刷新")
+        return wrap_response(nil, "仅支持服务器版本\r\n其它请在 app 操作后刷新")
     end
 
     self.apiClient:reset_middlewares()
@@ -436,7 +436,7 @@ function M:legadoSporeApi(requestFunc, callback, opts, logName)
     if H.is_tbl(res.body) and res.body.data == "NEED_LOGIN" and res.body.isSuccess == false then
         self:resetReader3Token()
         self:_reader3Login()
-        return wrap_response(nil, 'NEED_LOGIN,刷新并继续')
+        return wrap_response(nil, 'NEED_LOGIN，刷新并继续')
     end
 
     if H.is_tbl(res.body) and res.body.isSuccess == true and not H.is_nil(res.body.data) then
@@ -476,7 +476,7 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
 
         if not status then
             dbg.log('refreshChaptersCache数据写入', tostring(err))
-            return wrap_response(nil, '数据写入出错,请重试')
+            return wrap_response(nil, '数据写入出错，请重试')
         end
         return wrap_response(true)
     end, {
@@ -506,7 +506,7 @@ function M:refreshLibraryCache(last_refresh_time)
 
         if not status then
             dbg.log('refreshLibraryCache数据写入', H.errorHandler(err))
-            return wrap_response(nil, '写入数据出错,请重试')
+            return wrap_response(nil, '写入数据出错，请重试')
         end
 
         return wrap_response(true)
@@ -619,7 +619,7 @@ function M:setBookSource(newBookSource)
 
             if not status then
                 dbg.log('setBookSource数据写入', tostring(err))
-                return wrap_response(nil, '数据写入出错,请重试')
+                return wrap_response(nil, '数据写入出错，请重试')
             end
             return wrap_response(true)
         else
@@ -746,7 +746,7 @@ function M:addBookToLibrary(bookinfo)
 
             if not status then
                 dbg.log('addBookToLibrary数据写入', tostring(err))
-                return wrap_response(nil, '数据写入出错,请重试')
+                return wrap_response(nil, '数据写入出错，请重试')
             end
             return wrap_response(true)
         else
@@ -993,7 +993,7 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
             end
             local status, err = pcall(pDownload_Image, html_url)
             if not status then
-                error('下载失败:' .. tostring(err))
+                error('下载失败：' .. tostring(err))
             end
             local ext = first_line:match("[^%.]+$") or "html"
             content = err['data'] or '下载失败'
@@ -1017,7 +1017,7 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
         if util.fileExists(filePath) then
             if chapter.is_pre_loading == true then
 
-                error('存在目标任务,本次任务取消')
+                error('存在目标任务，本次任务取消')
             else
 
                 chapter.cacheFilePath = filePath
@@ -1035,7 +1035,7 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
             return chapter
         else
 
-            error('下载content写入失败')
+            error('下载 content 写入失败')
         end
     end
 
@@ -1556,7 +1556,7 @@ end
 
 function M:cleanBookCache(book_cache_id)
     if self:isExtractingInBackground() == true then
-        return wrap_response(nil, '有后台任务进行中,请等待结束或者重启koreader')
+        return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
     end
     local bookShelfId = self:getServerPathCode()
 
@@ -1575,7 +1575,7 @@ end
 
 function M:cleanAllBookCaches()
     if self:isExtractingInBackground() == true then
-        return wrap_response(nil, '有后台任务进行中,请等待结束或者重启koreader')
+        return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
     end
 
     local bookShelfId = self:getServerPathCode()
@@ -1608,7 +1608,7 @@ function M:ChangeChapterCache(chapter)
         if status == true then
             return wrap_response(true)
         else
-            return wrap_response(nil, '下载任务添加失败:' .. H.errorHandler(err))
+            return wrap_response(nil, '下载任务添加失败：' .. H.errorHandler(err))
         end
     else
 
@@ -1863,8 +1863,8 @@ function M:downloadChapter(chapter, message_dialog)
         return self:pDownloadChapter(chapter, message_dialog)
     end)
     if not status then
-        logger.err('下载章节失败:', err)
-        return wrap_response(nil, "下载章节失败:" .. H.errorHandler(err))
+        logger.err('下载章节失败：', err)
+        return wrap_response(nil, "下载章节失败：" .. H.errorHandler(err))
     end
     return wrap_response(err)
 
@@ -1931,7 +1931,7 @@ function M:setEndpointUrl(new_setting_url)
         username, password = decoded_userinfo:match("^([^:]+):?(.*)$")
         password = (password ~= "") and password or nil
         if not H.is_str(username) or not H.is_str(password) then
-            return wrap_response(nil, "username,passwor格式有误")
+            return wrap_response(nil, "username，password格式有误")
         end
     end
 
