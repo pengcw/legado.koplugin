@@ -56,7 +56,7 @@ local function downloadImage(img_src)
         if H.is_tbl(data) and data.data then
             return data.data
         else
-            logger.warn("图片下载失败:", img_src)
+            logger.warn("图片下载失败：", img_src)
             return
         end
     end, function(err_msg)
@@ -94,7 +94,7 @@ function M:loadChatperInitImage(chapter)
 
         return self.image
     else
-        logger.err("获取章节图片列表失败Init")
+        logger.err("获取章节图片列表失败 Init")
         Backend:show_notice("内容加载失败")
         return RenderImage:renderImageFile("resources/koreader.png", false)
     end
@@ -103,7 +103,7 @@ end
 function M:getTurnPageNextImage(call_event_type, image_num)
 
     if self.image and self.image_disposable and self.image.free then
-        logger.dbg("释放当前图片资源:")
+        logger.dbg("释放当前图片资源：")
         self.image:free()
         self.image = nil
     end
@@ -117,7 +117,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
     if image_num == 0 then
         if current_chapter_index > 1 then
             current_chapter_index = current_chapter_index - 1
-            logger.dbg("切换到上一章节:", current_chapter_index)
+            logger.dbg("切换到上一章节：", current_chapter_index)
         else
             Backend:show_notice("已经是第一章")
             return
@@ -137,7 +137,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             -- 处理章节末页翻页
             local direction = call_event_type == 'next' and 1 or -1
             current_chapter_index = current_chapter_index + direction
-            logger.dbg("章节边界，切换到新章节:", current_chapter_index)
+            logger.dbg("已到达章节边界，切换到新章节：", current_chapter_index)
         end
     end
 
@@ -160,7 +160,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
                 is_success = true
             end
         else
-            logger.err("获取章节图片列表失败:", current_chapter_index)
+            logger.err("获取章节图片列表失败：", current_chapter_index)
             Backend:show_notice("内容加载失败" .. tostring(current_chapter_index))
             return
         end
@@ -192,7 +192,7 @@ end
 function M:getTurnPageNextImageT(call_event_type, image_num)
 
     if self.image and self.image_disposable and self.image.free then
-        logger.dbg("释放当前图片资源:")
+        logger.dbg("释放当前图片资源：")
         self.image:free()
         self.image = nil
     end
@@ -203,7 +203,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
     if image_num == 0 then
         if current_chapter_index > 1 then
             current_chapter_index = current_chapter_index - 1
-            logger.dbg("切换到上一章节:", current_chapter_index)
+            logger.dbg("切换到上一章节：", current_chapter_index)
         else
             Backend:show_notice("已经是第一章")
             return
@@ -218,7 +218,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
 
             local direction = call_event_type == 'next' and 1 or -1
             current_chapter_index = current_chapter_index + direction
-            logger.dbg("章节边界，切换到新章节:", current_chapter_index)
+            logger.dbg("已到达章节边界，切换到新章节:", current_chapter_index)
         end
     end
 
