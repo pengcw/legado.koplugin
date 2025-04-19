@@ -28,6 +28,7 @@ local ChapterListing = Menu:extend{
 
     bookinfo = nil,
     chapter_sorting_mode = nil,
+    all_chapters_count = nil,
     on_return_callback = nil,
     ui_refresh_time = nil,
     book_reader = nil
@@ -254,15 +255,19 @@ function ChapterListing:onMenuHold(item)
         text = table.concat({Icons.FA_INFO_CIRCLE, " 向后缓存"}),
         callback = function()
             UIManager:close(dialog)
-
+            if not self.all_chapters_count then
+                self.all_chapters_count = Backend:getChapterCount(book_cache_id)
+            end
             local autoturn_spin = SpinWidget:new{
                 value = 1,
                 value_min = 1,
-                value_max = 50,
+                value_max = tonumber(self.all_chapters_count),
                 value_step = 1,
                 value_hold_step = 5,
                 ok_text = "下载",
-                title_text = "请选择需下载的章数\r\n(默认跳过已读和已下载)：",
+                title_text = "请选择需下载的章数：",
+                info_text = "( 默认跳过已读和已下载, 点击中间数字可直接输入)",
+                extra_text = Icons.FA_DOWNLOAD .. " 缓存全部",
                 callback = function(autoturn_spin)
 
                     local status, err = pcall(function()
@@ -272,13 +277,30 @@ function ChapterListing:onMenuHold(item)
                     if not status and err then
                         dbg.log('向后下载出错：', H.errorHandler(err))
                     end
+                end,
+                extra_callback =function()
+                    MessageBox:confirm("请确认缓存全部章节 (短时间大量下载有可能触发反爬)",
+                        function(result)
+                            if result then
+                                local status, err = pcall(function()
+                                    self:ChapterDownManager(0, 'next')
+                                end)
+                                if not status then
+                                    dbg.log('缓存全部章节出错：', tostring(err))
+                                end
+                            end
+                        end, {
+                            ok_text = "开始",
+                            cancel_text = "取消"
+                        })
                 end
             }
+
             UIManager:show(autoturn_spin)
         end
     }}}
 
-    local dialog_title = table.concat({"已选择[第", tonumber(chapters_index) + 1, '章]'})
+    local dialog_title = table.concat({"[", tostring(item.text), ']'})
     dialog = ButtonDialog:new{
         buttons = buttons,
         title = dialog_title,
@@ -337,6 +359,7 @@ function ChapterListing:onRefreshChapters()
                 Backend:HandleResponse(response, function(data)
                     Backend:show_notice('同步成功')
                     self:updateItems(true)
+                    self.all_chapters_count = nil
                     self.ui_refresh_time = os.time()
                 end, function(err_msg)
                     Backend:show_notice(err_msg or '同步失败')
@@ -569,29 +592,6 @@ function ChapterListing:openMenu()
             self:syncProgressShow()
         end
     }}, {{
-        text = Icons.FA_DOWNLOAD .. " 缓存全部章节",
-        callback = function()
-            if self.multilines_show_more_text == true then
-                Backend:show_notice('章节列表为空')
-                return
-            end
-            UIManager:close(dialog)
-            MessageBox:confirm("请确认缓存全部章节 (短时间大量下载有可能触发反爬)",
-                function(result)
-                    if result then
-                        local status, err = pcall(function()
-                            self:ChapterDownManager(0, 'next')
-                        end)
-                        if not status then
-                            dbg.log('缓存全部章节出错：', tostring(err))
-                        end
-                    end
-                end, {
-                    ok_text = "开始",
-                    cancel_text = "取消"
-                })
-        end
-    }}, {{
         text = Icons.FA_TRASH .. " 清空本书缓存",
         callback = function()
             UIManager:close(dialog)
@@ -617,10 +617,15 @@ function ChapterListing:openMenu()
         text = Icons.FA_SHARE .. " 跳转到指定章节",
         callback = function()
             UIManager:close(dialog)
-
+            if self.multilines_show_more_text == true then
+                Backend:show_notice('章节列表为空')
+                return
+            end
             if Device.isAndroid() then
                 local book_cache_id = self.bookinfo.cache_id
-                local all_chapters_count = Backend:getChapterCount(book_cache_id)
+                if not self.all_chapters_count then
+                    self.all_chapters_count = Backend:getChapterCount(book_cache_id)
+                end
                 UIManager:show(SpinWidget:new{
                     value = 1,
                     value_min = 1,
