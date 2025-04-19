@@ -48,7 +48,7 @@ function Legado:onDispatcherRegisterActions()
     Dispatcher:registerAction("return_legado_chapterlisting", {
         category = "none",
         event = "ReturnLegadoChapterListing",
-        title = _("返回Legado目录"),
+        title = _("返回 Legado 目录"),
         reader = true
     })
 end

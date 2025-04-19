@@ -138,7 +138,7 @@ end
 
 function LibraryView:generateEmptyViewItemTable()
     return {{
-        text = string.format("No books found in library. Try%s swiping down to refresh.!",
+        text = string.format("No books found in library. Try%s swiping down to refresh.",
             (Device:hasKeys({"Home"}) and ' Press the home button or ' or '')),
         dim = true,
         select_enabled = false
@@ -178,11 +178,11 @@ function LibraryView:onContextMenuChoice(item)
 
     local bookinfo = Backend:getBookInfoCache(item.cache_id)
     local msginfo = [[
-        书名: <<%1>>
-        作者: %2
-        分类: %3
-        书源名称: %4
-        总章数:%5
+        书名： <<%1>>
+        作者： %2
+        分类： %3
+        书源： %4
+        总章数：%5
         总字数：%6
         简介：%7
     ]]
@@ -213,7 +213,7 @@ function LibraryView:onContextMenuChoice(item)
             text = '删除',
             callback = function()
                 MessageBox:confirm(string.format(
-                    "是否删除 <<%s>>?\r\n删除后关联记录会隐藏,重新添加可恢复", bookinfo.name),
+                    "是否删除 <<%s>>？\r\n删除后关联记录会隐藏，重新添加可恢复", bookinfo.name),
                     function(result)
                         if result then
                             Backend:closeDbManager()
@@ -226,7 +226,7 @@ function LibraryView:onContextMenuChoice(item)
                                         Backend:show_notice("删除成功")
                                         self:updateItems(true)
                                     end, function(err_msg)
-                                        MessageBox:error('删除失败:', err_msg)
+                                        MessageBox:error('删除失败：', err_msg)
                                     end)
                                 end
                             end)
@@ -273,7 +273,7 @@ function LibraryView:openInstalledReadSource()
     if #history_lines > 0 then
 
         local servers_history_str = table.concat(history_lines, '\r\n')
-        description = description .. "\r\n历史记录:\r\n" .. servers_history_str
+        description = description .. "\r\n历史记录，\r\n" .. servers_history_str
 
         table.insert(history_lines, tostring(setting_url))
         reset_callback = function()
@@ -301,7 +301,7 @@ function LibraryView:openInstalledReadSource()
 
                 return true
             end, function(err_msg)
-                Backend:show_notice('设置失败:' .. tostring(err_msg))
+                Backend:show_notice('设置失败：' .. tostring(err_msg))
                 return false
             end)
         end
@@ -310,7 +310,7 @@ function LibraryView:openInstalledReadSource()
     end
 
     dialog = MessageBox:input(nil, nil, {
-        title = "设置阅读api接口地址",
+        title = "设置阅读 API 接口地址",
         input = setting_url,
         description = description,
         save_callback = save_callback,
@@ -339,7 +339,7 @@ function LibraryView:openMenu()
         callback = function()
             UIManager:close(dialog)
             MessageBox:confirm(string.format(
-                "当前模式: %s \r\n \r\n缓存模式: 边看边下载,占空间,优点预加载后相对流畅; \r\n \r\n流式: 不下载到磁盘,对网络要求较高，画质缺少优化, 需要下载任一章节后才能开启，建议服务端开启图片代理，优点不占空间;",
+                "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间\n优点；预加载后相对流畅\r\n \r\n流式: 不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）\n优点：不占空间。",
                 (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
                 if result then
                     settings.stream_image_view = not settings.stream_image_view
@@ -356,16 +356,16 @@ function LibraryView:openMenu()
             })
         end
     }}, {{
-        text = Icons.FA_GLOBE .. " legado web地址",
+        text = Icons.FA_GLOBE .. " Legado WEB地址",
         callback = function()
             UIManager:close(dialog)
             self:openInstalledReadSource()
         end
     }}, {{
-        text = Icons.FA_TIMES .. ' ' .. "Clear All caches",
+        text = Icons.FA_TIMES .. ' ' .. "Clear all caches",
         callback = function()
             UIManager:close(dialog)
-            MessageBox:confirm('请选择要执行的操作:', nil, {
+            MessageBox:confirm('请选择要执行的操作：', nil, {
                 no_ok_button = true,
                 other_buttons_first = true,
                 other_buttons = {{{
@@ -375,7 +375,7 @@ function LibraryView:openMenu()
                         Backend:HandleResponse(Backend:saveSettings(settings), function(data)
                             Backend:show_notice("清除成功")
                         end, function(err_msg)
-                            MessageBox:error('操作失败:', err_msg)
+                            MessageBox:error('操作失败：', err_msg)
                         end)
                     end
                 }}, {{
@@ -390,7 +390,7 @@ function LibraryView:openMenu()
                                     Backend:show_notice("已清除")
                                     self:onClose()
                                 end, function(err_msg)
-                                    MessageBox:error('操作失败:', tostring(err_msg))
+                                    MessageBox:error('操作失败：', tostring(err_msg))
                                 end)
                             end
                         end)
@@ -407,12 +407,12 @@ function LibraryView:openMenu()
             local about_txt = [[
 --清风不识字,何故乱翻书--
 
-    简介: 一个在 KOReader 中阅读legado开源阅读书库的插件, 适配阅读3.0 web api, 支持手机app和服务器版本, 初衷是kindle的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的在线阅读，提升老设备体验。
-    功能: 前后无缝翻页,离线缓存,自动预下载章节,同步进度,碎片章节历史记录清除,支持漫画离线和在线阅读，服务器版换源搜索,其他没有的功能可在其它端操作后刷新。
-    操作: 列表支持下拉或Home键刷新、右键列表菜单、Menu键左上角菜单,阅读界面下拉菜单有返回按键。
- 章节页面图标说明: %1 可下载 %2 已阅读 %3 阅读进度
- 帮助改进请到pengcw/legado.koplugin反馈issues
- 版本: ver_%4
+    简介: 一个在 KOReader 中阅读legado开源阅读书库的插件, 适配阅读3.0 web api, 支持手机app和服务器版本, 初衷是 Kindle 的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的在线阅读，提升老设备体验。
+    功能: 前后无缝翻页，离线缓存，自动预下载章节，同步进度，碎片章节历史记录清除，支持漫画离线和在线阅读，服务器版换源搜索，其他没有的功能可在其它端操作后刷新。
+    操作: 列表支持下拉或 Home 键刷新、右键列表菜单、Menu 键左上角菜单，阅读界面下拉菜单有返回按键。
+    章节页面图标说明: %1 可下载 /n %2 已阅读 /n %3 阅读进度 /n 
+    帮助改进请到 Github：pengcw/legado.koplugin 反馈 issues
+    版本: ver_%4
               ]]
 
             local version = ''
@@ -442,12 +442,12 @@ function LibraryView:openMenu()
 
                     if H.copyFileFromTo(source_patches_file_path, patches_file_path) then
                         MessageBox:success(
-                            '安装成功,扩展向前翻页和历史记录清除功能,重启koreader后生效')
+                            '安装成功，扩展向前翻页和历史记录清除功能，重启KOReader后生效')
                     else
-                        MessageBox:error('copy文件失败,请尝试手动安装~', 6)
+                        MessageBox:error('copy文件失败，请尝试手动安装~', 6)
                     end
                 else
-                    MessageBox:error('补丁已被禁用,请从设置-补丁管理中开启', 6)
+                    MessageBox:error('补丁已被禁用，请从设置-补丁管理中开启', 6)
                 end
 
             end
