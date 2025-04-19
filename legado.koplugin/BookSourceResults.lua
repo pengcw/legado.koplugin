@@ -2,11 +2,11 @@ local ConfirmBox = require("ui/widget/confirmbox")
 local UIManager = require("ui/uimanager")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Menu = require("ui/widget/menu")
-local Screen = require("device").screen
 local Device = require("device")
 local Event = require("ui/event")
 local logger = require("logger")
 local ffiUtil = require("ffi/util")
+local Screen = Device.screen
 local T = ffiUtil.template
 
 local Icons = require("libs/Icons")
@@ -108,7 +108,6 @@ function M:generateItemTableFromSearchResults(append_data)
     end
 
     if self.call_mode == 12 or self.call_mode == 2 then
-        -- insert comand item_tabl
         table.insert(item_table, {
             source_index = 0,
             text = string.format("%s 点击加载更多 l:%s", Icons.FA_DOWNLOAD, tostring(self.last_index))
@@ -162,7 +161,7 @@ function M:showBookInfo(bookinfo)
 分类: %3
 书源名称: %4
 书源地址: %5
-总章数:%6
+总章数：%6
 总字数：%7
 简介：%8
 ]]
@@ -460,7 +459,7 @@ function M:onMenuChoice(item)
             self:handleMultiSourceSearch(self.search_text, true)
         end
         return true
-        -- commond item
+        -- command item
         -- self.call_mode == 11 -- 换源->搜索更多
         -- self.call_mode == 12 -- 换源->搜索更多->加载更多 追加
         -- self.call_mode == 2 -- 搜书->搜索更多->加载更多 追加

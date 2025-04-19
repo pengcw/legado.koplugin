@@ -794,11 +794,11 @@ end
 ---@param text any
 local function splitParagraphsPreserveBlank(text)
     if not text or text == "" then
-        return ""
+        return {}
     end
 
     text = text:gsub("\r\n?", "\n"):gsub("\n+", function(s)
-        return (#s >= 1) and "\n" or s
+        return (#s >= 2) and "\n\n" or s
     end)
 
     -- 兼容: 2半角+1全角,Koreader .txt auto add a indentEnglish
@@ -908,7 +908,7 @@ local function splitParagraphsPreserveBlank(text)
 
     lines = nil
 
-    return table.concat(paragraphs, "\n")
+    return paragraphs
 end
 
 function M:pDownloadChapter(chapter, message_dialog, is_recursive)
@@ -1001,13 +1001,14 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
 
         else
 
-            filePath = filePath .. '.txt'
-            content = splitParagraphsPreserveBlank(content)
-
+            
             if content == "" then
                 chapter.content_is_nil = true
             end
 
+            filePath = filePath .. '.txt'
+            content = table.concat(splitParagraphsPreserveBlank(content), "\n")
+            
             if not string.find(first_line, chapter_title, 1, true) then
                 content = table.concat({"\t\t", tostring(chapter_title), "\n\n", content})
             end
@@ -1792,9 +1793,11 @@ function M:after_reader_chapter_show(chapter)
     local chapters_index = chapter.chapters_index
     local cache_file_path = chapter.cacheFilePath
     local book_cache_id = chapter.book_cache_id
-    local update_state = {}
 
     local status, err = pcall(function()
+
+        local update_state = {}
+
         if chapter.isDownLoaded ~= true then
             update_state.content = 'downloaded'
             update_state.cacheFilePath = cache_file_path
@@ -1806,32 +1809,39 @@ function M:after_reader_chapter_show(chapter)
                 _set = "= strftime('%s', 'now')"
             }
         end
+
         self.dbManager:transaction(function()
             self.dbManager:dynamicUpdateChapters(chapter, update_state)
         end)()
+
     end)
 
     if not status then
         dbg.log('updating the read download flag err:', tostring(err))
     end
 
-    if cache_file_path ~= nil and chapter.cacheExt == nil then
+    if cache_file_path ~= nil then
 
-        local status, err = pcall(function()
-            local cache_name = select(2, util.splitFilePathName(cache_file_path))
-            local _, extension = util.splitFileNameSuffix(cache_name)
-            local bookShelfId = self:getServerPathCode()
-            self.dbManager:transaction(function()
-                return self.dbManager:dynamicUpdateBooks({
-                    book_cache_id = book_cache_id,
-                    bookShelfId = bookShelfId
-                }, {
-                    cacheExt = extension
-                })
-            end)()
-        end)
-        if not status then
-            dbg.log('updating cache ext err:', tostring(err))
+        local cache_name = select(2, util.splitFilePathName(cache_file_path)) or ''
+        local _, extension = util.splitFileNameSuffix(cache_name)
+
+        if extension and chapter.cacheExt ~= extension then
+            local status, err = pcall(function()
+
+                local bookShelfId = self:getServerPathCode()
+                self.dbManager:transaction(function()
+                    return self.dbManager:dynamicUpdateBooks({
+                        book_cache_id = book_cache_id,
+                        bookShelfId = bookShelfId
+                    }, {
+                        cacheExt = extension
+                    })
+                end)()
+            end)
+
+            if not status then
+                dbg.log('updating cache ext err:', tostring(err))
+            end
         end
     end
 

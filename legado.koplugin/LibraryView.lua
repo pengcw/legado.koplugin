@@ -6,7 +6,7 @@ local logger = require("logger")
 local Event = require("ui/event")
 local UIManager = require("ui/uimanager")
 local NetworkMgr = require("ui/network/manager")
-local Menu = require("libs/Menu")
+local Menu = require("ui/widget/menu")
 local Device = require("device")
 local T = ffiUtil.template
 local _ = require("gettext")
@@ -23,9 +23,11 @@ local LibraryView = Menu:extend{
     is_popout = false,
     title = "Library",
     with_context_menu = true,
+    align_baselines = true,
     disk_available = nil,
     selected_item = nil,
     chapter_listing = nil,
+    show_search_item = nil,
     ui_refresh_time = os.time()
 }
 
@@ -52,6 +54,7 @@ function LibraryView:init()
         MessageBox.error('初始化失败')
         logger.err('leado plugin err:', H.errorHandler(err))
     end
+
     LibraryView.instance = self
 end
 
@@ -96,6 +99,7 @@ function LibraryView:updateItems(no_recalculate_dimen)
         self.multilines_show_more_text = true
         self.items_per_page = 1
     end
+
     Menu.updateItems(self, nil, no_recalculate_dimen)
 end
 
@@ -108,6 +112,7 @@ function LibraryView:onRefreshLibrary()
             if state == true then
                 Backend:HandleResponse(response, function(data)
                     Backend:show_notice('同步成功')
+                    self.show_search_item = true
                     self:updateItems(true)
                     self.ui_refresh_time = os.time()
                 end, function(err_msg)
@@ -122,6 +127,14 @@ end
 
 function LibraryView:generateItemTableFromMangas(books)
     local item_table = {}
+    if self.show_search_item == true then
+        item_table[1] = {
+            text = string.format('%s Search...', Icons.FA_MAGNIFYING_GLASS),
+            mandatory = "[Go]"
+        }
+        self.show_search_item = nil
+    end
+
     for _, bookinfo in ipairs(books) do
 
         local show_book_title = ("%s (%s)[%s]"):format(bookinfo.name or "未命名书籍",
@@ -129,7 +142,8 @@ function LibraryView:generateItemTableFromMangas(books)
 
         table.insert(item_table, {
             cache_id = bookinfo.cache_id,
-            text = show_book_title
+            text = show_book_title,
+            mandatory = Icons.FA_ELLIPSIS_VERTICAL
         })
     end
 
@@ -154,7 +168,10 @@ function LibraryView:fetchAndShow()
 end
 
 function LibraryView:onPrimaryMenuChoice(item)
-
+    if not item.cache_id then
+        self:openSearchBooksDialog()
+        return
+    end
     local bookinfo = Backend:getBookInfoCache(item.cache_id)
     self.selected_item = item
     LibraryView.onReturnCallback = function()
@@ -174,8 +191,11 @@ function LibraryView:onPrimaryMenuChoice(item)
 
 end
 
-function LibraryView:onContextMenuChoice(item)
-
+function LibraryView:onMenuHold(item)
+    if not item.cache_id then
+        self:openSearchBooksDialog()
+        return
+    end
     local bookinfo = Backend:getBookInfoCache(item.cache_id)
     local msginfo = [[
         书名： <<%1>>
@@ -329,12 +349,6 @@ function LibraryView:openMenu()
     local dialog
     local settings = Backend:getSettings()
     local buttons = {{{
-        text = Icons.FA_MAGNIFYING_GLASS .. " Search for books",
-        callback = function()
-            UIManager:close(dialog)
-            self:openSearchBooksDialog()
-        end
-    }}, {{
         text = Icons.FA_BOOK .. " 漫画模式 " .. (settings.stream_image_view and '[流式]' or '[缓存]'),
         callback = function()
             UIManager:close(dialog)
@@ -403,26 +417,20 @@ function LibraryView:openMenu()
         text = Icons.FA_QUESTION_CIRCLE .. ' ' .. "关于",
         callback = function()
             UIManager:close(dialog)
-
             local about_txt = [[
 -- 清风不识字，何故乱翻书 --
+
 简介：
-一个在 KOReader 中阅读 Legado 书库的插件，适配阅读 3.0 web api，支持手机 APP 和服务器版本。初衷是 Kindle 的浏览器体验不佳，目的是部分替代受限设备的浏览器，实现流畅的在线阅读，提升老设备体验。
-功能：
-前后无缝翻页
-离线缓存 / 自动预下载章节
-同步进度
-碎片章节历史记录清除
-支持漫画离线和在线阅读
-服务器版换源搜索
-其他没有的功能可在其它端操作后刷新
+一个在 KOReader 中阅读 Legado 书库的插件，适配阅读 3.0，支持手机 APP 和服务器版本。初衷是 Kindle 的浏览器体验不佳，目的是部分替代受限设备的浏览器，实现流畅的网文阅读，提升老设备体验。
+
 操作：
-列表支持下拉或 Home 键刷新
-右键列表菜单 / Menu 键左上角菜单
-阅读界面下拉菜单有返回按键
+列表支持下拉或 Home 键刷新，右键列表菜单 / Menu 键左上角菜单，阅读界面下拉菜单有返回选项，书架和目录可绑定手势使用。
+
 章节页面图标说明:
-%1 可下载 %2 已阅读 %3 阅读进度
+%1 可下载  %2 已阅读  %3 阅读进度
+
 帮助改进请到 Github：pengcw/legado.koplugin 反馈 issues
+
 版本: ver_%4]]
 
             local version = ''
@@ -433,7 +441,7 @@ function LibraryView:openMenu()
             about_txt = T(about_txt, Icons.FA_DOWNLOAD, Icons.FA_CHECK_CIRCLE, Icons.FA_THUMB_TACK, version)
             MessageBox:custom({
                 text = about_txt,
-                alignment = "left"
+                alignment = "left" 
             })
         end
     }}}
@@ -443,7 +451,7 @@ function LibraryView:openMenu()
     local ReaderRolling = require("apps/reader/modules/readerrolling")
     if ReaderRolling.c8eeb679b ~= true then
         table.insert(buttons, 1, {{
-            text = Icons.FA_EXCLAMATION_CIRCLE .. ' 碎片历史记录清除[未开启]',
+            text = Icons.FA_EXCLAMATION_CIRCLE .. ' 碎片历史记录清除 [未开启]',
             callback = function()
                 UIManager:close(dialog)
                 local source_patches_file_path = ffiUtil.joinPath(H.getPluginDirectory(),
@@ -494,9 +502,27 @@ function LibraryView:openMenu()
 end
 
 function LibraryView:openSearchBooksDialog()
-    require("BookSourceResults"):searchAndShow(function()
-        self:onRefreshLibrary()
-    end)
+    if Backend:getSettings().server_type == 2 then
+        require("BookSourceResults"):searchAndShow(function()
+            self:onRefreshLibrary()
+        end)
+    else
+        if self.multilines_show_more_text ~= true then
+            self:onShowGotoDialog()
+        end
+    end
+end
+
+function LibraryView:onMenuSelect(entry, pos)
+    if entry.select_enabled == false then
+        return true
+    end
+    local selected_context_menu = pos ~= nil and pos.x > 0.8
+    if selected_context_menu then
+        self:onMenuHold(entry, pos)
+    else
+        self:onPrimaryMenuChoice(entry, pos)
+    end
 end
 
 function LibraryView:onClose()
