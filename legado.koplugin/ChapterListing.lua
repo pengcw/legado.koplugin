@@ -88,7 +88,7 @@ end
 
 function ChapterListing:generateEmptyViewItemTable()
     return {{
-        text = string.format("No chapters found in library. Try%s swiping down to refresh.!",
+        text = string.format("No chapters found in library. Try%s swiping down to refresh.",
             (Device:hasKeys({"Home"}) and ' Press the home button or ' or '')),
         dim = true,
         select_enabled = false
@@ -238,7 +238,7 @@ function ChapterListing:onMenuHold(item)
                 if isDownLoaded == true then
                     Backend:show_notice('删除成功')
                 else
-                    MessageBox:success('后台下载章节任务已添加,请稍后下拉刷新')
+                    MessageBox:success('后台下载章节任务已添加，请稍后下拉刷新')
                 end
             end, function(err_msg)
                 MessageBox:error('失败:', err_msg)
@@ -262,7 +262,7 @@ function ChapterListing:onMenuHold(item)
                 value_step = 1,
                 value_hold_step = 5,
                 ok_text = "下载",
-                title_text = "请选择需下载的章数\r\n(默认跳过已读和已下载):",
+                title_text = "请选择需下载的章数\r\n(默认跳过已读和已下载)：",
                 callback = function(autoturn_spin)
 
                     local status, err = pcall(function()
@@ -270,7 +270,7 @@ function ChapterListing:onMenuHold(item)
                         self:ChapterDownManager(tonumber(chapters_index), 'next', autoturn_spin.value)
                     end)
                     if not status and err then
-                        dbg.log('向后下载出错:', H.errorHandler(err))
+                        dbg.log('向后下载出错：', H.errorHandler(err))
                     end
                 end
             }
@@ -583,7 +583,7 @@ function ChapterListing:openMenu()
                             self:ChapterDownManager(0, 'next')
                         end)
                         if not status then
-                            dbg.log('缓存全部章节出错:', tostring(err))
+                            dbg.log('缓存全部章节出错：', tostring(err))
                         end
                     end
                 end, {
@@ -601,11 +601,11 @@ function ChapterListing:openMenu()
             end, function(state, response)
                 if state == true then
                     Backend:HandleResponse(response, function(data)
-                        Backend:show_notice("已清理,刷新重新可添加")
+                        Backend:show_notice("已清理，刷新重新可添加")
                         self:onReturn()
 
                     end, function(err_msg)
-                        MessageBox:error('操作失败:', err_msg)
+                        MessageBox:error('操作失败：', err_msg)
                     end)
 
                 end
@@ -628,7 +628,7 @@ function ChapterListing:openMenu()
                     value_step = 1,
                     value_hold_step = 5,
                     ok_text = "跳转",
-                    title_text = "请选择需要跳转的章节\n(点击中间可直接输入数字):",
+                    title_text = "请选择需要跳转的章节\n(点击中间可直接输入数字)：",
                     callback = function(autoturn_spin)
                         autoturn_spin.value = tonumber(autoturn_spin.value)
                         self:onGotoPage(self:getPageNumber(autoturn_spin.value))
