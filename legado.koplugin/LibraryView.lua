@@ -273,7 +273,7 @@ function LibraryView:openInstalledReadSource()
     if #history_lines > 0 then
 
         local servers_history_str = table.concat(history_lines, '\r\n')
-        description = description .. "\r\n历史记录，\r\n" .. servers_history_str
+        description = description .. "\r\n历史记录：\r\n" .. servers_history_str
 
         table.insert(history_lines, tostring(setting_url))
         reset_callback = function()
