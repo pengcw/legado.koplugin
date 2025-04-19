@@ -339,7 +339,7 @@ function LibraryView:openMenu()
         callback = function()
             UIManager:close(dialog)
             MessageBox:confirm(string.format(
-                "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间\n优点；预加载后相对流畅\r\n \r\n流式: 不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）\n优点：不占空间。",
+                "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
                 (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
                 if result then
                     settings.stream_image_view = not settings.stream_image_view
@@ -405,14 +405,14 @@ function LibraryView:openMenu()
             UIManager:close(dialog)
 
             local about_txt = [[
---清风不识字,何故乱翻书--
+-- 清风不识字，何故乱翻书 --
 
-    简介: 一个在 KOReader 中阅读legado开源阅读书库的插件, 适配阅读3.0 web api, 支持手机app和服务器版本, 初衷是 Kindle 的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的在线阅读，提升老设备体验。
-    功能: 前后无缝翻页，离线缓存，自动预下载章节，同步进度，碎片章节历史记录清除，支持漫画离线和在线阅读，服务器版换源搜索，其他没有的功能可在其它端操作后刷新。
-    操作: 列表支持下拉或 Home 键刷新、右键列表菜单、Menu 键左上角菜单，阅读界面下拉菜单有返回按键。
-    章节页面图标说明: %1 可下载 /n %2 已阅读 /n %3 阅读进度 /n 
-    帮助改进请到 Github：pengcw/legado.koplugin 反馈 issues
-    版本: ver_%4
+简介: 一个在 KOReader 中阅读 Legado - 开源阅读书库的插件, 适配阅读3.0 web api, 支持手机app和服务器版本, 初衷是 Kindle 的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的在线阅读，提升老设备体验。
+功能: 前后无缝翻页，离线缓存，自动预下载章节，同步进度，碎片章节历史记录清除，支持漫画离线和在线阅读，服务器版换源搜索，其他没有的功能可在其它端操作后刷新。
+操作: 列表支持下拉或 Home 键刷新、右键列表菜单、Menu 键左上角菜单，阅读界面下拉菜单有返回按键。
+章节页面图标说明: %1 可下载 /n %2 已阅读 /n %3 阅读进度 /n 
+帮助改进请到 Github：pengcw/legado.koplugin 反馈 issues
+版本: ver_%4
               ]]
 
             local version = ''
