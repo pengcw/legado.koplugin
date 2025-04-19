@@ -559,6 +559,15 @@ function LibraryView:initializeRegisterEvent(legado_main)
         return true
     end
 
+    function legado_main:onDocSettingsLoad(doc_settings, document)
+        if doc_settings and doc_settings.data and type(doc_settings.readSetting) == 'function' then
+            local filepath = doc_settings:readSetting("doc_path") or ""
+            if not filepath:find('/legado.cache/', 1, true) then
+                return
+            end
+            doc_settings.data.txt_preformatted = 0
+        end
+    end
     function legado_main:onReaderReady(doc_settings)
 
         if LibraryView.instance and LibraryView.instance.chapter_listing and

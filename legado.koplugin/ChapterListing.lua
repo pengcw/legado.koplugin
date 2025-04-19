@@ -340,7 +340,9 @@ function ChapterListing:onRefreshChapters()
                     self.ui_refresh_time = os.time()
                 end, function(err_msg)
                     Backend:show_notice(err_msg or '同步失败')
-                    Backend:show_notice("请检查并刷新书架")
+                    if err_msg ~= '处理中' then
+                        Backend:show_notice("请检查并刷新书架")
+                    end
                 end)
             end
         end)
