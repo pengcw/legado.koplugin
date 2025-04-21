@@ -419,6 +419,7 @@ function M:legadoSporeApi(requestFunc, callback, opts, logName)
     self.apiClient:enable("Format.JSON")
     self.apiClient:enable("ForceJSON")
 
+    -- 单次轮询 timeout,总 timeout
     socketutil:set_timeout(timeouts[1], timeouts[2])
     local status, res = pcall(requestFunc)
     socketutil:reset_timeout()
@@ -450,19 +451,36 @@ function M:legadoSporeApi(requestFunc, callback, opts, logName)
     end
 end
 
+function M:refreshChaptersList(bookinfo)
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl)) then
+        return wrap_response(nil, "获取目录参数错误")
+    end
+    local bookUrl = bookinfo.bookUrl
+    return self:legadoSporeApi(function()
+        return self.apiClient:getChapterList({
+            url = bookUrl,
+            bookSource = bookinfo.origin,
+            bookSourceUrl = bookinfo.origin,
+            refresh = 0,
+            v = os.time()
+        })
+    end, nil, {
+        timeouts = {6, 10}
+    }, 'refreshChaptersList')
+
+end
+
 function M:refreshChaptersCache(bookinfo, last_refresh_time)
 
     if last_refresh_time and os.time() - last_refresh_time < 2 then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(nil, '处理中')
     end
-
-    local book_cache_id = bookinfo.cache_id
-    local bookUrl = bookinfo.bookUrl
-
-    if not bookUrl or not H.is_str(book_cache_id) then
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.cache_id)) then
         return wrap_response(nil, "获取目录参数错误")
     end
+    local book_cache_id = bookinfo.cache_id
+    local bookUrl = bookinfo.bookUrl
     return self:legadoSporeApi(function()
         return self.apiClient:getChapterList({
             url = bookUrl,
@@ -480,7 +498,7 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
         end
         return wrap_response(true)
     end, {
-        timeouts = {12, 12}
+        timeouts = {10, 12}
     }, 'refreshChaptersCache')
 end
 
@@ -511,7 +529,7 @@ function M:refreshLibraryCache(last_refresh_time)
 
         return wrap_response(true)
     end, {
-        timeouts = {6, 10}
+        timeouts = {8, 12}
     }, 'refreshLibraryCache')
 end
 
@@ -557,7 +575,7 @@ function M:saveBookProgress(chapter)
             v = os.time()
         })
     end, nil, {
-        timeouts = {3, 3}
+        timeouts = {3, 5}
     }, 'saveBookProgress')
 
 end
@@ -653,7 +671,7 @@ function M:searchBookSource(bookUrl, lastIndex, searchSize)
         })
 
     end, nil, {
-        timeouts = {100, 120},
+        timeouts = {70, 80},
         isServerOnly = true
     }, 'searchBook')
 
@@ -802,16 +820,17 @@ local function splitParagraphsPreserveBlank(text)
     end)
 
     -- 兼容: 2半角+1全角,Koreader .txt auto add a indentEnglish
-    local indentChinese = "  　"
-    -- 两半角空格
-    local indentEnglish = "  "
-    local prefix = nil
+    local indentChinese = "\u{0020}\u{0020}\u{3000}"
+    local indentEnglish = "\u{0020}\u{0020}"
     local paragraphs = {}
     local buffer = ""
+    local prefix = nil
 
     local lines = {}
+    local pattern_start = "^[%s\u{00A0}\u{3000}\u{200B}]+"
+    local pattern_end = "[%s\u{00A0}\u{3000}\u{200B}]+$"
     for line in text:gmatch("([^\n]*)\n?") do
-        local clean = (line or ""):gsub("^[%s　 ]+", ""):gsub("[%s　 ]+$", "")
+        local clean = (line or ""):gsub(pattern_start, ""):gsub(pattern_end, "")
         if clean and clean ~= "" then
             table.insert(lines, clean)
         end
@@ -850,9 +869,9 @@ local function splitParagraphsPreserveBlank(text)
 
     local function lastUtf8Char(str)
         if type(str) == 'string' and util.splitToChars then
-            local chars_part = str:sub(-9)
+            local chars_part = str:sub(-12)
             local chars = util.splitToChars(chars_part) or {}
-            return #chars > 0 and chars[#chars] or nil
+            return #chars > 0 and chars[#chars] or nil, #chars
         end
     end
 
@@ -860,7 +879,7 @@ local function splitParagraphsPreserveBlank(text)
         if type(str) == 'string' and util.splitToChars then
             local chars_part = str:sub(1, 9)
             local chars = util.splitToChars(chars_part) or {}
-            return #chars > 0 and chars[1] or nil
+            return #chars > 0 and chars[1] or nil, #chars
         end
     end
 
@@ -880,12 +899,12 @@ local function splitParagraphsPreserveBlank(text)
                 -- logger.dbg('isChinese:', prefix == indentChinese)
             end
 
-            local lastChar = lastUtf8Char(line)
+            local lastChar, lastCharLen = lastUtf8Char(line)
             local nextChar = firstUtf8Char(lines[i + 1] or "")
             local lastChar_isPunctuation = isPunctuation(lastChar)
 
             -- 中文段末没有标点不允许换行, 避免触发koreader的章节标题渲染规则
-            if not lastChar_isPunctuation and prefix == indentChinese then
+            if prefix == indentChinese and (not lastChar_isPunctuation or lastCharLen < 3) then
                 allow_split = false
             else
                 allow_split = util.isSplittable and util.isSplittable(lastChar, nextChar, lastChar) or true
@@ -897,7 +916,7 @@ local function splitParagraphsPreserveBlank(text)
 
                 if prefix == indentEnglish and not lastChar_isPunctuation and not isPunctuation(nextChar) then
                     -- 非CJK两个单词间补充个空格
-                    line = line .. " "
+                    line = line .. "\u{0020}"
                 end
                 buffer = table.concat({buffer, line})
             else
@@ -1001,14 +1020,16 @@ function M:pDownloadChapter(chapter, message_dialog, is_recursive)
 
         else
 
-            
-            if content == "" then
+            filePath = filePath .. '.txt'
+            local paragraphs = splitParagraphsPreserveBlank(content)
+            if #paragraphs == 0 then
                 chapter.content_is_nil = true
             end
 
-            filePath = filePath .. '.txt'
-            content = table.concat(splitParagraphsPreserveBlank(content), "\n")
-            
+            first_line = paragraphs[1] or ""
+            content = table.concat(paragraphs, "\n")
+            paragraphs = nil
+
             if not string.find(first_line, chapter_title, 1, true) then
                 content = table.concat({"\t\t", tostring(chapter_title), "\n\n", content})
             end
