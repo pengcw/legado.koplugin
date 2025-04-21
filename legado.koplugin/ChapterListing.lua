@@ -61,12 +61,12 @@ function ChapterListing:init()
 end
 
 function ChapterListing:updateChapterList()
-    self:updateItems()
+    self:refreshItems()
     self:gotoLastReadChapter()
     Backend:onBookOpening(self.bookinfo.cache_id)
 end
 
-function ChapterListing:updateItems(no_recalculate_dimen)
+function ChapterListing:refreshItems(no_recalculate_dimen)
 
     local book_cache_id = self.bookinfo.cache_id
     local chapter_cache_data = Backend:getBookChapterCache(book_cache_id)
@@ -157,6 +157,7 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallback, accept_cached_r
         on_return_callback = onReturnCallback,
 
         covers_fullscreen = true,
+        subtitle = "目录",
         title = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
             Backend:getSettings().stream_image_view == true) and "[流式]" or "")
     }
@@ -215,7 +216,7 @@ function ChapterListing:onMenuHold(item)
                 isRead = chapter.isRead,
                 book_cache_id = chapter.book_cache_id
             }), function(data)
-                self:updateItems()
+                self:refreshItems(true)
 
             end, function(err_msg)
                 MessageBox:error('标记失败 ', err_msg)
@@ -235,7 +236,7 @@ function ChapterListing:onMenuHold(item)
 
                 title = chapter
             }), function(data)
-                self:updateItems()
+                self:refreshItems(true)
                 if isDownLoaded == true then
                     Backend:show_notice('删除成功')
                 else
@@ -338,7 +339,7 @@ function ChapterListing:onBookReaderCallback(chapter)
     else
 
         BookReader:closeReaderUi(function()
-            self:updateItems(true)
+            self:refreshItems(true)
             UIManager:show(self)
             self.book_reader = nil
         end)
@@ -358,7 +359,7 @@ function ChapterListing:onRefreshChapters()
             if state == true then
                 Backend:HandleResponse(response, function(data)
                     Backend:show_notice('同步成功')
-                    self:updateItems(true)
+                    self:refreshItems()
                     self.all_chapters_count = nil
                     self.ui_refresh_time = os.time()
                 end, function(err_msg)
@@ -375,7 +376,7 @@ end
 function ChapterListing:showReaderUI(chapter)
 
     ChapterListing.onReturnCallback = function()
-        self:updateItems(true)
+        self:refreshItems(true)
         UIManager:show(self)
     end
 
@@ -496,7 +497,7 @@ function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, dow
             job_inspection_interval = 0.8,
             dismiss_callback = function()
                 Backend:show_notice('下载结束')
-                self:updateItems()
+                self:refreshItems(true)
                 if H.is_func(dismiss_callback) then
                     dismiss_callback()
                 end
@@ -523,7 +524,7 @@ function ChapterListing:syncProgressShow(chapter)
                 }
             end
         end
-        return Backend:refreshLibraryCache(self.ui_refresh_time)
+        return Backend:refreshLibraryCache()
     end, function(state, response)
         if state == true then
             Backend:HandleResponse(response, function(data)
@@ -538,14 +539,14 @@ function ChapterListing:syncProgressShow(chapter)
                         chapters_index = bookinfo.durChapterIndex,
                         isRead = true
                     }, true)
-                    self:updateItems(true)
+                    self:refreshItems(true)
                     Backend:show_notice('同步完成')
                     local last_chapter = tonumber(bookinfo.durChapterIndex + 1)
                     self:onGotoPage(self:getPageNumber(last_chapter))
                     self.ui_refresh_time = os.time()
                 end
             end, function(err_msg)
-                MessageBox:error(err_msg or '同步失败')
+                MessageBox:error('同步失败：'..tostring(err_msg))
             end)
         end
     end)
@@ -556,11 +557,11 @@ function ChapterListing:openMenu()
     local dialog
 
     local buttons = {{{
-        text = Icons.FA_REFRESH .. " 书籍换源",
+        text = Icons.FA_REFRESH .. " 自动换源",
         callback = function()
             UIManager:close(dialog)
             NetworkMgr:runWhenOnline(function()
-                require("BookSourceResults"):fetchAndShow(self.bookinfo, function()
+                require("BookSourceResults"):autoChangeSource(self.bookinfo, function()
                     self:onReturn()
                 end)
             end)
@@ -576,7 +577,7 @@ function ChapterListing:openMenu()
                 settings.chapter_sorting_mode = 'chapter_ascending'
             end
             Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-                self:updateItems()
+                self:refreshItems(true)
             end, function(err_msg)
                 MessageBox:error('设置失败:', err_msg)
             end)
@@ -633,7 +634,8 @@ function ChapterListing:openMenu()
                     value_step = 1,
                     value_hold_step = 5,
                     ok_text = "跳转",
-                    title_text = "请选择需要跳转的章节\n(点击中间可直接输入数字)：",
+                    title_text = "请选择需要跳转的章节：",
+                    info_text = "( 点击中间可直接输入数字 )",
                     callback = function(autoturn_spin)
                         autoturn_spin.value = tonumber(autoturn_spin.value)
                         self:onGotoPage(self:getPageNumber(autoturn_spin.value))

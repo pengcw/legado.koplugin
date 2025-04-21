@@ -809,7 +809,7 @@ LIMIT 1;
     ]]
     sql_stmt = string.format(sql_stmt, bookCacheId)
     local lastUpdated = self:getDB():rowexec(sql_stmt)
-    return tonumber(lastUpdated)
+    return tonumber(lastUpdated) or 0
 end
 
 function M:getChapterLastUpdateTime(bookCacheId)

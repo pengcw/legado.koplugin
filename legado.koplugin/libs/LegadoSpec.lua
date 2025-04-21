@@ -19,7 +19,8 @@ return {
         getChapterList = {
             path = "/getChapterList",
             method = "GET",
-            required_params = {"url", "v"},
+            required_params = {"url"},
+            optional_params = {"v", "refresh","bookSource","bookSourceUrl"},
             expected_status = {200}
         },
         getBookshelf = {

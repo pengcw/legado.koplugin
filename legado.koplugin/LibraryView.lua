@@ -49,7 +49,7 @@ function LibraryView:init()
     end
 
     -- 防御性编码,koreader又又崩了
-    local status, err = pcall(self.updateItems, self)
+    local status, err = pcall(self.refreshItems, self)
     if not status then
         MessageBox.error('初始化失败')
         logger.err('leado plugin err:', H.errorHandler(err))
@@ -87,7 +87,7 @@ function LibraryView:onSwipe(arg, ges_ev)
     Menu.onSwipe(self, arg, ges_ev)
 end
 
-function LibraryView:updateItems(no_recalculate_dimen)
+function LibraryView:refreshItems(no_recalculate_dimen)
 
     local books_cache_data = Backend:getBookShelfCache()
     if H.is_tbl(books_cache_data) and #books_cache_data > 0 then
@@ -113,7 +113,7 @@ function LibraryView:onRefreshLibrary()
                 Backend:HandleResponse(response, function(data)
                     Backend:show_notice('同步成功')
                     self.show_search_item = true
-                    self:updateItems(true)
+                    self:refreshItems()
                     self.ui_refresh_time = os.time()
                 end, function(err_msg)
                     Backend:show_notice(response.message or '同步失败')
@@ -175,7 +175,7 @@ function LibraryView:onPrimaryMenuChoice(item)
     local bookinfo = Backend:getBookInfoCache(item.cache_id)
     self.selected_item = item
     LibraryView.onReturnCallback = function()
-        self:updateItems()
+        self:refreshItems(true)
         UIManager:show(self)
     end
     self.chapter_listing = ChapterListing:fetchAndShow({
@@ -198,13 +198,13 @@ function LibraryView:onMenuHold(item)
     end
     local bookinfo = Backend:getBookInfoCache(item.cache_id)
     local msginfo = [[
-        书名： <<%1>>
-        作者： %2
-        分类： %3
-        书源： %4
-        总章数：%5
-        总字数：%6
-        简介：%7
+书名： <<%1>>
+作者： %2
+分类： %3
+书源： %4
+总章数：%5
+总字数：%6
+简介：%7
     ]]
 
     msginfo = T(msginfo, bookinfo.name or '', bookinfo.author or '', bookinfo.kind or '', bookinfo.originName or '',
@@ -218,7 +218,7 @@ function LibraryView:onMenuHold(item)
             text = (bookinfo.sortOrder > 0) and '置顶' or '取消置顶',
             callback = function()
                 Backend:setBooksTopUp(item.cache_id, bookinfo.sortOrder)
-                self:updateItems(true)
+                self:refreshItems(true)
             end
         }}, {{
             text = '换源',
@@ -244,7 +244,7 @@ function LibraryView:onMenuHold(item)
                                 if state == true then
                                     Backend:HandleResponse(response, function(data)
                                         Backend:show_notice("删除成功")
-                                        self:updateItems(true)
+                                        self:refreshItems(true)
                                     end, function(err_msg)
                                         MessageBox:error('删除失败：', err_msg)
                                     end)
@@ -277,14 +277,13 @@ function LibraryView:openInstalledReadSource()
     servers_history = nil
 
     local description = [[
-        (书架与接口地址关联，换地址原缓存信息会隐藏，建议静态IP或域名使用)
-        格式符合RFC3986，服务器版本需加/reader3
+(书架与接口地址关联，换地址原缓存信息会隐藏，建议静态 IP 或域名使用)
+格式符合 RFC3986，服务器版本需加 /reader3
         
-        示例:
-        → 手机APP     http://127.0.0.1:1122
-        → 服务器版    http://127.0.0.1:1122/reader3
-        → 带认证服务  https://username:password@127.0.0.1:1122/reader3
-    ]]
+    示例:
+    → 手机APP     http://127.0.0.1:1122
+    → 服务器版    http://127.0.0.1:1122/reader3
+    → 带认证服务  https://username:password@127.0.0.1:1122/reader3]]
 
     local dialog
     local reset_callback
@@ -429,7 +428,8 @@ function LibraryView:openMenu()
 章节页面图标说明:
 %1 可下载  %2 已阅读  %3 阅读进度
 
-帮助改进请到 Github：pengcw/legado.koplugin 反馈 issues
+帮助改进：
+请到 Github：pengcw/legado.koplugin 反馈 issues
 
 版本: ver_%4]]
 
@@ -474,7 +474,7 @@ function LibraryView:openMenu()
 
     if not Device:isTouchDevice() then
         table.insert(buttons, 4, {{
-            text = Icons.FA_EXCLAMATION_CIRCLE .. ' ' .. "同步书架",
+            text = Icons.FA_EXCLAMATION_CIRCLE .. ' ' .. " 同步书架",
             callback = function()
                 UIManager:close(dialog)
                 self:onRefreshLibrary()
@@ -543,7 +543,7 @@ function LibraryView:initializeRegisterEvent(legado_main)
         -- FileManager menu only
         if not (self.ui and self.ui.document) then
             if LibraryView.instance then
-                LibraryView.instance:updateItems(true)
+                LibraryView.instance:refreshItems(true)
                 UIManager:show(LibraryView.instance)
             else
                 LibraryView:fetchAndShow()
@@ -574,7 +574,7 @@ function LibraryView:initializeRegisterEvent(legado_main)
 
         local chapter_listing = LibraryView.instance.chapter_listing
         if chapter_listing then
-            chapter_listing:updateItems(true)
+            chapter_listing:refreshItems(true)
             UIManager:show(chapter_listing)
         else
 
