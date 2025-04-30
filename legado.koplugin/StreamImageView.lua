@@ -65,7 +65,7 @@ local function downloadImage(img_src)
 end
 
 function M:get_image_bb(imgData)
-    imgData = not H.is_nil(imgData) and imgData or self.image
+    imgData = imgData or self.image
 
     if not imgData then
         return RenderImage:renderImageFile("resources/koreader.png", false)
