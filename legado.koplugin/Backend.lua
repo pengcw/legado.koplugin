@@ -1,5 +1,6 @@
 local logger = require("logger")
 local Device = require("device")
+local NetworkMgr = require("ui/network/manager")
 local ffiUtil = require("ffi/util")
 local md5 = require("ffi/sha2").md5
 local dbg = require("dbg")
@@ -294,7 +295,7 @@ function M:initialize()
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
 
     -- 兼容历史版本 <1.038
-    if H.is_nil(self.settings_data.data.setting_url) and H.is_nil(self.settings_data.data.reader3_un) and
+    if not self.settings_data.data.setting_url and not self.settings_data.data.reader3_un and
         H.is_str(self.settings_data.data.legado_server) then
         self.settings_data.data.setting_url = self.settings_data.data.legado_server
     end
@@ -440,7 +441,7 @@ function M:legadoSporeApi(requestFunc, callback, opts, logName)
         return wrap_response(nil, 'NEED_LOGIN，刷新并继续')
     end
 
-    if H.is_tbl(res.body) and res.body.isSuccess == true and not H.is_nil(res.body.data) then
+    if H.is_tbl(res.body) and res.body.isSuccess == true and res.body.data then
         if H.is_func(callback) then
             return callback(res.body)
         else
@@ -580,11 +581,20 @@ function M:saveBookProgress(chapter)
 
 end
 
-function M:getAvailableBookSource(bookUrl)
-    if not H.is_str(bookUrl) then
+function M:getAvailableBookSource(bookinfo)
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl)) then
         return wrap_response(nil, '获取可用书源参数错误')
     end
 
+    local bookUrl = bookinfo.bookUrl
+    local name = bookinfo.name
+    local author = bookinfo.author
+    if self.settings_data.data.server_type == 1 then
+        return self:searchBookSocket(name, {
+            name = name,
+            author = author
+        })
+    end
     return self:legadoSporeApi(function()
         -- data=bookinfos
         return self.apiClient:getAvailableBookSource({
@@ -644,7 +654,7 @@ function M:setBookSource(newBookSource)
             return wrap_response(nil, '接口返回数据格式错误')
         end
     end, {
-        timeouts = {10, 18},
+        timeouts = {25, 30},
         isServerOnly = true
     }, 'setBookSource')
 
@@ -676,6 +686,136 @@ function M:searchBookSource(bookUrl, lastIndex, searchSize)
     }, 'searchBook')
 
 end
+
+function M:searchBookSocket(search_text, filter, timeout)
+    if not (H.is_str(search_text) and search_text ~= '') then
+        return wrap_response(nil, "输入参数错误")
+    end
+
+    if self.settings_data.data.server_type ~= 1 then
+        return wrap_response(nil, "仅支持阅读 APP")
+    end
+
+    timeout = timeout or 60
+
+    local is_precise = false
+    if string.sub(search_text, 1, 1) == '=' then
+        search_text = string.sub(search_text, 2)
+        is_precise = true
+    end
+
+    local JSON = require("json")
+    local websocket = require('libs/websocket')
+
+    local key_json = JSON.encode({
+        key = search_text
+    })
+
+    local client = websocket.client.sync({
+        timeout = 3
+    })
+
+    local parsed = socket_url.parse(self.settings_data.data.server_address)
+    local ws_scheme
+    if parsed.scheme == 'http' then
+        ws_scheme = 'ws'
+        if not parsed.port then
+            parsed.port = 80
+        end
+    else
+        ws_scheme = 'wss'
+        if not parsed.port then
+            parsed.port = 443
+        end
+    end
+
+    parsed.port = parsed.port + 1
+
+    local ws_server_address = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/searchBook")
+
+    local ok, err = client:connect(ws_server_address)
+    if not ok then
+        logger.err('ws连接出错', err)
+        return wrap_response(nil, "连接出错：" .. tostring(err))
+    end
+
+    local filterEven
+    if H.is_tbl(filter) and filter.name then
+        filterEven = function(line)
+            if H.is_tbl(line) and (filter.name == nil or line.name == filter.name) and
+                (filter.author == nil or line.author == filter.author) and
+                (filter.origin == nil or line.origin == filter.origin) then
+                return line
+            end
+        end
+    elseif is_precise == true then
+        filterEven = function(line)
+            if H.is_tbl(line) and line.name and (line.name == search_text or line.author == search_text) then
+                return line
+            end
+        end
+    else
+        filterEven = function(line)
+            if H.is_tbl(line) then
+                return line
+            end
+        end
+    end
+
+    client:send(key_json)
+    ok, err = pcall(function()
+        local response = {}
+        local start_time = os.time()
+        local deduplication = {}
+
+        while true do
+            local response_body = client:receive()
+            if not response_body then
+                break
+            end
+
+            if os.time() - start_time > timeout then
+                logger.err("ws receive 超时")
+                break
+            end
+
+            local _, parsed_body = pcall(JSON.decode, response_body)
+            if type(parsed_body) ~= 'table' or #parsed_body == 0 then
+                -- pong
+                goto continue
+            end
+
+            local start_idx = #response + 1
+            for i, v in ipairs(parsed_body) do
+                
+                local deduplication_key = table.concat({v.name, v.author or "", v.originOrder or 1})
+                if not deduplication[deduplication_key] and filterEven(v) then
+                    response[start_idx] = v
+                    start_idx = start_idx + 1
+                    deduplication[deduplication_key] = true
+                end
+            end
+
+            ::continue::
+        end
+        deduplication = nil
+        collectgarbage()
+        collectgarbage()
+        return response
+    end)
+
+    pcall(function()
+        client:close()
+    end)
+
+    if not ok then
+        logger.err('ws返回数据出错：', err)
+        return wrap_response(nil, 'ws返回数据出错：' .. H.errorHandler(err))
+    end
+
+    return wrap_response(err)
+end
+
 function M:searchBook(search_text, bookSourceUrl, concurrentCount)
     if not (H.is_str(search_text) and search_text ~= '' and H.is_str(bookSourceUrl)) then
         return wrap_response(nil, "输入参数错误")
@@ -755,6 +895,7 @@ function M:addBookToLibrary(bookinfo)
         })
 
     end, function(response)
+        -- isServerOnly = true
         if H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
             local bookShelfId = self:getServerPathCode()
             local db_save = {response.data}
@@ -766,10 +907,8 @@ function M:addBookToLibrary(bookinfo)
                 dbg.log('addBookToLibrary数据写入', tostring(err))
                 return wrap_response(nil, '数据写入出错，请重试')
             end
-            return wrap_response(true)
-        else
-            return wrap_response(nil, '接口返回数据格式错误')
         end
+        return wrap_response(true)
     end, {
         timeouts = {10, 12}
     }, 'addBookToLibrary')
@@ -1866,7 +2005,7 @@ function M:after_reader_chapter_show(chapter)
         end
     end
 
-    if chapter.isRead ~= true then
+    if chapter.isRead ~= true and NetworkMgr:isConnected() then
         local complete_count = self:getcompleteReadAheadChapters(chapter)
         if complete_count < 40 then
             local preDownloadNum = 3

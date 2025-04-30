@@ -562,8 +562,8 @@ function ChapterListing:openMenu()
             UIManager:close(dialog)
             NetworkMgr:runWhenOnline(function()
                 require("BookSourceResults"):autoChangeSource(self.bookinfo, function()
-                    self:onReturn()
-                end)
+                        self:onReturn()
+                    end) 
             end)
         end
     }}, {{

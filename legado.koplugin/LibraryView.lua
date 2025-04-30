@@ -184,7 +184,10 @@ function LibraryView:onPrimaryMenuChoice(item)
         durChapterIndex = bookinfo.durChapterIndex,
         name = bookinfo.name,
         author = bookinfo.author,
-        cacheExt = bookinfo.cacheExt
+        cacheExt = bookinfo.cacheExt,
+        origin = bookinfo.origin,
+        originName = bookinfo.originName,
+        originOrder = bookinfo.originOrder
     }, LibraryView.onReturnCallback, true)
 
     self:onClose(self)
@@ -277,13 +280,13 @@ function LibraryView:openInstalledReadSource()
     servers_history = nil
 
     local description = [[
-(书架与接口地址关联，换地址原缓存信息会隐藏，建议静态 IP 或域名使用)
-格式符合 RFC3986，服务器版本需加 /reader3
+        (书架与接口地址关联，设置格式符合 RFC3986，认证信息如有特殊字符需要 URL 编码，服务器版本必须加 /reader3)
         
-    示例:
-    → 手机APP     http://127.0.0.1:1122
-    → 服务器版    http://127.0.0.1:1122/reader3
-    → 带认证服务  https://username:password@127.0.0.1:1122/reader3]]
+        示例:
+        → 手机APP     http://127.0.0.1:1122
+        → 服务器版    http://127.0.0.1:1122/reader3
+        → 带认证服务  https://username:password@127.0.0.1:1122/reader3
+    ]]
 
     local dialog
     local reset_callback
@@ -441,7 +444,7 @@ function LibraryView:openMenu()
             about_txt = T(about_txt, Icons.FA_DOWNLOAD, Icons.FA_CHECK_CIRCLE, Icons.FA_THUMB_TACK, version)
             MessageBox:custom({
                 text = about_txt,
-                alignment = "left" 
+                alignment = "left"
             })
         end
     }}}
@@ -482,7 +485,7 @@ function LibraryView:openMenu()
         }})
     end
 
-    if H.is_nil(self.disk_available) then
+    if not self.disk_available then
         local cache_dir = H.getTempDirectory()
         local disk_use = util.diskUsage(cache_dir)
         if disk_use and disk_use.available then
@@ -502,15 +505,9 @@ function LibraryView:openMenu()
 end
 
 function LibraryView:openSearchBooksDialog()
-    if Backend:getSettings().server_type == 2 then
-        require("BookSourceResults"):searchAndShow(function()
-            self:onRefreshLibrary()
-        end)
-    else
-        if self.multilines_show_more_text ~= true then
-            self:onShowGotoDialog()
-        end
-    end
+    require("BookSourceResults"):searchAndShow(function()
+        self:onRefreshLibrary()
+    end)
 end
 
 function LibraryView:onMenuSelect(entry, pos)
@@ -587,7 +584,10 @@ function LibraryView:initializeRegisterEvent(legado_main)
                 durChapterIndex = bookinfo.durChapterIndex,
                 name = bookinfo.name,
                 author = bookinfo.author,
-                cacheExt = bookinfo.cacheExt
+                cacheExt = bookinfo.cacheExt,
+                origin = bookinfo.origin,
+                originName = bookinfo.originName,
+                originOrder = bookinfo.originOrder
             }, function()
                 self:onShowLegadoLibraryView()
             end, true)

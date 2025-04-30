@@ -15,10 +15,6 @@ M.if_nil = function(a, b)
     return a
 end
 
-M.is_nil = function(s)
-    return nil == s
-end
-
 M.is_str = function(s)
     return "string" == type(s)
 end

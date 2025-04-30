@@ -1,4 +1,3 @@
-local ConfirmBox = require("ui/widget/confirmbox")
 local UIManager = require("ui/uimanager")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Menu = require("ui/widget/menu")
@@ -6,6 +5,7 @@ local Device = require("device")
 local Event = require("ui/event")
 local logger = require("logger")
 local ffiUtil = require("ffi/util")
+local util = require("util")
 local Screen = Device.screen
 local T = ffiUtil.template
 
@@ -124,8 +124,14 @@ function M:fetchAndShow(bookinfo, onReturnCallback)
         return MessageBox:error('参数错误')
     end
     local bookUrl = bookinfo.bookUrl
+    local name = bookinfo.name
+    local author = bookinfo.author
     MessageBox:loading("加载可用书源 ", function()
-        return Backend:getAvailableBookSource(bookUrl)
+        return Backend:getAvailableBookSource({
+                bookUrl = bookUrl,
+                name = name,
+                author = author
+            })
     end, function(state, response)
         if state == true then
             local results_data = {}
@@ -145,7 +151,7 @@ function M:fetchAndShow(bookinfo, onReturnCallback)
             self.results_menu_container = self:menuCenterShow(M:new{
                 results = results_data,
                 bookinfo = bookinfo,
-                call_mode = 11,
+                call_mode = Backend:getSettings().server_type == 2 and 11 or 31,
                 on_return_callback = onReturnCallback,
                 subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
                 title = "换源",
@@ -172,11 +178,22 @@ function M:checkChapterContent(bookUrl, chapterIndex)
     return response == true and true or false
 end
 
-function M:autoChangeSource(bookinfo, onReturnCallback)
-    if Backend:getSettings().server_type ~= 2 then
-        Backend:show_notice("仅支持服务器版本")
+local function source_list_shuffle(t)
+    local n = #t
+    for i = n, 2, -1 do
+        local j = math.random(i)
+        t[i], t[j] = t[j], t[i]
+    end
+    return t
+end
+
+function M:autoChangeSourceSocket(bookinfo, onReturnCallback)
+
+    if Backend:getSettings().server_type ~= 1 then
+        Backend:show_notice("仅支持阅读 App")
         return
     end
+
     if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
         return MessageBox:error('参数错误')
     end
@@ -188,36 +205,35 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
     }}
 
     local old_bookUrl = self.bookinfo.bookUrl
+    local old_originName = self.bookinfo.originName
+    local old_origin = self.bookinfo.origin
+
     local book_cache_id = self.bookinfo.cache_id
     local total_source_count = 0
     math.randomseed(os.time())
 
     MessageBox:loading("加载可用书源 ", function()
-        return Backend:getAvailableBookSource(old_bookUrl)
+        return Backend:getAvailableBookSource({
+            bookUrl = old_bookUrl,
+            name = bookinfo.name,
+            author = bookinfo.author
+
+        })
     end, function(state, response)
         if state == true then
             local results_data = {}
             Backend:HandleResponse(response, function(data)
-
-                if not H.is_tbl(data) then
-                    return Backend:show_notice('返回书源错误')
+                if H.is_tbl(data) and #data > 0 then
+                    results_data = data
                 end
-                if #data == 0 then
-                    return MessageBox:error('没有可用源')
-                end
-                results_data = data
             end, function(err_msg)
                 Backend:show_notice(err_msg or '加载失败')
             end)
+
             total_source_count = #results_data
 
-            local function source_list_shuffle(t)
-                local n = #t
-                for i = n, 2, -1 do
-                    local j = math.random(i)
-                    t[i], t[j] = t[j], t[i]
-                end
-                return t
+            if total_source_count == 0 then
+                return MessageBox:error('没有可用源')
             end
 
             local check_source = function(sourceList)
@@ -238,9 +254,146 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
                     local bookUrl = new_bookinfo.bookUrl
                     local origin = new_bookinfo.origin
                     local originName = new_bookinfo.originName
+                    all_chapters_count = 0
 
-                    if not book_cache_id or bookUrl == old_bookUrl then
-                        logger.err("自动换源忽略相同源：", originName)
+                    -- 有的源bookUrl每次添加有参数会改变,如sign
+                    if old_origin and origin == old_origin then
+                        logger.dbg("自动换源忽略相同源：", originName)
+                        goto continue
+                    end
+                    new_bookinfo.cache_id = book_cache_id
+
+                    -- legado app 需要先添加到库
+                    Backend:addBookToLibrary(new_bookinfo)
+
+                    -- 返回目录
+                    Backend:HandleResponse(Backend:refreshChaptersList(new_bookinfo), function(data)
+                        if H.is_tbl(data) and H.is_tbl(data[1]) and data[1].bookUrl then
+                            all_chapters_count = #data
+                        end
+                    end, function(err_msg)
+                        logger.err("source err：", originName, err_msg)
+                    end)
+
+                    --  有章节目录
+                    if all_chapters_count > 0 then
+                        if not self.last_read_chapter then
+                            self.last_read_chapter = Backend:getLastReadChapter(book_cache_id)
+                            self.last_read_chapter = tonumber(self.last_read_chapter) or 2
+                        end
+
+                        --logger.info("autoChangeSource:", originName, old_bookUrl, bookUrl, self.last_read_chapter,all_chapters_count)
+
+                        -- 对比当前章节
+                        if all_chapters_count >= self.last_read_chapter then
+                            local next_check_chapter = self.last_read_chapter + 1
+                            if next_check_chapter > all_chapters_count then
+                                next_check_chapter = self.last_read_chapter - 1
+                            end
+
+                            -- 检查正文
+                            if self:checkChapterContent(bookUrl, self.last_read_chapter) and
+                                self:checkChapterContent(bookUrl, next_check_chapter) then
+               
+                                response_origin = new_bookinfo
+                                break
+                            end
+                        end
+                    end
+                    -- 清理
+                    Backend:deleteBook(new_bookinfo)
+                    ::continue::
+                end
+
+                return response_origin
+            end
+
+            MessageBox:loading(string.format("预选书源%s个，检查中 ", total_source_count), function()
+                return check_source(results_data)
+            end, function(state, response)
+                results_data = nil
+                if state == true and H.is_tbl(response) and response.bookUrl and response.origin then
+                        Backend:show_notice("换源成功")
+                        Backend:refreshLibraryCache()
+                         return self:onCloseUI()
+             
+                else
+                         return MessageBox:error(string.format(
+                        "换源失败，检查书源%s个\n(可搜索添加同名同作者书籍方式手动换源，或者使用 app 换源后刷新)",
+                        total_source_count))
+                end
+            end)
+        end
+    end)
+end
+
+function M:autoChangeSource(bookinfo, onReturnCallback)
+    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
+        return MessageBox:error('参数错误')
+    end
+
+    if Backend:getSettings().server_type == 1 then
+        return self:autoChangeSourceSocket(bookinfo, onReturnCallback)
+    end
+
+    self.bookinfo = bookinfo
+    self.call_mode = 30
+    self.paths = {{
+        callback = onReturnCallback
+    }}
+
+    local old_bookUrl = self.bookinfo.bookUrl
+    local old_originName = self.bookinfo.originName
+    local old_origin = self.bookinfo.origin
+
+    local book_cache_id = self.bookinfo.cache_id
+    local total_source_count = 0
+    math.randomseed(os.time())
+
+    MessageBox:loading("加载可用书源 ", function()
+        return Backend:getAvailableBookSource({
+            bookUrl = old_bookUrl,
+            name = bookinfo.name,
+            author = bookinfo.author
+        })
+    end, function(state, response)
+        if state == true then
+            local results_data = {}
+            Backend:HandleResponse(response, function(data)
+
+                if not H.is_tbl(data) then
+                    return Backend:show_notice('返回书源错误')
+                end
+                if #data == 0 then
+                    return MessageBox:error('没有可用源')
+                end
+                results_data = data
+            end, function(err_msg)
+                Backend:show_notice(err_msg or '加载失败')
+            end)
+            total_source_count = #results_data
+
+            local check_source = function(sourceList)
+                if not (H.is_tbl(sourceList) and #sourceList > 0 and sourceList[1].origin) then
+                    return
+                end
+
+                local response_origin
+                local all_chapters_count = 0
+
+                sourceList = source_list_shuffle(sourceList)
+
+                for source_index, new_bookinfo in ipairs(sourceList) do
+
+                    local name = new_bookinfo.name
+                    local author = new_bookinfo.author
+                    local bookUrl = new_bookinfo.bookUrl
+                    local origin = new_bookinfo.origin
+                    local originName = new_bookinfo.originName
+                    all_chapters_count = 0
+
+                    if old_origin and origin == old_origin then
+                        logger.dbg("自动换源忽略相同源：", originName)
                         goto continue
                     end
                     new_bookinfo.cache_id = book_cache_id
@@ -262,11 +415,7 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
                         self.last_read_chapter = tonumber(self.last_read_chapter) or 2
                     end
 
-                    logger.dbg("autoChangeSource:", originName, old_bookUrl, bookUrl, self.last_read_chapter,
-                        all_chapters_count)
-
                     if all_chapters_count < self.last_read_chapter then
-                        -- 比当前章节少
                         goto continue
                     end
 
@@ -281,7 +430,6 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
                         break
                     end
 
-                    all_chapters_count = 0
                     ::continue::
                 end
                 return response_origin
@@ -305,7 +453,7 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
                                 local sourceList
 
                                 while true do
-                                    logger.dbg("autoChangeSource:", count, lastIndex)
+                                    --logger.dbg("autoChangeSource:", count, lastIndex)
                                     Backend:HandleResponse(Backend:searchBookSource(old_bookUrl, lastIndex, 12),
                                         function(data)
                                             if H.is_tbl(data) and H.is_tbl(data.list) then
@@ -319,8 +467,8 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
 
                                     response_origin = check_source(sourceList)
 
-                                    -- 最多检测500个源
-                                    if H.is_tbl(response_origin) or count > 500 then
+                                    -- 最多检测800个源,避免等待时间太长
+                                    if H.is_tbl(response_origin) or count > 800 then
                                         break
                                     end
 
@@ -335,10 +483,10 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
                             return type(response_origin) == 'table' and response_origin or total_source_count
                         end, function(state, response)
                             if state == true and H.is_tbl(response) and response.bookUrl and response.origin then
-                                self:setBookSource(response)
+                                    self:setBookSource(response)
                             else
-                                response = H.is_num(response) and response or 0
-                                MessageBox:error(string.format("换源失败，检查书源%s个", response))
+                                    response = H.is_num(response) and response or 0
+                                    MessageBox:error(string.format("换源失败，检查书源%s个", response))
                             end
                         end)
                 end
@@ -369,7 +517,7 @@ function M:showBookInfo(bookinfo)
         other_buttons = {{{
             text = (self.call_mode < 10) and '添加' or '换源',
             callback = function()
-                if self.call_mode < 10 then
+                if self.call_mode < 10 or self.call_mode == 31 then
                     self:addBookToLibrary(bookinfo)
                 else
                     self:setBookSource(bookinfo)
@@ -393,7 +541,12 @@ function M:searchAndShow(onReturnCallback)
             buttons = {{{
                 text = "单源搜索",
                 callback = function()
+                    if Backend:getSettings().server_type == 1 then
+                        return Backend:show_notice('阅读 App 仅支持多源搜索')
+                    end
                     inputText = dialog:getInputText()
+                    inputText = util.trim(inputText)
+
                     if not validateInput(inputText) then
                         return Backend:show_notice("请输入有效书籍或作者名称")
                     end
@@ -407,13 +560,18 @@ function M:searchAndShow(onReturnCallback)
                 is_enter_default = true,
                 callback = function()
                     inputText = dialog:getInputText()
+                    inputText = util.trim(inputText)
                     if not validateInput(inputText) then
                         return Backend:show_notice("请输入有效书籍或作者名称")
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
                     self.on_return_callback = onReturnCallback
-                    self:handleMultiSourceSearch(inputText)
+                    if Backend:getSettings().server_type == 1 then
+                        self:searchBookSocket(inputText)
+                    else
+                        self:handleMultiSourceSearch(inputText)
+                    end
                 end
             }, {
                 text = "取消",
@@ -460,6 +618,37 @@ function M:handleSingleSourceSearch(searchText)
     end)
 end
 
+function M:searchBookSocket(search_text)
+
+    if not (H.is_str(search_text) and search_text ~= "") then
+        Backend:show_notice("参数错误")
+        return
+    end
+
+    MessageBox:loading(string.sub(search_text, 1, 1) ~= '=' and string.format("正在搜索 [%s] ", search_text) or
+                           string.format("精准搜索 [%s] ", string.sub(search_text, 2)), function()
+        return Backend:searchBookSocket(search_text)
+    end, function(state, response)
+        if state == true then
+            Backend:HandleResponse(response, function(data)
+                if not H.is_tbl(data) or not H.is_tbl(data[1]) then
+                    return Backend:show_notice('服务器返回为空')
+                end
+
+                self.results_menu_container = self:menuCenterShow(M:new{
+                    results = data,
+                    call_mode = 31,
+                    title = '多源搜索',
+                    subtitle = string.format("key: %s", search_text),
+                    items_font_size = Menu.getItemFontSize(8)
+                })
+            end, function(err_msg)
+                Backend:show_notice(err_msg or '搜索请求失败')
+            end)
+        end
+    end)
+end
+
 function M:handleMultiSourceSearch(search_text, is_more_call)
     if not (H.is_str(search_text) and search_text ~= "") then
         Backend:show_notice("参数错误")
@@ -468,7 +657,8 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
 
     self.last_index = self.last_index or -1
 
-    MessageBox:loading(string.format("正在搜索[%s] ", search_text), function()
+    MessageBox:loading(string.sub(search_text, 1, 1) ~= '=' and string.format("正在搜索 [%s] ", search_text) or
+                           string.format("精准搜索 [%s] ", string.sub(search_text, 2)), function()
         return Backend:searchBookMulti(search_text, self.last_index)
     end, function(state, response)
         if state == true then
@@ -559,6 +749,10 @@ function M:selectBookSource(selectCallback)
 end
 
 function M:setBookSource(bookinfo)
+    if not self.bookinfo then
+        Backend:show_notice('参数错误')
+        return
+    end
     local old_bookUrl = self.bookinfo.bookUrl
     if not (self.call_mode > 10 and H.is_str(old_bookUrl) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.origin)) then
         Backend:show_notice('参数错误')
@@ -584,7 +778,7 @@ function M:setBookSource(bookinfo)
 end
 
 function M:addBookToLibrary(bookinfo)
-    if self.call_mode > 10 then
+    if self.call_mode > 10 and self.call_mode ~= 31 then
         Backend:show_notice('参数错误')
         return
     end
@@ -613,7 +807,7 @@ function M:searchMoreBookSource()
     self.last_index = self.last_index or -1
 
     MessageBox:loading("加载更多书源 ", function()
-        return Backend:searchBookSource(old_bookUrl, self.last_index, 5)
+        return Backend:searchBookSource(old_bookUrl, self.last_index, 8)
     end, function(state, response)
         if state == true then
             Backend:HandleResponse(response, function(data)
@@ -655,8 +849,10 @@ function M:onMenuChoice(item)
         return true
         -- command item
         -- self.call_mode == 11 -- 换源->搜索更多
-        -- self.call_mode == 12 -- 换源->搜索更多->加载更多 追加
-        -- self.call_mode == 2 -- 搜书->搜索更多->加载更多 追加
+        -- == 12 -- 换源->搜索更多->加载更多 追加
+        -- == 2 -- 搜书->搜索更多->加载更多 追加
+        -- == 30 自动换源
+        -- == 31 app 添加
     end
 
 end
