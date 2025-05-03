@@ -787,7 +787,7 @@ function M:searchBookSocket(search_text, filter, timeout)
 
             local start_idx = #response + 1
             for i, v in ipairs(parsed_body) do
-                
+
                 local deduplication_key = table.concat({v.name, v.author or "", v.originOrder or 1})
                 if not deduplication[deduplication_key] and filterEven(v) then
                     response[start_idx] = v
@@ -946,6 +946,101 @@ function M:deleteBook(bookinfo)
     }, 'deleteBook')
 end
 
+
+local ffi = require("ffi")
+local libutf8proc = nil
+local function utf8_chars(str, reverse)
+    if libutf8proc == nil then
+        libutf8proc = ffi.loadlib("utf8proc", "3")
+        ffi.cdef [[
+typedef int32_t utf8proc_int32_t;
+typedef uint8_t utf8proc_uint8_t;
+typedef ssize_t utf8proc_ssize_t;
+utf8proc_ssize_t utf8proc_iterate(const utf8proc_uint8_t *, utf8proc_ssize_t, utf8proc_int32_t *);
+]]
+    end
+    local str_len = #str
+    local pos = reverse and (str_len + 1) or 0
+    local str_p = ffi.cast("const utf8proc_uint8_t*", str)
+    local codepoint = ffi.new("utf8proc_int32_t[1]")
+
+    return function()
+        while true do
+            pos = reverse and (pos - 1) or (pos + 1)
+            if (reverse and pos < 1) or (not reverse and pos > str_len) then
+                return nil
+            end
+
+            local remaining = reverse and pos or (str_len - pos + 1)
+            -- 指针偏移调整为 str_p + pos - 1
+            local bytes = libutf8proc.utf8proc_iterate(str_p + pos - 1, remaining, codepoint)
+
+            if bytes > 0 then
+                -- 计算起始指针，转换为Lua字符串
+                local char = ffi.string(str_p + pos - 1, bytes)
+                local ret_pos = tonumber(pos)
+                pos = reverse and (pos - bytes) or (pos + bytes - 1)
+                return ret_pos, tonumber(codepoint[0]), char
+            elseif bytes < 0 then
+                pos = reverse and (pos - 1) or (pos + 1)
+            end
+        end
+    end
+end
+
+local function utf8_trim(str)
+    if type(str) ~= "string" or str == "" then
+        return ""
+    end
+
+    local utf8_whitespace_codepoints = {
+        [0x00A0] = true,
+        [0x1680] = true,
+        [0x2000] = true,
+        [0x2001] = true,
+        [0x2002] = true,
+        [0x2003] = true,
+        [0x2004] = true,
+        [0x2005] = true,
+        [0x2006] = true,
+        [0x2007] = true,
+        [0x2008] = true,
+        [0x2009] = true,
+        [0x200A] = true,
+        [0x200B] = true,
+        [0x202F] = true,
+        [0x205F] = true,
+        [0x3000] = true,
+        [0x0009] = true,
+        [0x000A] = true,
+        [0x000B] = true,
+        [0x000C] = true,
+        [0x000D] = true,
+        [0x0020] = true
+    }
+
+    local start
+    for pos, cp, char in utf8_chars(str) do
+        if not utf8_whitespace_codepoints[cp] then
+            start = pos
+            break
+        end
+    end
+    if not start then
+        return ""
+    end
+
+    local finish
+    for pos, cp, char in utf8_chars(str, true) do
+        if not utf8_whitespace_codepoints[cp] then
+            finish = pos + #char - 1
+            break
+        end
+    end
+
+    return (start and finish and start <= finish) and str:sub(start, finish) or ""
+end
+
 ---去除多余换行、统一段落缩进、根据部分排版规则将不合理的换行合并成一个
 ---仅假设源文本格式混入了错误或多余换行和不标准的段落缩进
 ---@param text any
@@ -964,12 +1059,10 @@ local function splitParagraphsPreserveBlank(text)
     local paragraphs = {}
     local buffer = ""
     local prefix = nil
-
     local lines = {}
-    local pattern_start = "^[%s\u{00A0}\u{3000}\u{200B}]+"
-    local pattern_end = "[%s\u{00A0}\u{3000}\u{200B}]+$"
+
     for line in text:gmatch("([^\n]*)\n?") do
-        local clean = (line or ""):gsub(pattern_start, ""):gsub(pattern_end, "")
+        local clean = utf8_trim(line or "")
         if clean and clean ~= "" then
             table.insert(lines, clean)
         end
@@ -1006,21 +1099,6 @@ local function splitParagraphsPreserveBlank(text)
                    (code >= 0xFF00 and code <= 0xFFEF)
     end
 
-    local function lastUtf8Char(str)
-        if type(str) == 'string' and util.splitToChars then
-            local chars_part = str:sub(-12)
-            local chars = util.splitToChars(chars_part) or {}
-            return #chars > 0 and chars[#chars] or nil, #chars
-        end
-    end
-
-    local function firstUtf8Char(str)
-        if type(str) == 'string' and util.splitToChars then
-            local chars_part = str:sub(1, 9)
-            local chars = util.splitToChars(chars_part) or {}
-            return #chars > 0 and chars[1] or nil, #chars
-        end
-    end
 
     for i, line in ipairs(lines) do
 
@@ -1038,22 +1116,24 @@ local function splitParagraphsPreserveBlank(text)
                 -- logger.dbg('isChinese:', prefix == indentChinese)
             end
 
-            local lastChar, lastCharLen = lastUtf8Char(line)
-            local nextChar = firstUtf8Char(lines[i + 1] or "")
-            local lastChar_isPunctuation = isPunctuation(lastChar)
+            local line_len = #line
+            local word_end = line:match(util.UTF8_CHAR_PATTERN .. "$")
+            local next_word_start = (lines[i + 1] or ""):match(util.UTF8_CHAR_PATTERN)
+            local word_end_isPunctuation = isPunctuation(word_end)
+            
 
             -- 中文段末没有标点不允许换行, 避免触发koreader的章节标题渲染规则
-            if prefix == indentChinese and (not lastChar_isPunctuation or lastCharLen < 3) then
+            if prefix == indentChinese and (not word_end_isPunctuation or line_len < 7) then
                 allow_split = false
             else
-                allow_split = util.isSplittable and util.isSplittable(lastChar, nextChar, lastChar) or true
+                allow_split = util.isSplittable and util.isSplittable(word_end, next_word_start, word_end) or true
             end
 
-            -- logger.dbg(i, 'last:next', lastChar, nextChar, allow_split)
-
+            logger.info(i,line_len,word_end,next_word_start, word_end_isPunctuation, allow_split)
+            
             if not allow_split and i < #lines then
 
-                if prefix == indentEnglish and not lastChar_isPunctuation and not isPunctuation(nextChar) then
+                if prefix == indentEnglish and not word_end_isPunctuation and not isPunctuation(next_word_start) then
                     -- 非CJK两个单词间补充个空格
                     line = line .. "\u{0020}"
                 end
