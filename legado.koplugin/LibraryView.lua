@@ -602,8 +602,12 @@ function LibraryView:initializeRegisterEvent(legado_main)
                 return
             end
             doc_settings.data.txt_preformatted = 0
+            doc_settings.data.style_tweaks = doc_settings.data.style_tweaks or {}
+            doc_settings.data.style_tweaks.paragraph_whitespace_half = true
+            doc_settings.data.style_tweaks.paragraphs_indent = true
         end
     end
+
     function legado_main:onReaderReady(doc_settings)
 
         if LibraryView.instance and LibraryView.instance.chapter_listing and
