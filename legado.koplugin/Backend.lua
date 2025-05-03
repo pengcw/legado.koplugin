@@ -1129,7 +1129,7 @@ local function splitParagraphsPreserveBlank(text)
                 allow_split = util.isSplittable and util.isSplittable(word_end, next_word_start, word_end) or true
             end
 
-            logger.info(i,line_len,word_end,next_word_start, word_end_isPunctuation, allow_split)
+            --logger.dbg(i,line_len,word_end,next_word_start, word_end_isPunctuation, allow_split)
             
             if not allow_split and i < #lines then
 
