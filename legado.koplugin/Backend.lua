@@ -12,6 +12,11 @@ local time = require("ui/time")
 local UIManager = require("ui/uimanager")
 local H = require("libs/Helper")
 
+-- 太旧版本缺少这个函数
+if not dbg.log then 
+    dbg.log = logger.dbg
+end
+
 local function wrap_response(data, err_message)
     return data ~= nil and {
         type = 'SUCCESS',
@@ -947,11 +952,25 @@ function M:deleteBook(bookinfo)
 end
 
 
+
 local ffi = require("ffi")
 local libutf8proc = nil
+
 local function utf8_chars(str, reverse)
     if libutf8proc == nil then
-        libutf8proc = ffi.loadlib("utf8proc", "3")
+        -- 兼容旧版
+        if ffi.loadlib then 
+            libutf8proc = ffi.loadlib("utf8proc", "3")
+        else
+            if ffi.os == "Windows" then
+                libutf8proc = ffi.load("libs/libutf8proc.dll")
+            elseif ffi.os == "OSX" then
+                libutf8proc = ffi.load("libs/libutf8proc.dylib")
+            else
+                libutf8proc = ffi.load("libs/libutf8proc.so.2")
+            end
+        end
+
         ffi.cdef [[
 typedef int32_t utf8proc_int32_t;
 typedef uint8_t utf8proc_uint8_t;
@@ -2189,7 +2208,7 @@ function M:setEndpointUrl(new_setting_url)
         parsed.port and (":" .. parsed.port) or "", parsed.path or "", parsed.query and ("?" .. parsed.query) or "",
         parsed.params and (";" .. parsed.params) or "", parsed.fragment and ("#" .. parsed.fragment) or "")
 
-    dbg.log("server_address:", clean_url)
+    --dbg.log("server_address:", clean_url)
 
     self.settings_data.data.reader3_un = username
     self.settings_data.data.reader3_pwd = password

@@ -10,6 +10,10 @@ local ReaderRolling = require("apps/reader/modules/readerrolling")
 local Device = require("device")
 local Screen = Device.screen
 
+if not dbg.log then 
+    dbg.log = logger.dbg
+end
+
 local M = {
     on_return_callback = nil,
     on_end_of_book_callback = nil,
