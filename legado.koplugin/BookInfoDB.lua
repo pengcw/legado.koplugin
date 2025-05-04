@@ -6,6 +6,11 @@ local Device = require("device")
 local util = require("util")
 local md5 = require("ffi/sha2").md5
 local H = require("libs/Helper")
+
+if not dbg.log then 
+    dbg.log = logger.dbg
+end
+
 local custom_type_variable = {}
 local M = {
     dbPath = nil,

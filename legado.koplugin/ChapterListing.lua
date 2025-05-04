@@ -19,6 +19,10 @@ local BookReader = require("BookReader")
 local StreamImageView = require("StreamImageView")
 local H = require("libs/Helper")
 
+if not dbg.log then 
+    dbg.log = logger.dbg
+end
+
 local ChapterListing = Menu:extend{
     name = "chapter_listing",
     is_enable_shortcut = false,
@@ -253,7 +257,7 @@ function ChapterListing:onMenuHold(item)
             self:syncProgressShow(chapter)
         end
     }}, {{
-        text = table.concat({Icons.FA_INFO_CIRCLE, " 向后缓存"}),
+        text = table.concat({Icons.FA_INFO_CIRCLE, " 缓存章节"}),
         callback = function()
             UIManager:close(dialog)
             if not self.all_chapters_count then
