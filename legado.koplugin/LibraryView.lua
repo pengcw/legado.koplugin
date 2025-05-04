@@ -601,10 +601,15 @@ function LibraryView:initializeRegisterEvent(legado_main)
             if not filepath:find('/legado.cache/', 1, true) then
                 return
             end
-            doc_settings.data.txt_preformatted = 0
-            doc_settings.data.style_tweaks = doc_settings.data.style_tweaks or {}
-            doc_settings.data.style_tweaks.paragraph_whitespace_half = true
-            doc_settings.data.style_tweaks.paragraphs_indent = true
+            local file_name = select(2, util.splitFilePathName(doc_settings.data.doc_path or "")) or ''
+            local _, extension = util.splitFileNameSuffix(file_name)
+            if extension == 'txt' then
+                doc_settings.data.txt_preformatted = 0
+                doc_settings.data.style_tweaks = doc_settings.data.style_tweaks or {}
+                doc_settings.data.style_tweaks.paragraph_whitespace_half = true
+                doc_settings.data.style_tweaks.paragraphs_indent = true
+                doc_settings.data.css = "./data/fb2.css"
+            end
         end
     end
 
