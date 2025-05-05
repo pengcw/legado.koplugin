@@ -6,11 +6,10 @@ local dbg = require("dbg")
 local Event = require("ui/event")
 local ReaderUI = require("apps/reader/readerui")
 
-local ReaderRolling = require("apps/reader/modules/readerrolling")
 local Device = require("device")
 local Screen = Device.screen
 
-if not dbg.log then 
+if not dbg.log then
     dbg.log = logger.dbg
 end
 
@@ -20,7 +19,7 @@ local M = {
     on_start_of_book_callback = nil,
     on_read_settings_callback = nil,
     is_showing = false,
-    chapter = nil,
+    chapter = nil
 }
 
 function M:show(options)
@@ -31,11 +30,10 @@ function M:show(options)
     self.chapter = options.chapter
 
     local book_path = options.chapter.cacheFilePath
-    dbg.v('ReaderUI.instance', type(ReaderUI.instance))
-    dbg.v('ReaderRolling.c8:', ReaderRolling.c8eeb679b)
 
     if self.is_showing and ReaderUI.instance then
-        if ReaderRolling.c8eeb679b ~= true then
+        if ReaderUI.instance.rolling and ReaderUI.instance.rolling.c8eeb679b ~= true and
+            ReaderUI.instance.rolling.c8eeb679k ~= true then
             M.overriderollingHandler()
         end
         ReaderUI.instance:switchDocument(book_path, true)
@@ -45,7 +43,6 @@ function M:show(options)
     end
 
     self.is_showing = true
-
     return self
 end
 
@@ -146,6 +143,7 @@ M.overriderollingHandler = function()
         return
     end
 
+    local ReaderRolling = require("apps/reader/modules/readerrolling")
     local pan_rate = Screen.low_pan_rate and 2.0 or 30.0
 
     ReaderUI.postInitCallback = {}
@@ -157,70 +155,15 @@ M.overriderollingHandler = function()
         view = ReaderUI.instance.view,
         ui = ReaderUI.instance
     }
-
+    ReaderRolling.c8eeb679k = true
+    ReaderRolling.original_onGotoViewRel = ReaderRolling.onGotoViewRel
     function ReaderRolling:onGotoViewRel(diff)
-        dbg.log("goto relative screen:", diff, "in mode:", self.view.view_mode)
-
-        if self.view.view_mode == "scroll" then
-            local footer_height = ((self.view.footer_visible and not self.view.footer.settings.reclaim_height) and 1 or
-                                      0) * self.view.footer:getHeight()
-            local page_visible_height = self.ui.dimen.h - footer_height
-            local pan_diff = diff * page_visible_height
-            if self.view.page_overlap_enable then
-                local overlap_lines = G_reader_settings:readSetting("copt_overlap_lines") or 1
-                local overlap_h = Screen:scaleBySize(
-                    self.configurable.font_size * 1.1 * self.configurable.line_spacing * (1 / 100)) * overlap_lines
-                if pan_diff > overlap_h then
-                    pan_diff = pan_diff - overlap_h
-                elseif pan_diff < -overlap_h then
-                    pan_diff = pan_diff + overlap_h
-                end
-            end
-            local old_pos = self.current_pos
-
-            local do_dim_area = math.abs(diff) == 1
-            self:_gotoPos(self.current_pos + pan_diff, do_dim_area)
-
-            if diff > 0 and old_pos == self.current_pos then
-                self.ui:handleEvent(Event:new("EndOfBook"))
-            elseif diff < 0 and old_pos == self.current_pos then
-                self.ui:handleEvent(Event:new("StartOfBook"))
-            end
-        elseif self.view.view_mode == "page" then
-            local page_count = self.ui.document:getVisiblePageNumberCount()
-            local old_page = self.current_page
-
-            if diff > 0 then
-                diff = math.ceil(diff)
-            else
-                diff = math.floor(diff)
-            end
-            local new_page = self.current_page
-            if self.ui.document:hasHiddenFlows() then
-                local test_page
-                for i = 1, math.abs(diff * page_count) do
-                    if diff > 0 then
-                        test_page = self.ui.document:getNextPage(new_page)
-                    else
-                        test_page = self.ui.document:getPrevPage(new_page)
-                    end
-                    if test_page > 0 then
-                        new_page = test_page
-                    end
-                end
-            else
-                new_page = new_page + diff * page_count
-            end
-            self:_gotoPage(new_page)
-
-            if diff > 0 and old_page == self.current_page then
-                self.ui:handleEvent(Event:new("EndOfBook"))
-            elseif diff < 0 and old_page == self.current_page then
-                self.ui:handleEvent(Event:new("StartOfBook"))
-            end
-        end
-        if self.ui.document ~= nil then
-            self.xpointer = self.ui.document:getXPointer()
+        local scroll_mode = self.view.view_mode == "scroll"
+        local old_pos = scroll_mode and self.current_pos or self.current_page
+        self:original_onGotoViewRel(diff)
+        local new_pos = scroll_mode and self.current_pos or self.current_page
+        if diff < 0 and old_pos == new_pos then
+            self.ui:handleEvent(Event:new("StartOfBook"))
         end
         return true
     end
