@@ -601,6 +601,7 @@ function LibraryView:initializeRegisterEvent(legado_main)
             if not filepath:find('/legado.cache/', 1, true) then
                 return
             end
+
             local file_name = select(2, util.splitFilePathName(doc_settings.data.doc_path or "")) or ''
             local _, extension = util.splitFileNameSuffix(file_name)
             if extension == 'txt' then
@@ -610,11 +611,24 @@ function LibraryView:initializeRegisterEvent(legado_main)
                 doc_settings.data.style_tweaks.paragraphs_indent = true
                 doc_settings.data.css = "./data/fb2.css"
             end
+
+            if LibraryView.instance and LibraryView.instance.chapter_listing and
+                LibraryView.instance.chapter_listing.bookinfo then
+                -- statistics.koplugin
+                if document then
+                    document.is_pic = true
+                end
+                -- readerui lastfile
+                doc_settings.data.summary = doc_settings.data.summary or {}
+                doc_settings.data.summary.status = "complete"
+            end
+
         end
     end
 
     function legado_main:onReaderReady(doc_settings)
-
+        -- logger.dbg("document.is_pic",self.ui.document.is_pic)
+        -- logger.dbg(doc_settings.data.summary.status)
         if LibraryView.instance and LibraryView.instance.chapter_listing and
             LibraryView.instance.chapter_listing.book_reader then
             logger.dbg("test_book_reader.chapter_call_event",
@@ -657,6 +671,15 @@ function LibraryView:initializeRegisterEvent(legado_main)
             end
         end
 
+    end
+
+    function legado_main:onCloseDocument()
+        if not (self.ui and self.ui.name == "ReaderUI" and self.ui.rolling and self.ui.rolling.c8eeb679b ~= true and
+            self.ui.document and type(self.ui.document.file) == 'string' and
+            self.ui.document.file:find('/legado.cache/', 1, true)) then
+            return
+        end
+        require("readhistory"):removeItemByPath(self.document.file)
     end
 
     table.insert(legado_main.ui, 3, legado_main)
