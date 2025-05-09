@@ -9,11 +9,11 @@ local util = require("util")
 local Screen = Device.screen
 local T = ffiUtil.template
 
-local Icons = require("libs/Icons")
-local Backend = require("Backend")
-local MessageBox = require("libs/MessageBox")
-local ChapterListing = require("ChapterListing")
-local H = require("libs/Helper")
+local Icons = require("Legado/Icons")
+local Backend = require("Legado/Backend")
+local MessageBox = require("Legado/MessageBox")
+local ChapterListing = require("Legado/ChapterListing")
+local H = require("Legado/Helper")
 
 local M = Menu:extend{
     name = "book_search_results",

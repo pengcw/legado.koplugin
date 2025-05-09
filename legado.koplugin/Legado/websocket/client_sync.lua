@@ -1,6 +1,6 @@
 local socket = require'socket'
-local sync = require'libs/websocket.sync'
-local tools = require'libs/websocket.tools'
+local sync = require'Legado/websocket.sync'
+local tools = require'Legado/websocket.tools'
 
 local new = function(ws)
   ws =  ws or {}

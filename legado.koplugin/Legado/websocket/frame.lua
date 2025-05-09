@@ -1,5 +1,5 @@
 -- Following Websocket RFC: http://tools.ietf.org/html/rfc6455
-local bit = require'libs/websocket.bit'
+local bit = require'Legado/websocket.bit'
 local band = bit.band
 local bxor = bit.bxor
 local bor = bit.bor
@@ -16,7 +16,7 @@ local mmin = math.min
 local mfloor = math.floor
 local mrandom = math.random
 local unpack = unpack or table.unpack
-local tools = require'libs/websocket.tools'
+local tools = require'Legado/websocket.tools'
 local write_int8 = tools.write_int8
 local write_int16 = tools.write_int16
 local write_int32 = tools.write_int32
