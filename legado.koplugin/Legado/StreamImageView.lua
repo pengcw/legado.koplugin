@@ -5,9 +5,9 @@ local ImageViewer = require("ui/widget/imageviewer")
 local logger = require("logger")
 local dbg = require("dbg")
 
-local MessageBox = require("libs/MessageBox")
-local Backend = require("Backend")
-local H = require("libs/Helper")
+local MessageBox = require("Legado/MessageBox")
+local Backend = require("Legado/Backend")
+local H = require("Legado/Helper")
 
 local M = ImageViewer:extend{
     bookinfo = nil,

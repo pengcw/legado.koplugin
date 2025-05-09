@@ -1,7 +1,7 @@
 local InfoMessage = require("ui/widget/infomessage")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local UIManager = require("ui/uimanager")
-local Icons = require("libs/Icons")
+local Icons = require("Legado/Icons")
 local logger = require('logger')
 
 --- @class DownloadUnreadChaptersJobDialog

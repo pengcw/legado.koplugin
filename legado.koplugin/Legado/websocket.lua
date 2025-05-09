@@ -1,7 +1,7 @@
-local frame = require'libs/websocket.frame'
+local frame = require'Legado/websocket.frame'
 
 return {
-  client = require'libs/websocket.client',
+  client = require'Legado/websocket.client',
   CONTINUATION = frame.CONTINUATION,
   TEXT = frame.TEXT,
   BINARY = frame.BINARY,

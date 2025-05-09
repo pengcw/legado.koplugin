@@ -1,4 +1,4 @@
-local bit = require'libs/websocket.bit'
+local bit = require'Legado/websocket.bit'
 local mime = require'mime'
 local rol = bit.rol
 local bxor = bit.bxor
