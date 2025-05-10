@@ -51,7 +51,7 @@ function LibraryView:init()
     -- 防御性编码,koreader又又崩了
     local status, err = pcall(self.refreshItems, self)
     if not status then
-        MessageBox.error('初始化失败')
+        MessageBox:error('初始化失败')
         logger.err('leado plugin err:', H.errorHandler(err))
     end
 
