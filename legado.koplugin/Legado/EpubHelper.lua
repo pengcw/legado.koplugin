@@ -1,8 +1,106 @@
--- https://github.com/Eninix/sigil-template
+local util = require("util")
+local H = require("Legado/Helper")
+local logger = require("logger")
+
 local M = {}
-M.duokancpt = function()
-    return [[
-    img.duokan-footnote{width:0.8em;}.duokan-image-single{width:100%;text-align:center;margin:0!important;}p.text{font-size:16px;duokan-text-indent:2em;text-indent:2em;}p.text0{font-size:16px;duokan-text-indent:0em;text-indent:0em;}p.reference{font-family:"DK-KAITI","楷体","方正楷体","华文楷体";font-size:16px;duokan-text-indent:2em;text-indent:2em;}p.reference0{font-family:"DK-KAITI","楷体","方正楷体","华文楷体";font-size:16px;duokan-text-indent:0em;text-indent:0em;}p.reference-center{font-family:"DK-KAITI","楷体","方正楷体","华文楷体";font-size:16px;text-align:center;}h2.t1{color:#1f4a92;font-size:22px;font-weight:normal;border-bottom:solid 1px #1f4a92;padding:0.2em 0em 0.5em 0em;duokan-text-indent:0em;text-indent:0em;}h2.t1b{font-size:22px;color:#91531d;font-weight:normal;margin-top:2%;duokan-text-indent:0em;text-indent:0em;padding-bottom:1em;border-bottom:solid 4px #e8c696;}h2.t1r{font-size:22px;text-align:right;font-weight:normal;color:#cf181a;margin-bottom:3em;}h2.t1c{font-weight:normal;font-size:22px;color:#478686;text-align:center;border-bottom:dashed 1px #478686;margin-bottom:2em;padding:0.3em 0em 0.3em 0em;}h3.t2{font-size:18px;duokan-text-indent:0em;text-indent:0em;font-weight:normal;color:#91531d;margin-top:2.2em;margin-bottom:1.4em;}h4.t3{font-size:16px;duokan-text-indent:0em;text-indent:0em;font-weight:normal;color:#91531d;margin-left:2em;margin-top:2.2em;margin-bottom:1.4em;}h4.duokan-copyright-title{font-size:24px;font-family:"DK-XIAOBIAOSONG","方正小标宋简体";font-weight:normal;text-align:center;}p.duokan-copyright-bodytext{font-family:"DK-SONGTI","方正宋三简体","方正书宋","宋体";font-size:16px;text-indent:2em;duokan-text-indent:2em;}img.duokan-image{width:100%;}img.duokan-image-note{width:100%;font-size:16px;margin-bottom:1em;}p.duokan-note{font-family:"DK-KAITI","方正楷体","华文楷体","楷体";font-size:14px;text-indent:0em;duokan-text-indent:0em;text-align:justify;}p.duokan-note-center{font-family:"DK-KAITI","方正楷体","华文楷体","楷体";font-size:14px;text-align:center;}p.duokan-note-right{font-family:"DK-KAITI","方正楷体","华文楷体","楷体";font-size:14px;text-align:right;}table.duokan-gallery-image{font-size:1em;width:100%;margin:1em auto 1em auto;border-spacing:0.3em 0.3em;}td.duokan-gallery-cell{text-indent:0em;duokan-text-indent:0em;}div.duokan-in-cell{width:100%;}.songti{font-family:"DK-SONGTI","方正宋三简体","方正书宋","宋体";}.heiti{font-family:"DK-HEITI","方正兰亭黑简体","黑体";}.kaiti{font-family:"DK-KAITI","方正楷体","华文楷体","楷体";}h1.chapter-t1{font-size:28px;text-align:center;color:#91531d;font-weight:normal;margin-top:2.5em;margin-bottom:2.5em;}h2.chapter-t2{font-size:26px;text-indent:0em;duokan-text-indent:0em;color:#91531d;font-weight:normal;margin-top:2em;margin-bottom:1.8em;}h3.chapter-t3{font-size:22px;text-indent:0em;duokan-text-indent:0em;color:#91531d;font-weight:normal;margin-top:2em;margin-bottom:1.8em;}h4.chapter-t4{font-size:20px;font-weight:normal;duokan-text-indent:0em;text-indent:0em;margin-top:2em;margin-bottom:1.8em;color:#91531d;}h5.chapter-t5{font-size:18px;font-weight:normal;duokan-text-indent:0em;text-indent:0em;border-left:solid 5px #d9d9d9;padding-left:0.7em;margin-top:2em;margin-bottom:1.8em;color:#91531d;}h6.chapter-t6{font-size:16px;font-weight:normal;duokan-text-indent:0em;text-indent:0em;margin-top:2em;margin-bottom:1.8em;margin-left:2em;color:#91531d;}
-    ]]
+local mianCss = string.format("%s/%s",H.getPluginDirectory(),"Legado/main.css.lua")
+local resCss = "resources/legado.css"
+
+
+local function split_title_advanced(title)
+    title = util.trim(title)
+    local patterns = {
+        "^(第[一二三四五六七八九十零]+[章部节]%s+)(.+)$",  -- 中文数字
+        "^(第%d+部%s+)(.+)$",                      -- 阿拉伯数字
+        "^(%d+%.%d+%s+)(.+)$",                     -- 1.1 样式
+        "^(%a+%.%s*)(.+)$",                        -- A. 样式
+        "^(CHAPTER%s+%d+%s*)(.+)$",                -- CHAPTER 1 样式
+        "^(.*%s)(.+)$"                             -- 最后按空格拆分
+    }
+    
+    for _, pattern in ipairs(patterns) do
+        local part, subpart = title:match(pattern)
+        if part and subpart then
+            part = part:gsub("%s+$", "")
+            subpart = subpart:gsub("^%s+", "")
+            return part, subpart
+        end
+    end
+    return "", title
+end
+
+M.addCssRes = function(book_cache_id)
+    local book_cache_path = H.getBookCachePath(book_cache_id)
+    local book_css_path = string.format("%s/%s",book_cache_path,resCss)
+
+    if not util.fileExists(book_css_path) then
+       H.copyFileFromTo(mianCss, book_css_path) 
+    end
+    return book_css_path
+end
+
+M.addchapterT = function(title, content)
+    title = title or ""
+    content = content or ""
+  local html = [=[
+<?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>%s</title><link href="%s" type="text/css" rel="stylesheet"/><style>p + p {margin-top: 0.5em;}</style>
+</head><body><h2 class="head"><span class="chapter-sequence-number">%s</span><br />%s</h2>
+<div>%s</div></body></html>]=]
+local part, subpart = split_title_advanced(title)
+return string.format(html, title, resCss, part, subpart, content)
+end
+
+M.introT = function()
+    local html = [[<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN">
+<head>
+    <title>内容简介</title>
+    <link href="%s" type="text/css" rel="stylesheet" />
+</head>
+<body>
+<h1 class="head" style="margin-bottom:2em;">内容简介</h1><p>%s</p></body>
+</html>
+end
+]]
+end
+
+M.coverT = function()
+    local html = [=[
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <title>Cover</title>
+    <style type="text/css">
+		.pic {
+			margin: 50% 30% 0 30%;
+			padding: 2px 2px;
+			border: 1px solid #f5f5dc;
+			background-color: rgba(250,250,250, 0);
+			border-radius: 1px;
+		}
+    </style>
+</head>
+<body style="text-align: center;">
+<div class="pic"><img src="../Images/cover.jpg" style="width: 100%; height: auto;"/></div>
+<h1 style="margin-top: 5%; font-size: 110%;">{name}</h1>
+<div class="author" style="margin-top: 0;"><b>{author}</b> <span style="font-size: smaller;">/ 著</span></div>
+</body>
+</html>    
+]=]
+return html
+end
+M.createMiscFiles =function()
+end
+M.createIndexHTM = function()
+end
+M.createNCX = function()
+end
+M.createOPF = function()
+end
+M.build = function()
 end
 return M

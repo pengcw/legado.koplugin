@@ -3,7 +3,6 @@ local util = require("util")
 local Device = require("device")
 local ffiUtil = require("ffi/util")
 local DataStorage = require("datastorage")
-local joinPath = ffiUtil.joinPath
 
 local M = {}
 local plugin_name = "legado"
@@ -252,6 +251,15 @@ end
 M.n_to_b = function(n)
     return n == 1
 end
+-- 路径转换
+M.replaceAllInvalidChars = function(str)
+    if util.replaceAllInvalidChars then 
+            return util.replaceAllInvalidChars(str)
+    end
+    if str then
+        return str:gsub('[\\,%/,:,%*,%?,%",%<,%>,%|]','_')
+    end
+end
 
 M.errorHandler = function(err)
     err = tostring(err)
@@ -289,8 +297,8 @@ M.copyRecursive = function(from, to)
     return ffiUtil.execute(cp_bin, "-r", from, to) == 0
 end
 M.copyFileFromTo = function(from, to)
-    local cp_bin = Device:isAndroid() and "/system/bin/cp" or "/bin/cp"
-    return ffiUtil.execute(cp_bin, from, to) == 0
+    ffiUtil.copyFile(from, to)
+    return true
 end
 M.base64 = function(str)
     return require("ffi/sha2").bin_to_base64(str)
@@ -298,9 +306,17 @@ end
 M.md5 = function(str)
     return require("ffi/sha2").md5(str)
 end
-M.joinPath = function(...)
-    return joinPath(...)
+
+M.joinPath = function(path1, path2)
+    if string.sub(path2, 1, 1) == "/" then
+        return path2
+    end
+    if string.sub(path1, -1, -1) ~= "/" then
+        path1 = path1 .. "/"
+    end
+    return path1 .. path2
 end
+
 M.checkAndCreateFolder = function(d_path)
     if not util.pathExists(d_path) then
         util.makePath(d_path)
@@ -309,17 +325,17 @@ M.checkAndCreateFolder = function(d_path)
 end
 
 M.getUserSettingsPath = function()
-    return joinPath(DataStorage:getSettingsDir(), plugin_name .. '.lua')
+    return M.joinPath(DataStorage:getSettingsDir(), plugin_name .. '.lua')
 end
 
 M.getUserPatchesDirectory = function()
-    local patches_dir = joinPath(DataStorage:getDataDir(), 'patches')
+    local patches_dir = M.joinPath(DataStorage:getDataDir(), 'patches')
     return M.checkAndCreateFolder(patches_dir)
 end
 
 M.getTempDirectory = function()
     local plugin_cache_dir = plugin_name .. '.cache'
-    local plugin_cache_path = joinPath(DataStorage:getDataDir(), 'cache/' .. plugin_cache_dir)
+    local plugin_cache_path = M.joinPath(DataStorage:getDataDir(), 'cache/' .. plugin_cache_dir)
     return M.checkAndCreateFolder(plugin_cache_path)
 end
 
@@ -330,18 +346,22 @@ end
 M.getBookCachePath = function(book_cache_id)
     assert(type(book_cache_id) == "string", "Error: The variable is not a string.")
     local plugin_cache_path = M.getTempDirectory()
-    local book_cache_path = joinPath(plugin_cache_path, book_cache_id .. '.sdr')
-    return M.checkAndCreateFolder(book_cache_path)
+    local book_cache_path = M.joinPath(plugin_cache_path, book_cache_id .. '.sdr')
+    M.checkAndCreateFolder(book_cache_path)
+    M.checkAndCreateFolder(M.joinPath(book_cache_path,"resources"))
+    return book_cache_path
 end
 
 M.getCoverCacheFilePath = function(book_cache_id)
     local book_cache_path = M.getBookCachePath(book_cache_id)
-    return joinPath(book_cache_path, 'cover')
+    return M.joinPath(book_cache_path, 'cover')
 end
 
-M.getChapterCacheFilePath = function(book_cache_id, chapters_index)
+M.getChapterCacheFilePath = function(book_cache_id, chapters_index, book_name)
+    book_name = util.getSafeFilename(book_name)
     local book_cache_path = M.getBookCachePath(book_cache_id)
-    return joinPath(book_cache_path, "en.arcrelight-" .. chapters_index)
+    local chapter_cache_name =  string.format("%s-%s", book_name or "", chapters_index)
+    return M.joinPath(book_cache_path, chapter_cache_name)
 end
 
 return M

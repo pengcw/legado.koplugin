@@ -12,6 +12,8 @@ local time = require("ui/time")
 local UIManager = require("ui/uimanager")
 local H = require("Legado/Helper")
 
+-- local extension = string.lower(string.match(filename, ".+%.([^.]+)") or "")
+
 -- 太旧版本缺少这个函数
 if not dbg.log then
     dbg.log = logger.dbg
@@ -95,6 +97,23 @@ local function get_image_format_head8(image_data)
     end
 end
 
+local function get_url_extension(url)
+    if type(url) ~= "string" or url == "" then
+        return ""
+    end
+    local parsed = socket_url.parse(url)
+    local path = parsed and parsed.path
+    if not path or path == "" then
+        return ""
+    end
+    path = socket_url.unescape(path):gsub("/+$", "")
+
+    local filename = path:match("([^/]+)$") or ""
+    local ext = filename:match("%.([%w]+)$")
+    --logger.info(path, filename, ext)
+    return ext and ext:lower() or ""
+end
+
 local function convertToGrayscale(image_data)
     local Png = require("Legado/Png")
     return Png.processImage(Png.toGrayscale, image_data, 1)
@@ -120,6 +139,9 @@ local function pGetUrlContent(url, timeout, maxtime)
     local request = {
         url = url,
         method = "GET",
+        headers = {
+            ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+        },
         sink = maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink),
         create = socketutil.tcp
     }
@@ -1081,15 +1103,15 @@ local function splitParagraphsPreserveBlank(text)
     local indentChinese = "\u{0020}\u{0020}\u{3000}"
     local indentEnglish = "\u{0020}\u{0020}"
     local paragraphs = {}
+    local allow_split = true
     local buffer = ""
     local prefix = nil
     local lines = {}
 
-    for line in text:gmatch("([^\n]*)\n?") do
-        local clean = utf8_trim(line or "")
-        if clean and clean ~= "" then
-            table.insert(lines, clean)
-        end
+    -- 保留空行，清理前后空白
+    for line in util.gsplit(text, "\n", false, true) do
+        line = utf8_trim(line)
+        table.insert(lines, line)
     end
 
     local function isPunctuation(char)
@@ -1125,15 +1147,14 @@ local function splitParagraphsPreserveBlank(text)
 
     for i, line in ipairs(lines) do
 
-        local allow_split = true
-
         if buffer and buffer ~= "" then
             line = table.concat({buffer, line or ""})
             buffer = ""
         end
 
-        if line ~= "" then
-
+        if line == "" then
+            table.insert(paragraphs, line)
+        else
             if not prefix then
                 prefix = util.hasCJKChar(line:sub(1, 9)) and indentChinese or indentEnglish
                 -- logger.dbg('isChinese:', prefix == indentChinese)
@@ -1259,72 +1280,137 @@ local chapter_writeToFile = function(chapter, filePath, resources)
     end
 end
 
-local processLink = function(book_cache_id, resources_src, base_url)
-    if not H.is_str(book_cache_id) and not H.is_str(resources_src) or resources_src == "" then
-        logger.dbg("no src found in processImg")
+local replace_css_urls = function(css_text, replace_fn)
+    css_text = tostring(css_text or "")
+    return (css_text:gsub("url%s*%((%s*['\"]?)(.-)(['\"]?%s*)%)", function(prefix, old_path, suffix)
+        if type(old_path) ~= "string" or old_path == "" or old_path:lower():find("^data:") then
+            return "url(" .. prefix .. old_path .. suffix .. ")"
+        end
+        local ok, new_path = pcall(replace_fn, old_path)
+        if not ok or type(new_path) ~= "string" or new_path == "" then
+            return "url(" .. prefix .. old_path .. suffix .. ")"
+        end
+        return "url(" .. prefix .. new_path .. suffix .. ")"
+    end))
+end
+
+local processLink
+processLink = function(book_cache_id, resources_src, base_url, is_porxy)
+    if not (H.is_str(book_cache_id) and H.is_str(resources_src) and resources_src ~= "") then
+        logger.dbg("invalid params in processLink", book_cache_id, resources_src)
         return nil
-    end
-    resources_src = util.trim(resources_src)
-    if resources_src:sub(1, 5) == "data:" then
-        logger.dbg("skipping data URI", resources_src)
-        return nil
-    end
-    
-    if resources_src:sub(1, 2) == "//" then
-        resources_src = "https:" .. resources_src
-    elseif resources_src:sub(1, 1) == "/" then
-        resources_src = socket_url.absolute(base_url, resources_src)
-    elseif resources_src:sub(1, 1) == "#" then
-        return nil
-    elseif resources_src:sub(1, 4) ~= "http" then
-        resources_src = socket_url.absolute(base_url, resources_src)
     end
 
-    local src_ext = resources_src
-    if src_ext:find("?", 1, true) then
-        src_ext = src_ext:match("(.-)%?")
+    local processed_src
+    if is_porxy == true then
+        local bookUrl = base_url
+        processed_src = M:getProxyImageUrl(bookUrl, resources_src)
+    else
+        processed_src = util.trim(resources_src)
+        if processed_src:lower():find("^data:") then
+            logger.dbg("skipping data URI", processed_src)
+            return nil
+        end
+
+        if processed_src:sub(1, 2) == "//" then
+            processed_src = "https:" .. processed_src
+        elseif processed_src:sub(1, 1) == "/" then
+            processed_src = socket_url.absolute(base_url, processed_src)
+        elseif processed_src:sub(1, 1) == "#" then
+            return nil
+        elseif processed_src:sub(1, 4) ~= "http" then
+            processed_src = socket_url.absolute(base_url, processed_src)
+        end
     end
 
-    -- src_ext:match("([^/]+)$")  -- 提取 filename
-    local ext = src_ext:match(".*%.(%S%S%S?%S?%S?)$") or ""
-    --logger.info("src_ext", ext)
-    --logger.info("resources_src", resources_src)
-    local resources_id = md5(resources_src)
-    local resources_filename =  ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
+    local ext = get_url_extension(processed_src)
+    if ext == "" then
+        local clean_url = resources_src:gsub("[#?].*", "")
+        ext = get_url_extension(clean_url)
+        if ext == "" then
+            -- legado app 图片后带数据 v07ew.jpg,{'headers':{'referer':'https://m.weibo.cn'}}"
+            clean_url = resources_src:match("^(.-),") or resources_src
+            ext = get_url_extension(clean_url)
+        end
+    end
+
+    -- logger.info("src_ext", ext)
+    -- logger.info("resources_src", resources_src)
+    local resources_id = md5(processed_src)
+    local resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
 
     local resources_relpath, resources_filepath, resources_catalogue =
         book_chapter_resources(book_cache_id, resources_filename)
-    --logger.info(resources_relpath, resources_filepath, resources_catalogue)
+    -- logger.info(resources_relpath, resources_filepath, resources_catalogue)
 
     -- 已有缓存
     if ext ~= "" and resources_filepath and util.fileExists(resources_filepath) then
         return resources_relpath
     end
 
-    local status, err = pcall(pGetUrlContent, resources_src)
+    local status, err = pcall(pGetUrlContent, processed_src)
     if status and H.is_tbl(err) and err["data"] then
         if not ext or ext == "" then
             ext = err["ext"] or ""
             resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
         end
 
+        if ext == "css" then
+            err["data"] = replace_css_urls(err[data], function(url)
+                -- 防止循环引用
+                if url == resources_src then
+                    return url
+                end
+                return processLink(book_cache_id, url, processed_src)
+            end)
+        end
         return book_chapter_resources(book_cache_id, resources_filename, err["data"])
     end
 
 end
 
--- 禁用正则
-local function escape_pattern(str)
-    return (str or ""):gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
-end
-local replace_list_func = function(str, rep_list)
-    if type(rep_list) ~= 'table' then return str end
-    for k, v in pairs(rep_list) do
-        if v["rep_el"] and v["el"] then
-            str = str:gsub(escape_pattern(v["el"]), v["rep_el"])
-        end
+local function plain_text_replace(text, pattern, replacement, count)
+    text = tostring(text or "")
+    pattern = tostring(pattern or "")
+    replacement = tostring(replacement or "")
+
+    if pattern == "" then
+        return text
     end
-    return str
+    -- 转义 Lua 模式特殊字符
+    local escaped_pattern = pattern:gsub("([%%().%+-*?[%]^$])", "%%%1")
+    -- 转义替换字符串中的 %
+    local safe_replacement = replacement:gsub("%%", "%%%%")
+    return text:gsub(escaped_pattern, safe_replacement, count)
+end
+
+local txt2html = function(book_cache_id, content, title)
+    local dropcaps
+    local lines = {}
+    content = content or ""
+    for line in util.gsplit(content, "\n", false, true) do
+        line = utf8_trim(line)
+        local el_tags
+
+        if dropcaps ~= true and line ~= "" and not string.find(line, "<img", 1, true) then
+            local rep_text = line:match(util.UTF8_CHAR_PATTERN)
+            line = plain_text_replace(line, rep_text, "", 1)
+            el_tags = string.format('<p style="text-indent: 0em;"><span class="duokan-dropcaps-two">%s</span>%s</p>',
+                rep_text, line)
+            dropcaps = true
+        else
+            el_tags = (line ~= "") and string.format('<p>%s</p>', line) or "<br>"
+        end
+        table.insert(lines, el_tags)
+    end
+
+    if #lines > 0 then
+        content = table.concat(lines)
+    end
+
+    local epub = require("Legado/EpubHelper")
+    epub.addCssRes(book_cache_id)
+    return epub.addchapterT(title, content)
 end
 
 local htmlparser
@@ -1340,7 +1426,7 @@ function M:_AnalyzingChapters(chapter, content)
         content = tostring(content)
     end
 
-    local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index)
+    local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
 
     local first_line = (string.match(content, "([^\n]*)\n?") or content):lower()
     local PAGE_TYPES = {
@@ -1355,7 +1441,7 @@ function M:_AnalyzingChapters(chapter, content)
     -- logger.dbg("get_chapter_ontent_type:",page_type)
 
     if page_type == PAGE_TYPES['IMAGE'] then
-        local img_sources = self:getProxyImageUrl(bookUrl, content)
+        local img_sources = self:getPorxyPicUrls(bookUrl, content)
         if H.is_tbl(img_sources) and #img_sources > 0 then
 
             filePath = filePath .. '.cbz'
@@ -1402,121 +1488,86 @@ function M:_AnalyzingChapters(chapter, content)
 
             local body = root("body")
             if body[1] then
-                local replace_list = {}
-                -- img 图片
-                local src_el = body[1]:select("img[src]")
-                for _, el in ipairs(src_el) do
-                    if el and el.attributes and el.attributes["src"] then
-                        local relpath = processLink(book_cache_id, el.attributes["src"], html_url)
-                        if relpath then
-                            local el_text = el:gettext()
-                            local replace_text = el_text:gsub(escape_pattern(el.attributes["src"]), relpath)
-                            table.insert(replace_list, {
-                                el = el_text,
-                                rep_el = replace_text
-                            })
-                        end
-                    end
-                end
+                local img_pattern = "(<[Ii][Mm][Gg].-[Ss][Rr][Cc]%s*=%s*)(['\"])(.-)%2([^>]*>)"
+                local image_xlink_pattern = '(<image.-xlink:href=["\'])(.-)(["\'])'
+                local link_pattern = '(<link.-href=["\'])(.-)(["\'])'
 
-                -- svg 图片
-                src_el = body[1]:select("svg")
-                for _, el in ipairs(src_el) do
+                for _, el in ipairs(root("script")) do
                     if el then
                         local el_text = el:gettext()
-                        local replace_text = el_text:gsub('(<image.-xlink:href=["\'])(.-)(["\'])',
-                            function(open, path, close)
-                                local relpath = processLink(book_cache_id, path, html_url)
-                                if H.is_str(relpath) then
-                                    return table.concat({open, relpath, close})
-                                end
-                                return
-                            end)
-                        if replace_text then
-                            table.insert(replace_list, {
-                                el = el_text,
-                                rep_el = replace_text
-                            })
+                        if el_text then
+                            content = plain_text_replace(content, el_text, "")
                         end
                     end
                 end
-                src_el = nil
-
-                -- 处理 body
-                local body_text = body[1]:gettext()
-                -- 执行替换
-                body_text = replace_list_func(body_text, replace_list)
-
-                -- 补充处理
-                local img_pattern = "(<[Ii][Mm][Gg].-[Ss][Rr][Cc]%s*=%s*)(['\"])(.-)%2([^>]*>)"
-                body_text = body_text:gsub('(<image.-xlink:href=["\'])(.-)(["\'])', function(open, path, close)
-                        -- 前面处理过了这里就跳过
-                        if path and string.find(path, "^resources/") == nil then
+                for _, el in ipairs(root("head > link[href]")) do
+                    if el and el.attributes and el.attributes["href"] then
+                        local relpath = processLink(book_cache_id, el.attributes["href"], html_url)
+                        local el_text = el:gettext()
+                        if H.is_str(relpath) and el_text then
+                            local replace_text = plain_text_replace(el_text, el.attributes["href"], relpath)
+                            content = plain_text_replace(content, el_text, replace_text)
+                        end
+                    end
+                end
+                for _, el in ipairs(body[1]:select("img[src]")) do
+                    if el and el.attributes and el.attributes["src"] then
+                        local relpath = processLink(book_cache_id, el.attributes["src"], html_url)
+                        local el_text = el:gettext()
+                        if relpath and el_text then
+                            local replace_text = plain_text_replace(el_text, el.attributes["src"], relpath)
+                            content = plain_text_replace(content, el_text, replace_text)
+                        end
+                    end
+                end
+                for _, el in ipairs(body[1]:select("svg")) do
+                    if el then
+                        local el_text = el:gettext()
+                        for open, path, close in el_text:gmatch(image_xlink_pattern) do
+                            if not open or open == "" then
+                                return
+                            end
                             local relpath = processLink(book_cache_id, path, html_url)
                             if H.is_str(relpath) then
-                                return table.concat({open, relpath, close})
-                            end
-                        end
-                        return
-                end):gsub(img_pattern, function(r1, r2, r3, r4)
-                        if not r3 or string.find(r3 , "^resources/") ~= nil then
-                            return
-                        end
-                        local path = r3
-                        local relpath = processLink(book_cache_id, path, html_url)
-                        if H.is_str(relpath) then
-                            return table.concat({r1, r2, relpath, r2, r4})
-                        end
-                        return
-                end)
-                
-
-                local head_text
-                local head_el = root:select("head")
-                if head_el[1] then
-
-                    replace_list = {}
-                    local href_el = head_el[1]:select("link[href]")
-                    for _, el in ipairs(href_el) do
-                        if el and el.attributes and el.attributes["href"] then
-                            local relpath = processLink(book_cache_id, el.attributes["href"], html_url)
-                            if H.is_str(relpath) then
-                                local el_text = el:gettext()
-                                table.insert(replace_list, {
-                                    el = el_text,
-                                    rep_el = el_text:gsub(escape_pattern(el.attributes["href"]), relpath)
-                                })
+                                local replace_text = plain_text_replace(el_text, open .. path, open .. relpath)
+                                content = plain_text_replace(content, el_text, replace_text)
                             end
                         end
                     end
-                    href_el = nil
+                end
 
-                    head_text = head_el[1]:gettext()
-                    head_text = replace_list_func(head_text, replace_list)
-
-                    -- 补充处理
-                    if head_el[1]:select("script")[1] then
-                        head_text = head_text:gsub("<script[^>]*>(.-\n?)</script>", ""):gsub(
-                            "<script[^>]*>[\x00-\xFF]-</script>", "")
+                -- 补充处理
+                content = content:gsub("<script[^>]*>(.-\n?)</script>", ""):gsub("<script[^>]*>[\x00-\xFF]-</script>",
+                    ""):gsub(link_pattern, function(open, path, close)
+                    if not path or string.find(path, "^resources/") ~= nil then
+                        return
                     end
-                    head_text = head_text:gsub('(<link.-href=["\'])(.-)(["\'])', function(open, path, close)
-                        if not path or string.find(path, "^resources/") ~= nil then 
-                                return 
-                        end
+                    local relpath = processLink(book_cache_id, path, html_url)
+                    if H.is_str(relpath) then
+                        return table.concat({open, relpath, close})
+                    end
+                    return
+                end):gsub(image_xlink_pattern, function(open, path, close)
+                    -- 前面处理过了这里就跳过
+                    if path and string.find(path, "^resources/") == nil then
                         local relpath = processLink(book_cache_id, path, html_url)
                         if H.is_str(relpath) then
                             return table.concat({open, relpath, close})
                         end
+                    end
+                    return
+                end):gsub(img_pattern, function(r1, r2, r3, r4)
+                    if r1 == "" or not r3 or string.find(r3, "^resources/") ~= nil then
                         return
-                    end)
-        
-                end
-
-                content = string.format("<!DOCTYPE html><html>%s%s</html>",
-                    (head_text and head_text ~= "") and head_text or "<head></head>",
-                    (body_text and body_text ~= "") and body_text or "<body></body>")
+                    end
+                    local path = r3
+                    local relpath = processLink(book_cache_id, path, html_url)
+                    if H.is_str(relpath) then
+                        return table.concat({r1, r2, relpath, r2, r4})
+                    end
+                    return
+                end)
             end
-
         end
 
         return chapter_writeToFile(chapter, filePath, content)
@@ -1524,12 +1575,6 @@ function M:_AnalyzingChapters(chapter, content)
     elseif page_type == PAGE_TYPES['MIXED'] then
         -- 混合 img 标签和文本
         filePath = filePath .. '.html'
-        local lines = {}
-        local width = Device.screen:getWidth() or 800
-        local server_address = self.settings_data.data.server_address
-        local server_type = self.settings_data.data.server_type
-        local api_root_url = server_address:gsub("/reader3$", "")
-
         local img_pattern = "(<[Ii][Mm][Gg].-[Ss][Rr][Cc]%s*=%s*)(['\"])(.-)%2([^>]*>)"
         if has_img_tag(content) then
 
@@ -1538,61 +1583,36 @@ function M:_AnalyzingChapters(chapter, content)
                     return
                 end
                 local path = r3
-
-                local html_url
-                if self.settings_data.data.server_type == 1 then
-                    html_url = server_address .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' ..
-                                   util.urlEncode(path) .. '&width=' .. width
-                elseif self.settings_data.data.server_type == 2 then
-
-                    html_url = path:gsub("([^%w%-%.%_%~%/])", function(c)
-                        return string.format("%%%02X", string.byte(c))
-                    end):gsub("^__API_ROOT__", api_root_url)
-                end
-
-                local relpath = processLink(book_cache_id, html_url, html_url)
-                
+                local relpath = processLink(book_cache_id, path, bookUrl, true)
                 if H.is_str(relpath) then
-                    return table.concat({r1, r2, relpath, r2, r4})
+                    -- 随文图
+                    return string.format('<div class="duokan-image-single">%s</div>',
+                        table.concat({r1, r2, relpath, r2, ' class="picture-80" alt="" ', r4}))
                 end
                 return
             end)
         end
 
-        for line in content:gmatch("([^\n]*)\n?") do
-            local clean = utf8_trim(line or "")
-            clean = string.format("<p>%s</p>", (clean and clean ~= "") and clean or "<br>")
-            table.insert(lines, clean)
-        end
-
-        if #lines > 0 then
-
-            local resources_relpath = book_chapter_resources(book_cache_id, "duokancpt.css", require("Legado/EpubHelper"):duokancpt())
-            content = table.concat(lines)
-            content = string.format([[
-    <!DOCTYPE html><html><head><title>%s</title>
-    <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
-     <link rel="stylesheet" href="%s" type="text/css" />
-    </head><body><p><h1 class="chapter-t1">%s</h1></p>%s<body>
-    </html>]], chapter_title or "", resources_relpath, chapter_title or "", content)
-        end
-
+        content = txt2html(book_cache_id, content, chapter_title)
         return chapter_writeToFile(chapter, filePath, content)
     else
         -- TEXT
-        filePath = filePath .. '.txt'
-        local paragraphs = splitParagraphsPreserveBlank(content)
-        if #paragraphs == 0 then
-            chapter.content_is_nil = true
-        end
+        if self.settings_data.data.istxt == true then
+            filePath = filePath .. '.txt'
+            local paragraphs = splitParagraphsPreserveBlank(content)
+            if #paragraphs == 0 then
+                chapter.content_is_nil = true
+            end
+            first_line = paragraphs[1] or ""
+            content = table.concat(paragraphs, "\n")
+            paragraphs = nil
 
-        first_line = paragraphs[1] or ""
-        content = table.concat(paragraphs, "\n")
-        paragraphs = nil
-
-        -- 添加标题
-        if not string.find(first_line, chapter_title, 1, true) then
-            content = table.concat({"\t\t", tostring(chapter_title), "\n\n", content})
+            if not string.find(first_line, chapter_title, 1, true) then
+                content = table.concat({"\t\t", tostring(chapter_title), "\n\n", content})
+            end
+        else
+            filePath = filePath .. '.html'
+            content = txt2html(book_cache_id, content, chapter_title)
         end
 
         return chapter_writeToFile(chapter, filePath, content)
@@ -1649,7 +1669,7 @@ function M:getCacheChapterFilePath(chapter)
 
     local book_cache_id = chapter.book_cache_id
     local chapters_index = chapter.chapters_index
-
+    local book_name = chapter.name or ""
     local cache_file_path = chapter.cacheFilePath
     local cacheExt = chapter.cacheExt
 
@@ -1666,9 +1686,9 @@ function M:getCacheChapterFilePath(chapter)
         end
     end
 
-    local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index)
+    local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index, book_name)
 
-    local extensions = {'txt', 'cbz', 'html', 'xhtml', 'jpg', 'png'}
+    local extensions = {'html','cbz','xhtml','txt','jpg','png'}
 
     if H.is_str(cacheExt) then
 
@@ -1748,6 +1768,7 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
         return htmlUrl
     end
     local server_address = self.settings_data.data['server_address']
+    local server_type = self.settings_data.data.server_type
     if server_address:match("/reader3$") and htmlUrl:match("%.x?html$") then
         local api_root_url = server_address:gsub("/reader3$", "")
         htmlUrl = htmlUrl:gsub("([^%w%-%.%_%~%/])", function(c)
@@ -1760,38 +1781,34 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
     end
 end
 
-function M:getProxyImageUrl(bookUrl, content)
+function M:getProxyImageUrl(bookUrl, img_src)
+    local html_url
+    local width = Device.screen:getWidth() or 800
+    local server_address = self.settings_data.data.server_address
+    local server_type = self.settings_data.data.server_type
+    local api_root_url = server_address:gsub("/reader3$", "")
+    if server_type == 1 then
+        html_url = server_address .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' .. util.urlEncode(img_src) ..
+                       '&width=' .. width
+    elseif server_type == 2 then
+        html_url = path:gsub("([^%w%-%.%_%~%/])", function(c)
+            return string.format("%%%02X", string.byte(c))
+        end):gsub("^__API_ROOT__", api_root_url)
+    end
+    return html_url
+end
 
+function M:getPorxyPicUrls(bookUrl, content)
     local picUrls = get_img_src(content)
     if not H.is_tbl(picUrls) or #picUrls < 1 then
         return {}
     end
 
     local new_porxy_picurls = {}
-
-    local server_address = self.settings_data.data['server_address']
-
-    if server_address:match("/reader3$") then
-        local api_root_url = server_address:gsub("/reader3$", "")
-
-        for i, img_src in ipairs(picUrls) do
-            img_src = img_src:gsub("([^%w%-%.%_%~%/])", function(c)
-                return string.format("%%%02X", string.byte(c))
-            end)
-
-            local new_url = img_src:gsub("^__API_ROOT__", api_root_url)
-
-            table.insert(new_porxy_picurls, new_url)
-        end
-    else
-        local width = Device.screen:getWidth() or 800
-        for i, img_src in ipairs(picUrls) do
-            local new_url = server_address .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' ..
-                                util.urlEncode(img_src) .. '&width=' .. width
-            table.insert(new_porxy_picurls, new_url)
-        end
+    for i, img_src in ipairs(picUrls) do
+        local new_url = self:getProxyImageUrl(bookUrl, img_src)
+        table.insert(new_porxy_picurls, new_url)
     end
-
     return new_porxy_picurls
 end
 
@@ -1818,7 +1835,7 @@ function M:getChapterImgList(chapter)
         chapters_index = down_chapters_index
     }), function(data)
         if H.is_str(data) then
-            local img_sources = self:getProxyImageUrl(bookUrl, data)
+            local img_sources = self:getPorxyPicUrls(bookUrl, data)
             if H.is_tbl(img_sources) and #img_sources > 0 then
                 if chapter.isRead ~= true then
                     self.dbManager:updateIsRead(chapter, true, true)
@@ -2446,9 +2463,9 @@ function M:after_reader_chapter_show(chapter)
     if chapter.isRead ~= true and NetworkMgr:isConnected() then
         local complete_count = self:getcompleteReadAheadChapters(chapter)
         if complete_count < 40 then
-            local preDownloadNum = 3
-            if chapter.cacheExt and chapter.cacheExt == 'txt' then
-                preDownloadNum = 5
+            local preDownloadNum = 5
+            if chapter.cacheExt and chapter.cacheExt == 'cbz' then
+                preDownloadNum = 3
             end
             self:preLoadingChapters(chapter, preDownloadNum)
         end
@@ -2530,17 +2547,9 @@ function M:setEndpointUrl(new_setting_url)
     end
 
     local settings = self.settings_data.data
-
-    local username = ''
-    local password = ''
-    if parsed.userinfo then
-
-        local decoded_userinfo = socket_url.unescape(parsed.userinfo)
-        username, password = decoded_userinfo:match("^([^:]+):?(.*)$")
-        password = (password ~= "") and password or nil
-        if not H.is_str(username) or not H.is_str(password) then
-            return wrap_response(nil, "username，password格式有误")
-        end
+    if parsed.user and parsed.user ~= "" then
+        self.settings_data.data.reader3_un = util.urlDecode(parsed.user)
+        self.settings_data.data.reader3_pwd = util.urlDecode(parsed.password)
     end
 
     local clean_url = string.format("%s://%s%s%s%s%s%s", parsed.scheme, parsed.host,
@@ -2548,9 +2557,6 @@ function M:setEndpointUrl(new_setting_url)
         parsed.params and (";" .. parsed.params) or "", parsed.fragment and ("#" .. parsed.fragment) or "")
 
     -- dbg.log("server_address:", clean_url)
-
-    self.settings_data.data.reader3_un = username
-    self.settings_data.data.reader3_pwd = password
     self.settings_data.data.server_address = clean_url
     self.settings_data.data.setting_url = new_setting_url
     self.settings_data.data.server_address_md5 = md5(parsed.host)
@@ -2558,7 +2564,7 @@ function M:setEndpointUrl(new_setting_url)
         self.settings_data.data.servers_history = {}
     end
     self.settings_data.data.servers_history[new_setting_url] = 1
-    if string.find(string.lower(self.settings_data.data.server_address), "/reader3$") then
+    if string.find(string.lower(parsed.path or ""), "/reader3$") then
         self.settings_data.data.server_type = 2
     else
         self.settings_data.data.server_type = 1
@@ -2590,3 +2596,5 @@ require("ffi/__gc")(M, {
 })
 
 return M
+
+

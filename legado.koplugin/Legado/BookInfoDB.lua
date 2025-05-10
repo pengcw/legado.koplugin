@@ -994,7 +994,8 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
         SELECT 
         c.chapterIndex, 
         c.title, 
-        b.bookUrl
+        b.bookUrl,
+        b.name
     FROM chapters AS c
     INNER JOIN books AS b
         ON c.bookCacheId = b.bookCacheId 
@@ -1021,8 +1022,8 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
                 book_cache_id = bookCacheId,
                 title = row[2],
                 bookUrl = row[3],
-                chapters_index = chapterIndex
-
+                chapters_index = chapterIndex,
+                name = row[4]
             }
         end
     end
