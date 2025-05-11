@@ -3,38 +3,72 @@ local H = require("Legado/Helper")
 local logger = require("logger")
 
 local M = {}
-local mianCss = string.format("%s/%s",H.getPluginDirectory(),"Legado/main.css.lua")
+local mianCss = string.format("%s/%s", H.getPluginDirectory(), "Legado/main.css.lua")
 local resCss = "resources/legado.css"
 
-
 local function split_title_advanced(title)
-    title = util.trim(title)
-    local patterns = {
-        "^(第[一二三四五六七八九十零]+[章部节]%s+)(.+)$",  -- 中文数字
-        "^(第%d+部%s+)(.+)$",                      -- 阿拉伯数字
-        "^(%d+%.%d+%s+)(.+)$",                     -- 1.1 样式
-        "^(%a+%.%s*)(.+)$",                        -- A. 样式
-        "^(CHAPTER%s+%d+%s*)(.+)$",                -- CHAPTER 1 样式
-        "^(.*%s)(.+)$"                             -- 最后按空格拆分
-    }
-    
-    for _, pattern in ipairs(patterns) do
-        local part, subpart = title:match(pattern)
-        if part and subpart then
-            part = part:gsub("%s+$", "")
-            subpart = subpart:gsub("^%s+", "")
-            return part, subpart
-        end
+
+    if type(title) ~= 'string' or title == "" then
+        return nil, nil
     end
-    return "", title
+    local words = util.splitToChars(title)
+
+    if not H.is_tbl(words) or #words == 0 then
+        return nil, nil
+    end
+
+    -- 查找隔断符号的位置
+    local count = 0
+    local part_start, part_end
+    -- 第一卷 笼中雀 第六章 下签
+
+    local segmentation = {
+        ["\u{0020}"] = true,
+        ["\u{00A0}"] = true,
+        ["\u{3000}"] = true, 
+        ["\u{2000}"] = true,
+        ["\u{2001}"] = true,
+        ["\u{2002}"] = true,
+        ["\u{2003}"] = true,
+        ["\u{2004}"] = true,
+        ["\u{2005}"] = true,
+        ["\u{2006}"] = true,
+        ["\u{2007}"] = true,
+        ["\u{2008}"] = true,
+        ["\u{2009}"] = true,
+        ["\u{200A}"] = true,
+        ["\u{202F}"] = true,
+        ["\u{205F}"] = true,
+        ["、"] = true,
+        ["："] = true,
+        ["》"] = true,
+    }
+
+    for i, v in ipairs(words) do
+
+        if i > 1 and segmentation[v] == true then
+            break
+        end
+        count = count + 1
+    end
+
+    if count == 0 or count == #words then
+        return "", title
+    end
+
+    local part = table.concat(words, "", 1, count)
+    local subpart = table.concat(words, "", count + 1)
+    --logger.info(part, subpart)
+    return part, subpart
 end
+
 
 M.addCssRes = function(book_cache_id)
     local book_cache_path = H.getBookCachePath(book_cache_id)
-    local book_css_path = string.format("%s/%s",book_cache_path,resCss)
+    local book_css_path = string.format("%s/%s", book_cache_path, resCss)
 
     if not util.fileExists(book_css_path) then
-       H.copyFileFromTo(mianCss, book_css_path) 
+        H.copyFileFromTo(mianCss, book_css_path)
     end
     return book_css_path
 end
@@ -42,14 +76,14 @@ end
 M.addchapterT = function(title, content)
     title = title or ""
     content = content or ""
-  local html = [=[
+    local html = [=[
 <?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head><title>%s</title><link href="%s" type="text/css" rel="stylesheet"/><style>p + p {margin-top: 0.5em;}</style>
 </head><body><h2 class="head"><span class="chapter-sequence-number">%s</span><br />%s</h2>
 <div>%s</div></body></html>]=]
-local part, subpart = split_title_advanced(title)
-return string.format(html, title, resCss, part, subpart, content)
+    local part, subpart = split_title_advanced(title)
+    return string.format(html, title, resCss, part or "", subpart or "", content)
 end
 
 M.introT = function()
@@ -91,9 +125,9 @@ M.coverT = function()
 </body>
 </html>    
 ]=]
-return html
+    return html
 end
-M.createMiscFiles =function()
+M.createMiscFiles = function()
 end
 M.createIndexHTM = function()
 end

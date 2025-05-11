@@ -51,8 +51,42 @@ function LibraryView:init()
     -- 防御性编码,koreader又又崩了
     local status, err = pcall(self.refreshItems, self)
     if not status then
-        MessageBox:error('初始化失败')
-        logger.err('leado plugin err:', H.errorHandler(err))
+
+        local last_backup_db = string.format("%s/%s", H.getTempDirectory(), "bookinfo.db.bak")
+        local bookinfo_db_path = string.format("%s/%s", H.getTempDirectory(), "bookinfo.db")
+        local has_backup = util.fileExists(last_backup_db)
+        logger.err('legado plugin err:', H.errorHandler(err))
+
+        MessageBox:confirm(string.format(
+            "初始化失败\n疑似缓存文件损坏，如果多次重试失败，请执行还原或者清理！"),
+            function(result)
+                if result then
+                    util.removeFile(bookinfo_db_path)
+                    if util.fileExists(last_backup_db) then
+                        H.copyFileFromTo(last_backup_db, bookinfo_db_path)
+                        util.removeFile(last_backup_db)
+                    end
+                    self:onClose()
+                    MessageBox:info(string.format("缓存文件损坏已%s，请重试打开",has_backup and "还原" or "清除"))
+                end
+            end, {
+                ok_text = has_backup and "还原" or "清除",
+                cancel_text = "取消"
+            })
+    else
+        local setting_data = Backend:getSettings()
+        local last_backup_time = setting_data.last_backup_time
+        if not last_backup_time or os.time() - last_backup_time > 86400 then
+            local last_backup_db = string.format("%s/%s", H.getTempDirectory(), "bookinfo.db.bak")
+            local bookinfo_db_path = string.format("%s/%s", H.getTempDirectory(), "bookinfo.db")
+            if util.fileExists(last_backup_db) then
+                util.removeFile(last_backup_db)
+            end
+            H.copyFileFromTo(bookinfo_db_path, last_backup_db)
+            logger.info("legado plugin: backup successful")
+            setting_data.last_backup_time = os.time()
+            Backend:saveSettings(setting_data)
+        end
     end
 
     LibraryView.instance = self
@@ -494,7 +528,7 @@ function LibraryView:openMenu()
     end
 
     dialog = require("ui/widget/buttondialog"):new{
-        title = string.format(Icons.FA_DATABASE.." 剩余空间: %.1f G", self.disk_available or -1),
+        title = string.format(Icons.FA_DATABASE .. " 剩余空间: %.1f G", self.disk_available or -1),
         title_align = "center",
         title_face = Font:getFace("x_smalltfont"),
         info_face = Font:getFace("tfont"),

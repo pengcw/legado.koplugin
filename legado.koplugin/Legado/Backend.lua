@@ -110,8 +110,8 @@ local function get_url_extension(url)
 
     local filename = path:match("([^/]+)$") or ""
     local ext = filename:match("%.([%w]+)$")
-    --logger.info(path, filename, ext)
-    return ext and ext:lower() or ""
+    -- logger.info(path, filename, ext)
+    return ext and ext:lower() or "", filename
 end
 
 local function convertToGrayscale(image_data)
@@ -1034,7 +1034,7 @@ utf8proc_ssize_t utf8proc_iterate(const utf8proc_uint8_t *, utf8proc_ssize_t, ut
     end
 end
 
-local function utf8_trim(str)
+function M:utf8_trim(str)
     if type(str) ~= "string" or str == "" then
         return ""
     end
@@ -1110,38 +1110,46 @@ local function splitParagraphsPreserveBlank(text)
 
     -- 保留空行，清理前后空白
     for line in util.gsplit(text, "\n", false, true) do
-        line = utf8_trim(line)
+        line = M:utf8_trim(line)
         table.insert(lines, line)
     end
 
+    -- 常见标点符号判断
     local function isPunctuation(char)
         if not char then
             return false
         end
+
+        local punctuationSet = {
+            ["\u{0021}"] = true,
+            ["\u{002C}"] = true,
+            ["\u{002E}"] = true,
+            ["\u{003A}"] = true,
+            ["\u{003B}"] = true,
+            ["\u{003F}"] = true,
+            ["\u{3001}"] = true,
+            ["\u{3002}"] = true,
+            ["\u{FF0C}"] = true,
+            ["\u{FF0E}"] = true,
+            ["\u{FF1A}"] = true,
+            ["\u{FF1B}"] = true,
+            ["\u{FF1F}"] = true,
+            ["\u{2026}"] = true,
+            ["\u{00B7}"] = true,
+            ["\u{2022}"] = true,
+            ["\u{FF5E}"] = true
+        }
+
+        if punctuationSet[char] then
+            return true
+        end
+
         local code = ffiUtil.utf8charcode(char)
         if not code then
             return false
         end
 
-        -- 常见标点符号判断
-        local punctuationSet = {
-            [0x0021] = true,
-            [0x002C] = true,
-            [0x002E] = true,
-            [0x003A] = true,
-            [0x003B] = true,
-            [0x003F] = true,
-
-            [0x3001] = true,
-            [0x3002] = true,
-            [0xFF0C] = true,
-            [0xFF0E] = true,
-            [0xFF1A] = true,
-            [0xFF1B] = true,
-            [0xFF1F] = true
-        }
-
-        return punctuationSet[code] or (code >= 0x2000 and code <= 0x206F) or (code >= 0x3000 and code <= 0x303F) or
+        return (code >= 0x2000 and code <= 0x206F) or (code >= 0x3000 and code <= 0x303F) or
                    (code >= 0xFF00 and code <= 0xFFEF)
     end
 
@@ -1215,8 +1223,8 @@ local function get_chapter_ontent_type(txt, first_line)
     if not first_line then
         first_line = (string.match(txt, "([^\n]*)\n?") or txt):lower()
     end
-    -- 优先检查 XHTML 特征
-    -- "data": "/book-assets/guest/test.epub/index/OPS/Text/Chapter79.xhtml"
+
+    -- logger.info("优先检查 XHTML 特征",get_url_extension("/test.epub/index/OPS/Text/Chapter79.xhtml"))
     if string.match(first_line, "%.x?html$") then
         page_type = 4
     else
@@ -1284,18 +1292,18 @@ local replace_css_urls = function(css_text, replace_fn)
     css_text = tostring(css_text or "")
     return (css_text:gsub("url%s*%((%s*['\"]?)(.-)(['\"]?%s*)%)", function(prefix, old_path, suffix)
         if type(old_path) ~= "string" or old_path == "" or old_path:lower():find("^data:") then
-            return "url(" .. prefix .. old_path .. suffix .. ")"
+            return
         end
         local ok, new_path = pcall(replace_fn, old_path)
         if not ok or type(new_path) ~= "string" or new_path == "" then
             return "url(" .. prefix .. old_path .. suffix .. ")"
         end
-        return "url(" .. prefix .. new_path .. suffix .. ")"
+        return
     end))
 end
 
 local processLink
-processLink = function(book_cache_id, resources_src, base_url, is_porxy)
+processLink = function(book_cache_id, resources_src, base_url, is_porxy, callback)
     if not (H.is_str(book_cache_id) and H.is_str(resources_src) and resources_src ~= "") then
         logger.dbg("invalid params in processLink", book_cache_id, resources_src)
         return nil
@@ -1334,8 +1342,7 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy)
         end
     end
 
-    -- logger.info("src_ext", ext)
-    -- logger.info("resources_src", resources_src)
+    -- logger.info("src_ext", ext, "resources_src", resources_src)
     local resources_id = md5(processed_src)
     local resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
 
@@ -1355,15 +1362,18 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy)
             resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
         end
 
-        if ext == "css" then
-            err["data"] = replace_css_urls(err[data], function(url)
+        -- 尝试处理css里面的级联
+        if ext == "css" and not callback then
+            err["data"] = replace_css_urls(err["data"], function(url)
                 -- 防止循环引用
                 if url == resources_src then
                     return url
                 end
-                return processLink(book_cache_id, url, processed_src)
+                return processLink(book_cache_id, url, processed_src, nil,true)
             end)
+
         end
+        
         return book_chapter_resources(book_cache_id, resources_filename, err["data"])
     end
 
@@ -1388,11 +1398,17 @@ local txt2html = function(book_cache_id, content, title)
     local dropcaps
     local lines = {}
     content = content or ""
+    title = title or ""
+
     for line in util.gsplit(content, "\n", false, true) do
-        line = utf8_trim(line)
+        line = M:utf8_trim(line)
         local el_tags
 
         if dropcaps ~= true and line ~= "" and not string.find(line, "<img", 1, true) then
+            -- 尝试清理重复标题 >9 避免单字误判
+            if #title > 9 and string.find(line, title, 1, true) == 1 then
+                line = plain_text_replace(line, title, "", 1)
+            end
             local rep_text = line:match(util.UTF8_CHAR_PATTERN)
             line = plain_text_replace(line, rep_text, "", 1)
             el_tags = string.format('<p style="text-indent: 0em;"><span class="duokan-dropcaps-two">%s</span>%s</p>',
@@ -1476,6 +1492,7 @@ function M:_AnalyzingChapters(chapter, content)
         if not (H.is_tbl(err) and err["data"]) then
             error('下载失败：数据为空')
         end
+        -- TODO 提取原始文件名保持用于后面导出 get_url_extension(first_line) 
         local ext = first_line:match("[^%.]+$") or "html"
         content = err['data'] or '下载失败'
         filePath = filePath .. '.' .. ext
@@ -1489,9 +1506,8 @@ function M:_AnalyzingChapters(chapter, content)
             local body = root("body")
             if body[1] then
                 local img_pattern = "(<[Ii][Mm][Gg].-[Ss][Rr][Cc]%s*=%s*)(['\"])(.-)%2([^>]*>)"
-                local image_xlink_pattern = '(<image.-xlink:href=["\'])(.-)(["\'])'
-                local link_pattern = '(<link.-href=["\'])(.-)(["\'])'
-
+                local image_xlink_pattern = '(<image.-href%s*=%s*)(["\'])(.-)%2([^>]*>)'
+                local link_pattern = '(<link.-href%s*=%s*)(["\'])(.-)%2([^>]*>)'
                 for _, el in ipairs(root("script")) do
                     if el then
                         local el_text = el:gettext()
@@ -1523,10 +1539,12 @@ function M:_AnalyzingChapters(chapter, content)
                 for _, el in ipairs(body[1]:select("svg")) do
                     if el then
                         local el_text = el:gettext()
-                        for open, path, close in el_text:gmatch(image_xlink_pattern) do
+                        for r1, r2, r3, r4 in el_text:gmatch(image_xlink_pattern) do
+                            local open, path, close = r1, r3, r4
                             if not open or open == "" then
                                 return
                             end
+                            open = open .. r2 or ""
                             local relpath = processLink(book_cache_id, path, html_url)
                             if H.is_str(relpath) then
                                 local replace_text = plain_text_replace(el_text, open .. path, open .. relpath)
@@ -1538,21 +1556,27 @@ function M:_AnalyzingChapters(chapter, content)
 
                 -- 补充处理
                 content = content:gsub("<script[^>]*>(.-\n?)</script>", ""):gsub("<script[^>]*>[\x00-\xFF]-</script>",
-                    ""):gsub(link_pattern, function(open, path, close)
-                    if not path or string.find(path, "^resources/") ~= nil then
+                    ""):gsub(link_pattern, function(r1, r2, r3, r4)
+                    local open, path, close = r1, r3, r4
+                    if not (open and open ~= "" and path and path ~= "" and string.find(path, "^resources/") == nil) then
                         return
                     end
                     local relpath = processLink(book_cache_id, path, html_url)
                     if H.is_str(relpath) then
-                        return table.concat({open, relpath, close})
+                        r2 = r2 or ""
+                        close = close or ""
+                        return table.concat({open .. r2, relpath, r2 .. close})
                     end
                     return
-                end):gsub(image_xlink_pattern, function(open, path, close)
+                end):gsub(image_xlink_pattern, function(r1, r2, r3, r4)
+                    local open, path, close = r1, r3, r4
                     -- 前面处理过了这里就跳过
-                    if path and string.find(path, "^resources/") == nil then
+                    if open and open ~= "" and path and string.find(path, "^resources/") == nil then
                         local relpath = processLink(book_cache_id, path, html_url)
                         if H.is_str(relpath) then
-                            return table.concat({open, relpath, close})
+                            r2 = r2 or ""
+                            close = close or ""
+                            return table.concat({open .. r2, relpath, r2 .. close})
                         end
                     end
                     return
@@ -1579,7 +1603,7 @@ function M:_AnalyzingChapters(chapter, content)
         if has_img_tag(content) then
 
             content = content:gsub(img_pattern, function(r1, r2, r3, r4)
-                if not r3 or r3 == "" then
+                if not (r1 and r1 ~= "" and r3 and r3 ~= "") then
                     return
                 end
                 local path = r3
@@ -1688,7 +1712,7 @@ function M:getCacheChapterFilePath(chapter)
 
     local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index, book_name)
 
-    local extensions = {'html','cbz','xhtml','txt','jpg','png'}
+    local extensions = {'html', 'cbz', 'xhtml', 'txt', 'jpg', 'png'}
 
     if H.is_str(cacheExt) then
 
@@ -2596,5 +2620,4 @@ require("ffi/__gc")(M, {
 })
 
 return M
-
 
