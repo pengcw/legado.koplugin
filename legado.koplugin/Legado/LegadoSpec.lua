@@ -37,8 +37,9 @@ return {
         },
         getBookContent = {
             path = "/getBookContent",
-            method = "GET",
+            method = "POST",
             required_params = {"url", "index"},
+            payload ={"url", "index","v", "cache"},
             optional_params = {"v", "cache"},
             expected_status = {200}
         },

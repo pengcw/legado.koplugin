@@ -1315,18 +1315,21 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy, callbac
         processed_src = M:getProxyImageUrl(bookUrl, resources_src)
     else
         processed_src = util.trim(resources_src)
-        if processed_src:lower():find("^data:") then
+
+        local lower_src = processed_src:lower()
+        if lower_src:find("^data:") then
             logger.dbg("skipping data URI", processed_src)
             return nil
-        end
-
-        if processed_src:sub(1, 2) == "//" then
-            processed_src = "https:" .. processed_src
-        elseif processed_src:sub(1, 1) == "/" then
-            processed_src = socket_url.absolute(base_url, processed_src)
-        elseif processed_src:sub(1, 1) == "#" then
+        elseif lower_src:find("^res:") then
+            logger.dbg("fonts css URI", processed_src)
             return nil
-        elseif processed_src:sub(1, 4) ~= "http" then
+        elseif lower_src:sub(1, 1) == "#" then
+            return nil
+        elseif lower_src:sub(1, 2) == "//" then
+            processed_src = "https:" .. processed_src
+        elseif lower_src:sub(1, 1) == "/" then
+            processed_src = socket_url.absolute(base_url, processed_src)
+        elseif not lower_src:find("^http") then
             processed_src = socket_url.absolute(base_url, processed_src)
         end
     end
@@ -1363,7 +1366,7 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy, callbac
         end
 
         -- 尝试处理css里面的级联
-        if ext == "css" and not callback then
+        if ext == "css_disable" and not callback then
             err["data"] = replace_css_urls(err["data"], function(url)
                 -- 防止循环引用
                 if url == resources_src then
@@ -1487,13 +1490,17 @@ function M:_AnalyzingChapters(chapter, content)
         end
         local status, err = pcall(pGetUrlContent, html_url)
         if not status then
-            error('下载失败：' .. tostring(err))
+            error('请求错误，' .. H.errorHandler(err))
         end
         if not (H.is_tbl(err) and err["data"]) then
-            error('下载失败：数据为空')
+            error('下载失败，数据为空')
         end
-        -- TODO 提取原始文件名保持用于后面导出 get_url_extension(first_line) 
-        local ext = first_line:match("[^%.]+$") or "html"
+        -- TODO 写入原始文件名，用于导出
+        local ext, original_name = get_url_extension(first_line)
+        if not ext or ext == "" then 
+            ext = first_line:match("[^%.]+$") or "html"
+        end
+
         content = err['data'] or '下载失败'
         filePath = filePath .. '.' .. ext
 

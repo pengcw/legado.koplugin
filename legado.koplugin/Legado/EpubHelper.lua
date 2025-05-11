@@ -19,7 +19,6 @@ local function split_title_advanced(title)
 
     -- 查找隔断符号的位置
     local count = 0
-    local part_start, part_end
     -- 第一卷 笼中雀 第六章 下签
 
     local segmentation = {
@@ -42,22 +41,42 @@ local function split_title_advanced(title)
         ["、"] = true,
         ["："] = true,
         ["》"] = true,
+        ["——"] = true
     }
-
+    local need_clean ={
+        ["、"] = true,
+        ["："] = true,
+        ["》"] = true,
+        ["——"] = true,
+    }
+    local is_need_clean
     for i, v in ipairs(words) do
-
         if i > 1 and segmentation[v] == true then
+            if need_clean[v] then
+                 is_need_clean = true
+            end
             break
         end
         count = count + 1
     end
 
-    if count == 0 or count == #words then
+    local words_len = #words
+    if count == 0 or count == words_len then
         return "", title
     end
 
-    local part = table.concat(words, "", 1, count)
-    local subpart = table.concat(words, "", count + 1)
+    local part_end = count
+    local subpart_start = count + 1
+    -- 跳过字符
+    if is_need_clean == true then 
+        subpart_start = subpart_start + 1
+        if subpart_start > words_len then 
+            -- 去掉结尾字符
+            return "", table.concat(words, "", 1, words_len - 1)
+        end
+    end
+    local part = table.concat(words, "", 1, part_end)
+    local subpart = table.concat(words, "", subpart_start)
     --logger.info(part, subpart)
     return part, subpart
 end
