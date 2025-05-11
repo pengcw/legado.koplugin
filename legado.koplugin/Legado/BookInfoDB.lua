@@ -1249,8 +1249,8 @@ function M:clearBook(bookShelfId, book_cache_id)
 
     self:dynamicUpdate('chapters', {
         cacheFilePath = self.nil_object(),
-        content = self.nil_object()
-
+        content = self.nil_object(),
+        isRead = 0
     }, {
         bookCacheId = book_cache_id
     })
