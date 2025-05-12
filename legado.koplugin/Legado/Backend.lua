@@ -12,8 +12,6 @@ local time = require("ui/time")
 local UIManager = require("ui/uimanager")
 local H = require("Legado/Helper")
 
--- local extension = string.lower(string.match(filename, ".+%.([^.]+)") or "")
-
 -- 太旧版本缺少这个函数
 if not dbg.log then
     dbg.log = logger.dbg
@@ -112,6 +110,47 @@ local function get_url_extension(url)
     local ext = filename:match("%.([%w]+)$")
     -- logger.info(path, filename, ext)
     return ext and ext:lower() or "", filename
+end
+
+-- socket.url.escape util.urlEncode + / ? = @会被编码
+-- 处理 reader3 服务器版含书名路径有空格等问题
+local function custom_urlEncode(str)
+
+    if str == nil then
+        return ""
+    end
+    local segment_chars = {
+        ['-'] = true,
+        ['.'] = true,
+        ['_'] = true,
+        ['~'] = true,
+        [','] = true,
+        ['!'] = true,
+        ['*'] = true,
+        ['\''] = true,
+        ['('] = true,
+        [')'] = true,
+        ['/'] = true,
+        ['?'] = true,
+        ['&'] = true,
+        ['='] = true,
+        [':'] = true,
+        ['@'] = true
+    }
+
+    return string.gsub(str, "([^A-Za-z0-9_])", function(c)
+        if segment_chars[c] then
+            return c
+        else
+            return string.format("%%%02X", string.byte(c))
+        end
+    end)
+    --[[
+    -- socket_url.build_path(socket_url.parse_path(str))
+    return str:gsub("([^%w%-%.%_%~%!%$%&%'%(%)%*%+%,%;%=%:%@%/%?])", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end)
+    ]]
 end
 
 local function convertToGrayscale(image_data)
@@ -227,9 +266,12 @@ local function pDownload_CreateCBZ(filePath, img_sources)
         if status and H.is_tbl(err) and err['data'] then
 
             local imgdata = err['data']
-            local img_extension = err['ext'] or "jpg"
+            local img_extension = err['ext']
+            if not img_extension or img_extension == "" then
+                img_extension = get_url_extension(img_src)
+            end
 
-            local img_name = string.format("%d.%s", i, img_extension)
+            local img_name = string.format("%d.%s", i, img_extension or "")
             if is_convertToGrayscale == true and img_extension == 'png' then
                 local success, imgdata_new = convertToGrayscale(imgdata)
                 if success ~= true then
@@ -1220,8 +1262,11 @@ local function get_chapter_ontent_type(txt, first_line)
         return 1
     end
     local page_type
-    if not first_line then
+
+    if not first_line or type(first_line) ~= 'string' then
         first_line = (string.match(txt, "([^\n]*)\n?") or txt):lower()
+    else
+        first_line = first_line:lower()
     end
 
     -- logger.info("优先检查 XHTML 特征",get_url_extension("/test.epub/index/OPS/Text/Chapter79.xhtml"))
@@ -1372,11 +1417,11 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy, callbac
                 if url == resources_src then
                     return url
                 end
-                return processLink(book_cache_id, url, processed_src, nil,true)
+                return processLink(book_cache_id, url, processed_src, nil, true)
             end)
 
         end
-        
+
         return book_chapter_resources(book_cache_id, resources_filename, err["data"])
     end
 
@@ -1447,7 +1492,7 @@ function M:_AnalyzingChapters(chapter, content)
 
     local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
 
-    local first_line = (string.match(content, "([^\n]*)\n?") or content):lower()
+    local first_line = string.match(content, "([^\n]*)\n?") or content
     local PAGE_TYPES = {
         TEXT = 1, -- 纯文本
         IMAGE = 2, -- 纯图片
@@ -1463,19 +1508,36 @@ function M:_AnalyzingChapters(chapter, content)
         local img_sources = self:getPorxyPicUrls(bookUrl, content)
         if H.is_tbl(img_sources) and #img_sources > 0 then
 
-            filePath = filePath .. '.cbz'
-            local status, err = pcall(function()
-                pDownload_CreateCBZ(filePath, img_sources)
-            end)
+            -- 一张图片就不打包cbz了
+            if #img_sources == 1 then
+                local res_url = img_sources[1]
+                local status, err = pcall(pGetUrlContent, res_url)
+                if not status then
+                    error('请求错误，' .. H.errorHandler(err))
+                end
+                if not (H.is_tbl(err) and err["data"]) then
+                    error('下载失败，数据为空')
+                end
 
-            if not status then
-                error('CreateCBZ err:' .. H.errorHandler(err))
+                local ext = get_url_extension(res_url)
+                if (not ext or ext == "") and not not err.ext then
+                    ext = err['ext']
+                end
+
+                filePath = string.format("%s.%s", filePath, ext or "")
+                return chapter_writeToFile(chapter, filePath, err['data'])
+            else
+                filePath = filePath .. '.cbz'
+                local status, err = pcall(pDownload_CreateCBZ, filePath, img_sources)
+
+                if not status then
+                    error('CreateCBZ err:' .. H.errorHandler(err))
+                end
+
+                if chapter.is_pre_loading == true then
+                    dbg.v('Cache task completed chapter.title:', chapter_title)
+                end
             end
-
-            if chapter.is_pre_loading == true then
-                dbg.v('Cache task completed chapter.title:', chapter_title)
-            end
-
             chapter.cacheFilePath = filePath
             return chapter
         else
@@ -1485,6 +1547,9 @@ function M:_AnalyzingChapters(chapter, content)
     elseif page_type == PAGE_TYPES['XHTML'] then
 
         local html_url = self:getProxyEpubUrl(bookUrl, first_line)
+        -- logger.info("bookurl",bookUrl)
+        -- logger.info("first_line",first_line)
+        -- logger.info("html_url",html_url)
         if html_url == nil or html_url == '' then
             error('转换失败')
         end
@@ -1497,12 +1562,12 @@ function M:_AnalyzingChapters(chapter, content)
         end
         -- TODO 写入原始文件名，用于导出
         local ext, original_name = get_url_extension(first_line)
-        if not ext or ext == "" then 
-            ext = first_line:match("[^%.]+$") or "html"
+        if (not ext or ext == "") and not not err.ext then
+            ext = err['ext']
         end
 
         content = err['data'] or '下载失败'
-        filePath = filePath .. '.' .. ext
+        filePath = string.format("%s.%s", filePath, ext or "")
 
         if not htmlparser then
             htmlparser = require("htmlparser")
@@ -1719,7 +1784,7 @@ function M:getCacheChapterFilePath(chapter)
 
     local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index, book_name)
 
-    local extensions = {'html', 'cbz', 'xhtml', 'txt', 'jpg', 'png'}
+    local extensions = {'html', 'cbz', 'xhtml', 'txt', 'png', 'jpg'}
 
     if H.is_str(cacheExt) then
 
@@ -1802,10 +1867,12 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
     local server_type = self.settings_data.data.server_type
     if server_address:match("/reader3$") and htmlUrl:match("%.x?html$") then
         local api_root_url = server_address:gsub("/reader3$", "")
-        htmlUrl = htmlUrl:gsub("([^%w%-%.%_%~%/])", function(c)
-            return string.format("%%%02X", string.byte(c))
-        end)
-        return api_root_url .. htmlUrl
+        -- 可能有空格 "data": "/book-assets/guest/紫川_老猪/紫川 作者：老猪.epub/index/OEBPS/Text/chapter_0.html"
+        htmlUrl = custom_urlEncode(htmlUrl)
+        -- logger.info("custom_urlEncode:",htmlUrl)
+        -- logger.info("util.urlEncode",util.urlEncode(htmlUrl))
+        -- logger.info("url.escape",socket_url.escape(htmlUrl))
+        return socket_url.absolute(api_root_url, htmlUrl)
 
     else
         return htmlUrl
@@ -1813,20 +1880,20 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
 end
 
 function M:getProxyImageUrl(bookUrl, img_src)
-    local html_url
+    local res_img_src = img_src
     local width = Device.screen:getWidth() or 800
     local server_address = self.settings_data.data.server_address
     local server_type = self.settings_data.data.server_type
-    local api_root_url = server_address:gsub("/reader3$", "")
     if server_type == 1 then
-        html_url = server_address .. '/image?url=' .. util.urlEncode(bookUrl) .. '&path=' .. util.urlEncode(img_src) ..
-                       '&width=' .. width
+        res_img_src = table.concat({server_address, '/image?url=', util.urlEncode(bookUrl), '&path=',
+                                    util.urlEncode(img_src), '&width=', width})
     elseif server_type == 2 then
-        html_url = path:gsub("([^%w%-%.%_%~%/])", function(c)
-            return string.format("%%%02X", string.byte(c))
-        end):gsub("^__API_ROOT__", api_root_url)
+        local api_root_url = server_address:gsub("/reader3$", "")
+        -- <img src='__API_ROOT__/book-assets/guest/剑来_/剑来.cbz/index/1.png' />
+        res_img_src = custom_urlEncode(img_src):gsub("^__API_ROOT__", "")
+        res_img_src = socket_url.absolute(api_root_url, res_img_src)
     end
-    return html_url
+    return res_img_src
 end
 
 function M:getPorxyPicUrls(bookUrl, content)
@@ -2583,9 +2650,7 @@ function M:setEndpointUrl(new_setting_url)
         self.settings_data.data.reader3_pwd = util.urlDecode(parsed.password)
     end
 
-    local clean_url = string.format("%s://%s%s%s%s%s%s", parsed.scheme, parsed.host,
-        parsed.port and (":" .. parsed.port) or "", parsed.path or "", parsed.query and ("?" .. parsed.query) or "",
-        parsed.params and (";" .. parsed.params) or "", parsed.fragment and ("#" .. parsed.fragment) or "")
+    local clean_url = socket_url.build(parsed)
 
     -- dbg.log("server_address:", clean_url)
     self.settings_data.data.server_address = clean_url
