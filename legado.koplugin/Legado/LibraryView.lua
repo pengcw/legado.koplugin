@@ -67,7 +67,8 @@ function LibraryView:init()
                         util.removeFile(last_backup_db)
                     end
                     self:onClose()
-                    MessageBox:info(string.format("缓存文件损坏已%s，请重试打开",has_backup and "还原" or "清除"))
+                    MessageBox:info(string.format("缓存文件损坏已%s，请重试打开",
+                        has_backup and "还原" or "清除"))
                 end
             end, {
                 ok_text = has_backup and "还原" or "清除",
@@ -302,20 +303,14 @@ end
 function LibraryView:openInstalledReadSource()
 
     local setting_data = Backend:getSettings()
-    local servers_history = setting_data.servers_history or {}
+    local history_lines = setting_data.servers_history or {}
     local setting_url = tostring(setting_data.setting_url)
-    local history_lines = {}
-
-    for k, _ in pairs(servers_history) do
-        if k ~= setting_url then
-            table.insert(history_lines, tostring(k))
-        end
+    if not history_lines[1] then
+        history_lines = {}
     end
-    servers_history = nil
 
     local description = [[
         (书架与接口地址关联，设置格式符合 RFC3986，认证信息如有特殊字符需要 URL 编码，服务器版本必须加 /reader3)
-        
         示例:
         → 手机APP     http://127.0.0.1:1122
         → 服务器版    http://127.0.0.1:1122/reader3
@@ -325,13 +320,12 @@ function LibraryView:openInstalledReadSource()
     local dialog
     local reset_callback
     local history_cur = 0
+    local history_lines_len = #history_lines
+    if history_lines_len > 0 then
+        -- 只展示最后3行
+        local servers_history_str = table.concat(history_lines, '\n', math.max(1, #history_lines - 2))
+        description = description .. string.format("\n历史记录(%s)：\n%s", history_lines_len, servers_history_str)
 
-    if #history_lines > 0 then
-
-        local servers_history_str = table.concat(history_lines, '\r\n')
-        description = description .. "\r\n历史记录：\r\n" .. servers_history_str
-
-        table.insert(history_lines, tostring(setting_url))
         reset_callback = function()
             history_cur = history_cur + 1
             if history_cur > #history_lines then
@@ -415,28 +409,18 @@ function LibraryView:openMenu()
         text = Icons.FA_TIMES .. ' ' .. "Clear all caches",
         callback = function()
             UIManager:close(dialog)
-            MessageBox:confirm('请选择要执行的操作：', nil, {
-                no_ok_button = true,
-                other_buttons_first = true,
-                other_buttons = {{{
-                    text = '清除接口历史',
-                    callback = function()
-                        settings.servers_history = {}
-                        Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-                            Backend:show_notice("清除成功")
-                        end, function(err_msg)
-                            MessageBox:error('操作失败：', err_msg)
-                        end)
-                    end
-                }}, {{
-                    text = '清除所有缓存',
-                    callback = function()
+            MessageBox:confirm(
+                "是否清空本地书架所有已缓存章节与阅读记录？\r\n（刷新会重新下载）",
+                function(result)
+                    if result then
                         Backend:closeDbManager()
                         MessageBox:loading("清除中", function()
                             return Backend:cleanAllBookCaches()
                         end, function(state, response)
                             if state == true then
                                 Backend:HandleResponse(response, function(data)
+                                    settings.servers_history = {}
+                                    Backend:saveSettings(settings)
                                     Backend:show_notice("已清除")
                                     self:onClose()
                                 end, function(err_msg)
@@ -445,9 +429,10 @@ function LibraryView:openMenu()
                             end
                         end)
                     end
-                }}}
-            })
-
+                end, {
+                    ok_text = "清空",
+                    cancel_text = "取消"
+                })
         end
     }}, {{
         text = Icons.FA_QUESTION_CIRCLE .. ' ' .. "关于",
