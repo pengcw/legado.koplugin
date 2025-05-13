@@ -24,7 +24,7 @@ local function split_title_advanced(title)
     local segmentation = {
         ["\u{0020}"] = true,
         ["\u{00A0}"] = true,
-        ["\u{3000}"] = true, 
+        ["\u{3000}"] = true,
         ["\u{2000}"] = true,
         ["\u{2001}"] = true,
         ["\u{2002}"] = true,
@@ -43,17 +43,17 @@ local function split_title_advanced(title)
         ["》"] = true,
         ["——"] = true
     }
-    local need_clean ={
+    local need_clean = {
         ["、"] = true,
         ["："] = true,
         ["》"] = true,
-        ["——"] = true,
+        ["——"] = true
     }
     local is_need_clean
     for i, v in ipairs(words) do
         if i > 1 and segmentation[v] == true then
             if need_clean[v] then
-                 is_need_clean = true
+                is_need_clean = true
             end
             break
         end
@@ -68,19 +68,19 @@ local function split_title_advanced(title)
     local part_end = count
     local subpart_start = count + 1
     -- 跳过字符
-    if is_need_clean == true then 
+    if is_need_clean == true then
         subpart_start = subpart_start + 1
-        if subpart_start > words_len then 
-            -- 去掉结尾字符
-            return "", table.concat(words, "", 1, words_len - 1)
-        end
+    end
+
+    if subpart_start > words_len then
+        -- 去掉结尾字符
+        return "", table.concat(words, "", 1, words_len - 1)
     end
     local part = table.concat(words, "", 1, part_end)
     local subpart = table.concat(words, "", subpart_start)
-    --logger.info(part, subpart)
+    -- logger.info(part, subpart)
     return part, subpart
 end
-
 
 M.addCssRes = function(book_cache_id)
     local book_cache_path = H.getBookCachePath(book_cache_id)

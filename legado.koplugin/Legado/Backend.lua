@@ -2656,10 +2656,30 @@ function M:setEndpointUrl(new_setting_url)
     self.settings_data.data.server_address = clean_url
     self.settings_data.data.setting_url = new_setting_url
     self.settings_data.data.server_address_md5 = md5(parsed.host)
-    if not H.is_tbl(self.settings_data.data.servers_history) then
+    if not H.is_tbl(self.settings_data.data.servers_history) or not self.settings_data.data.servers_history[1] then
         self.settings_data.data.servers_history = {}
     end
-    self.settings_data.data.servers_history[new_setting_url] = 1
+
+    local function updateHistoryItem(history_table, item, max_size)
+        local removed_old = false
+        for i = #history_table, 1, -1 do
+            if history_table[i] == item then
+                table.remove(history_table, i)
+                removed_old = true
+                break
+            end
+        end
+        table.insert(history_table, item)
+        if max_size and max_size > 0 then
+            while #history_table > max_size do
+                table.remove(history_table, 1)
+            end
+        end
+    end
+    
+    --添加历史记录
+    updateHistoryItem(self.settings_data.data.servers_history, new_setting_url, 10)
+
     if string.find(string.lower(parsed.path or ""), "/reader3$") then
         self.settings_data.data.server_type = 2
     else
