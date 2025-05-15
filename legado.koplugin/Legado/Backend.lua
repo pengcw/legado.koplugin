@@ -2651,7 +2651,7 @@ function M:setEndpointUrl(new_setting_url)
     end
 
     local clean_url = socket_url.build(parsed)
-
+    local old_setting_url = self.settings_data.data.setting_url
     -- dbg.log("server_address:", clean_url)
     self.settings_data.data.server_address = clean_url
     self.settings_data.data.setting_url = new_setting_url
@@ -2678,7 +2678,7 @@ function M:setEndpointUrl(new_setting_url)
     end
     
     --添加历史记录
-    updateHistoryItem(self.settings_data.data.servers_history, new_setting_url, 10)
+    updateHistoryItem(self.settings_data.data.servers_history, old_setting_url, 10)
 
     if string.find(string.lower(parsed.path or ""), "/reader3$") then
         self.settings_data.data.server_type = 2

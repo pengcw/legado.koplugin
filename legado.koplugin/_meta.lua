@@ -1,8 +1,8 @@
 local _ = require("gettext")
 
 return {
-    name = "Legado 阅读书库",
+    name = "Legado",
     fullname = "Legado 阅读书库",
     description = "reading Legado's book library plugin",
-    version = 1.069
+    version = 1.070
 }

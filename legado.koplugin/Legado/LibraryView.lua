@@ -468,32 +468,6 @@ function LibraryView:openMenu()
         end
     }}}
 
-    local patches_file_path = ffiUtil.joinPath(H.getUserPatchesDirectory(), '2-legado_plugin_func.lua')
-
-    local ReaderRolling = require("apps/reader/modules/readerrolling")
-    if ReaderRolling.c8eeb679b ~= true then
-        table.insert(buttons, 1, {{
-            text = Icons.FA_EXCLAMATION_CIRCLE .. ' 碎片历史记录清除 [未开启]',
-            callback = function()
-                UIManager:close(dialog)
-                local source_patches_file_path = ffiUtil.joinPath(H.getPluginDirectory(),
-                    'patches/2-legado_plugin_func.lua')
-                if not util.fileExists(patches_file_path .. '.disabled') then
-
-                    if H.copyFileFromTo(source_patches_file_path, patches_file_path) then
-                        MessageBox:success(
-                            '安装成功，扩展向前翻页和历史记录清除功能，重启KOReader后生效')
-                    else
-                        MessageBox:error('copy文件失败，请尝试手动安装~', 6)
-                    end
-                else
-                    MessageBox:error('补丁已被禁用，请从设置-补丁管理中开启', 6)
-                end
-
-            end
-        }})
-    end
-
     if not Device:isTouchDevice() then
         table.insert(buttons, 4, {{
             text = Icons.FA_EXCLAMATION_CIRCLE .. ' ' .. " 同步书架",
@@ -553,6 +527,7 @@ end
 
 local BookReader = require("Legado/BookReader")
 local ReaderUI = require("apps/reader/readerui")
+local LuaSettings = require("luasettings")
 function LibraryView:initializeRegisterEvent(legado_main)
 
     function legado_main:onShowLegadoLibraryView()
@@ -615,14 +590,31 @@ function LibraryView:initializeRegisterEvent(legado_main)
     end
 
     function legado_main:onDocSettingsLoad(doc_settings, document)
-        if doc_settings and doc_settings.data and type(doc_settings.readSetting) == 'function' then
-            local filepath = doc_settings:readSetting("doc_path") or ""
-            if not filepath:find('/legado.cache/', 1, true) then
+        if doc_settings and doc_settings.data and type(doc_settings.readSetting) == 'function' and document and
+            type(document.file) == 'string' and document.file:find('/legado.cache/', 1, true) then
+            local directory, file_name = util.splitFilePathName(document.file)
+            local _, extension = util.splitFileNameSuffix(file_name or "")
+            if not (type(directory) == "string" or type(file_name) == 'string' and directory ~= "" and file_name ~= "") then
                 return
             end
 
-            local file_name = select(2, util.splitFilePathName(doc_settings.data.doc_path or "")) or ''
-            local _, extension = util.splitFileNameSuffix(file_name)
+            local book_defaults_path = H.joinPath(directory, "book_defaults.lua")
+            local document_is_new = doc_settings:readSetting("doc_props") == nil
+
+            -- document.is_new = nil ?
+            if util.fileExists(book_defaults_path) then
+                local book_defaults = LuaSettings:open(book_defaults_path)
+                if document_is_new == true and type(book_defaults.data) == 'table' then
+                    local summary = doc_settings.data.summary -- keep status
+                    local book_defaults_data = util.tableDeepCopy(book_defaults.data)
+                    for k, v in pairs(book_defaults_data) do
+                        doc_settings.data[k] = v
+                    end
+                    doc_settings.data.doc_path = document.file
+                    doc_settings.data.summary = doc_settings.data.summary or summary
+                end
+            end
+
             if extension == 'txt' then
                 doc_settings.data.txt_preformatted = 0
                 doc_settings.data.style_tweaks = doc_settings.data.style_tweaks or {}
@@ -639,8 +631,50 @@ function LibraryView:initializeRegisterEvent(legado_main)
                 if document then
                     document.is_pic = true
                 end
+                -- 是否影响后续 ？
+                --[=[
+                    if document_is_new then  
+                        local bookinfo = LibraryView.instance.chapter_listing.bookinfo
+                        doc_settings.data.doc_props = doc_settings.data.doc_props or {}
+                        doc_settings.data.doc_props.title = bookinfo.name or "N/A"
+                        doc_settings.data.doc_props.authors = bookinfo.author or "N/A"
+                    end
+                ]=]
+
             end
 
+        end
+    end
+    -- or UIManager:flushSettings() --onFlushSettings
+    function legado_main:onSaveSettings()
+        local is_valid_reader_ui = self.ui and self.ui.name == "ReaderUI" and type(self.ui.doc_settings) == "table" and
+                                       type(self.ui.doc_settings.readSetting) == "function"
+
+        local is_library_visible = LibraryView.instance and type(LibraryView.instance.selected_item) == "table" and
+                                       type(BookReader.getIsShowing) == "function" and BookReader:getIsShowing()
+
+        if not (is_valid_reader_ui and is_library_visible) then
+            return
+        end
+
+        local filepath = self.ui.doc_settings:readSetting("doc_path") or ""
+        local directory, file_name = util.splitFilePathName(filepath)
+        if not (type(directory) == "string" and directory:find('/legado.cache/', 1, true)) then
+            return
+        end
+
+        -- logger.dbg("Legado: Saving reader settings...")
+        if self.ui.doc_settings and type(self.ui.doc_settings.data) == 'table' then
+            local persisted_settings_keys = require("Legado/BookMetaData")
+            local book_defaults_path = H.joinPath(directory, "book_defaults.lua")
+            local book_defaults = LuaSettings:open(book_defaults_path)
+            local doc_settings_data = util.tableDeepCopy(self.ui.doc_settings.data)
+            for k, v in pairs(doc_settings_data) do
+                if persisted_settings_keys[k] then
+                    book_defaults.data[k] = v
+                end
+            end
+            book_defaults:flush()
         end
     end
 
@@ -692,7 +726,7 @@ function LibraryView:initializeRegisterEvent(legado_main)
     end
 
     function legado_main:onCloseDocument()
-        if not (self.ui and self.ui.name == "ReaderUI" and self.ui.rolling and self.ui.rolling.c8eeb679b ~= true and
+        if not (self.ui and self.ui.name == "ReaderUI" and self.ui.rolling and self.ui.rolling.c8eeb679e ~= true and
             self.ui.document and type(self.ui.document.file) == 'string' and
             self.ui.document.file:find('/legado.cache/', 1, true)) then
             return

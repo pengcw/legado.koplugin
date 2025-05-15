@@ -32,7 +32,7 @@ function M:show(options)
     local book_path = options.chapter.cacheFilePath
 
     if self.is_showing and ReaderUI.instance then
-        if ReaderUI.instance.rolling and ReaderUI.instance.rolling.c8eeb679b ~= true and
+        if ReaderUI.instance.rolling and ReaderUI.instance.rolling.c8eeb679e ~= true and
             ReaderUI.instance.rolling.c8eeb679k ~= true then
             M.overriderollingHandler()
         end
