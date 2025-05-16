@@ -537,16 +537,16 @@ function LibraryView:initializeRegisterEvent(legado_main)
                 LibraryView.instance:refreshItems(true)
                 UIManager:show(LibraryView.instance)
             else
-                LibraryView:fetchAndShow()
+                self:openLibraryView()
             end
         end
         return true
     end
 
-    function legado_main:onReturnLegadoChapterListing()
-
+    function legado_main:onShowLegadoToc()
+        -- 在阅读界面有些设置会重载 ReaderUI , 重载后 BookReader:getIsShowing() ~= true
         if not (self.ui and self.ui.name == "ReaderUI" and LibraryView.instance and type(BookReader.getIsShowing) ==
-            'function' and BookReader:getIsShowing() == true and type(LibraryView.instance.selected_item) == 'table') then
+            'function' and type(LibraryView.instance.selected_item) == 'table') then
             return true
         end
 
@@ -726,7 +726,11 @@ function LibraryView:initializeRegisterEvent(legado_main)
     end
 
     function legado_main:onCloseDocument()
+<<<<<<< HEAD
+        if not (self.ui and self.ui.name == "ReaderUI" and self.ui.rolling and self.ui.rolling.c8eeb679f ~= true and
+=======
         if not (self.ui and self.ui.name == "ReaderUI" and self.ui.rolling and self.ui.rolling.c8eeb679e ~= true and
+>>>>>>> c39e4aaf6ec764738114ed160de69ebb59f18685
             self.ui.document and type(self.ui.document.file) == 'string' and
             self.ui.document.file:find('/legado.cache/', 1, true)) then
             return

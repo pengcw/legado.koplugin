@@ -32,7 +32,7 @@ function M:show(options)
     local book_path = options.chapter.cacheFilePath
 
     if self.is_showing and ReaderUI.instance then
-        if ReaderUI.instance.rolling and ReaderUI.instance.rolling.c8eeb679e ~= true and
+        if ReaderUI.instance.rolling and ReaderUI.instance.rolling.c8eeb679f ~= true and
             ReaderUI.instance.rolling.c8eeb679k ~= true then
             M.overriderollingHandler()
         end
@@ -46,8 +46,8 @@ function M:show(options)
     return self
 end
 
-function M:initializeFromReaderUI(ui)
-    if self.is_showing then
+function M:initializeFromReaderUI(ui, add_menu)
+    if self.is_showing and add_menu ~= true then
         ui.menu:registerToMainMenu(M)
     end
 
@@ -83,6 +83,7 @@ function M:addToMainMenu(menu_items)
     menu_items.go_back_to_legado = {
         text = "返回 Legado...",
         sorting_hint = "main",
+        help_text = "点击返回 Legado 书籍目录",
         callback = function()
             self:onReturn()
         end

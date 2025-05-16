@@ -411,6 +411,19 @@ function M:initialize()
 
 end
 
+function M:installPatches()
+    local patches_file_path = H.joinPath(H.getUserPatchesDirectory(), '2-legado_plugin_func.lua')
+    local source_patches = H.joinPath(H.getPluginDirectory(), 'patches/2-legado_plugin_func.lua')
+    local disabled_patches = patches_file_path .. '.disabled'
+    for _, file in ipairs({patches_file_path, disabled_patches}) do
+        if util.fileExists(file) then
+            util.removeFile(file)
+        end
+    end
+    H.copyFileFromTo(source_patches, patches_file_path)
+    UIManager:restartKOReader()
+end
+
 function M:show_notice(msg, timeout)
     local Notification = require("ui/widget/notification")
     Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
@@ -2327,6 +2340,9 @@ function M:ChangeChapterCache(chapter)
     else
 
         if util.fileExists(cacheFilePath) then
+            pcall(function()
+                require("docsettings"):open(cacheFilePath):purge()
+            end)
             util.removeFile(cacheFilePath)
         end
 
