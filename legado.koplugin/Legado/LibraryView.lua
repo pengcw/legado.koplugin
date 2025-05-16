@@ -310,8 +310,7 @@ function LibraryView:openInstalledReadSource()
     end
 
     local description = [[
-        (书架与接口地址关联，设置格式符合 RFC3986，认证信息如有特殊字符需要 URL 编码，服务器版本必须加 /reader3)
-        示例:
+        (书架与接口地址关联，设置格式符合 RFC3986，认证信息如有特殊字符需要 URL 编码，服务器版本必须加 /reader3)  示例:
         → 手机APP     http://127.0.0.1:1122
         → 服务器版    http://127.0.0.1:1122/reader3
         → 带认证服务  https://username:password@127.0.0.1:1122/reader3
