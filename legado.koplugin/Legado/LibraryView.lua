@@ -726,11 +726,7 @@ function LibraryView:initializeRegisterEvent(legado_main)
     end
 
     function legado_main:onCloseDocument()
-<<<<<<< HEAD
         if not (self.ui and self.ui.name == "ReaderUI" and self.ui.rolling and self.ui.rolling.c8eeb679f ~= true and
-=======
-        if not (self.ui and self.ui.name == "ReaderUI" and self.ui.rolling and self.ui.rolling.c8eeb679e ~= true and
->>>>>>> c39e4aaf6ec764738114ed160de69ebb59f18685
             self.ui.document and type(self.ui.document.file) == 'string' and
             self.ui.document.file:find('/legado.cache/', 1, true)) then
             return
