@@ -14,10 +14,14 @@ local Legado = WidgetContainer:extend({
     patches_ok = nil
 })
 
+local function testPatches()
+    return not not require("apps/reader/modules/readerrolling").c8eeb679f
+end
+
 function Legado:init()
-    Backend:initialize()
+    self.patches_ok = testPatches()
     if self.ui.name == "ReaderUI" then
-        BookReader:initializeFromReaderUI(self.ui)
+        BookReader:initializeFromReaderUI(self.ui, self.patches_ok)
     else
         self.ui.menu:registerToMainMenu(self)
     end
@@ -25,23 +29,11 @@ function Legado:init()
     self:onDispatcherRegisterActions()
 end
 
-local ko_version = G_reader_settings and G_reader_settings:readSetting("quickstart_shown_version") or
-                       require("version"):getNormalizedCurrentVersion()
-function Legado:addToMainMenu(menu_items)
-    if not self.ui.document then -- FileManager menu only
-        menu_items.Legado = {
-            text = (ko_version < 202411000000) and "Legado 书目(版本过低)" or "Legado 书目",
-            sorting_hint = "search",
-            callback = function()
-                self:openLibraryView()
-            end
-        }
-    end
-end
-
 function Legado:openLibraryView()
     LibraryView:fetchAndShow()
-    self:checkEnv()
+    if not self.patches_ok then
+        Backend:installPatches()
+    end
 end
 
 function Legado:onDispatcherRegisterActions()
@@ -53,29 +45,27 @@ function Legado:onDispatcherRegisterActions()
     })
     Dispatcher:registerAction("return_legado_chapterlisting", {
         category = "none",
-        event = "ReturnLegadoChapterListing",
+        event = "ShowLegadoToc",
         title = _("返回 Legado 目录"),
         reader = true
     })
 end
 
-function Legado:checkEnv()
-    local ReaderRolling = require("apps/reader/modules/readerrolling")
-    if not ReaderRolling.c8eeb679e and not self.patches_ok then
-        local patches_file_path = H.joinPath(H.getUserPatchesDirectory(), '2-legado_plugin_func.lua')
-        local source_patches = H.joinPath(H.getPluginDirectory(), 'patches/2-legado_plugin_func.lua')
-        local disabled_patches = patches_file_path .. '.disabled'
-        for _, file in ipairs({patches_file_path, disabled_patches}) do
-            if util.fileExists(file) then
-                util.removeFile(file)
+local ko_version = G_reader_settings and G_reader_settings:readSetting("quickstart_shown_version") or
+                       require("version"):getNormalizedCurrentVersion()
+local is_low_version = (ko_version < 202411000000)
+function Legado:addToMainMenu(menu_items)
+    if not self.ui.document then -- FileManager menu only
+        menu_items.Legado = {
+            text = is_low_version and "Legado 书目(低版环境)" or "Legado 书目",
+            sorting_hint = "search",
+            help_text = "连接 Legado 书库" .. (is_low_version and "，Koreader 版本低，建议升级" or ""),
+            callback = function()
+                self:openLibraryView()
             end
-        end
-        H.copyFileFromTo(source_patches, patches_file_path)
-        self.patches_ok = true
-        UIManager:restartKOReader()
-    else
-        self.patches_ok = true
+        }
     end
 end
 
+Backend:initialize()
 return Legado
