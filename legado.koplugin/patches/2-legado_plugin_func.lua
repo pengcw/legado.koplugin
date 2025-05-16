@@ -35,23 +35,13 @@ function ReadHistory:updateLastBookTime(no_flush)
     end
 end
 local ReaderToc = require("apps/reader/modules/readertoc")
-local original_onShowToc = ReaderFooter.onShowToc
+local original_onShowToc = ReaderToc.onShowToc
 function ReaderToc:onShowToc()
     if self.ui and self.ui.document and self.ui.document.file and self.ui.document.file:find('/legado.cache/', 1, true) then
         self.ui:handleEvent(Event:new("ShowLegadoToc"))
         return true
     else
         return original_onShowToc(self)
-    end
-end
--- fix ver_2024.11 .cbz err
-local ReaderFooter = require("apps/reader/modules/readerfooter")
-local original_getBookProgress = ReaderFooter.getBookProgress
-function ReaderFooter:getBookProgress()
-    if self.ui and self.ui.document then
-        return original_getBookProgress(self)
-    else
-        return self.pageno / self.pages
     end
 end
 
