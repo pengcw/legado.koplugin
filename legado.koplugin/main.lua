@@ -51,11 +51,13 @@ function Legado:onDispatcherRegisterActions()
     })
 end
 
-local ko_version = G_reader_settings and G_reader_settings:readSetting("quickstart_shown_version") or
-                       require("version"):getNormalizedCurrentVersion()
-local is_low_version = (ko_version < 202411000000)
+local is_low_version
 function Legado:addToMainMenu(menu_items)
     if not self.ui.document then -- FileManager menu only
+        if is_low_version == nil then
+            local ko_version = require("version"):getNormalizedCurrentVersion()
+            is_low_version = (ko_version < 202411000000)
+        end
         menu_items.Legado = {
             text = is_low_version and "Legado 书目(低版环境)" or "Legado 书目",
             sorting_hint = "search",
