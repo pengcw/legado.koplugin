@@ -620,8 +620,6 @@ function LibraryView:initializeRegisterEvent(legado_main)
                 doc_settings.data.style_tweaks.paragraph_whitespace_half = true
                 doc_settings.data.style_tweaks.paragraphs_indent = true
                 doc_settings.data.css = "./data/fb2.css"
-            elseif extension == 'cbz' then
-                doc_settings.data.flipping_zoom_mode = "page"
             end
 
             if LibraryView.instance and LibraryView.instance.chapter_listing and
