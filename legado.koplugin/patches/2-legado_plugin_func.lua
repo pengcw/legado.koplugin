@@ -24,7 +24,7 @@ local ReadHistory = require("readhistory")
 local original_addItem = ReadHistory.addItem
 function ReadHistory:addItem(file, ts, no_flush)
     if type(file) == 'string' and file:lower():find('/legado.cache/', 1, true) then
-        return true
+        return 
     end
     return original_addItem(self, file, ts, no_flush)
 end
@@ -44,8 +44,7 @@ function ReaderToc:onShowToc()
         return original_onShowToc(self)
     end
 end
-
--- fix ver_2024.11 .cbz err
+-- fix koreader .cbz next chapter crash
 local ReaderFooter = require("apps/reader/modules/readerfooter")
 local original_getBookProgress = ReaderFooter.getBookProgress
 function ReaderFooter:getBookProgress()
@@ -54,4 +53,11 @@ function ReaderFooter:getBookProgress()
     else
         return self.pageno / self.pages
     end
+end
+local original_updateFooterPage = ReaderFooter.updateFooterPage
+function ReaderFooter:updateFooterPage(force_repaint, full_repaint)
+    if self.ui and self.ui.document then
+        return original_updateFooterPage(self, force_repaint, full_repaint)
+    end
+    return
 end
