@@ -31,7 +31,8 @@ function M:fetchAndShow(options)
         fullscreen = true,
         with_title_bar = false,
         image_disposable = true,
-        images_list_nb = 4
+        images_list_nb = 4,
+        image_padding = 0
     }
     UIManager:show(viewer)
 end

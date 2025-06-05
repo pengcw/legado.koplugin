@@ -1,13 +1,13 @@
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Dispatcher = require("dispatcher")
 local UIManager = require("ui/uimanager")
+local util = require("util")
 local logger = require("logger")
 local _ = require("gettext")
-local Backend = require("Legado/Backend")
+local H = require("Legado/Helper") -- need to load first 
+local Backend = require("Legado/Backend") -- two
 local BookReader = require("Legado/BookReader")
 local LibraryView = require("Legado/LibraryView")
-local util = require("util")
-local H = require("Legado/Helper")
 
 local Legado = WidgetContainer:extend({
     name = "开源阅读插件",
@@ -19,21 +19,32 @@ local function testPatches()
 end
 
 function Legado:init()
+    -- on open FileManager or ReaderUI
     self.patches_ok = testPatches()
-    if self.ui.name == "ReaderUI" then
-        BookReader:initializeFromReaderUI(self.ui, self.patches_ok)
-    else
-        self.ui.menu:registerToMainMenu(self)
+    if not H.plugin_path then
+        H.initialize("legado", self.path)
     end
-    LibraryView:initializeRegisterEvent(self)
+    if not Backend.settings_data then
+        Backend:initialize()
+    end
+    if self.ui then
+        BookReader:initializeFromReaderUI(self.ui, self.patches_ok)
+        LibraryView:initializeRegisterEvent(self)
+        if  self.ui.menu then
+            self.ui.menu:registerToMainMenu(self)
+        end
+    end
     self:onDispatcherRegisterActions()
 end
 
 function Legado:openLibraryView()
     LibraryView:fetchAndShow()
-    if not self.patches_ok then
-        Backend:installPatches()
-    end
+    UIManager:nextTick(function()
+        if not self.patches_ok then
+            Backend:installPatches()
+        end
+        Backend:checkOta()
+    end)
 end
 
 function Legado:onDispatcherRegisterActions()
@@ -56,7 +67,7 @@ function Legado:addToMainMenu(menu_items)
     if not self.ui.document then -- FileManager menu only
         if is_low_version == nil then
             local ko_version = require("version"):getNormalizedCurrentVersion()
-            is_low_version = (ko_version < 202411000000)
+            is_low_version = (ko_version and ko_version < 202411000000)
         end
         menu_items.Legado = {
             text = is_low_version and "Legado 书目(低版环境)" or "Legado 书目",
@@ -69,5 +80,4 @@ function Legado:addToMainMenu(menu_items)
     end
 end
 
-Backend:initialize()
 return Legado
