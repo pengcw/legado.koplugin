@@ -2,6 +2,7 @@ local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local ConfirmBox = require("ui/widget/confirmbox")
+local Notification = require("ui/widget/notification")
 local Screen = require("device").screen
 local Trapper = require("ui/trapper")
 
@@ -252,6 +253,19 @@ function M:loading(message, runnable, callback, options)
             end
         end
     end)
+end
+
+function M:notice(msg, timeout)
+    Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
+end
+
+function M:askForRestart(msg)
+    self:confirm(msg or "", function()
+        UIManager:restartKOReader()
+    end, {
+        ok_text = "重启",
+        cancel_text = "稍后"
+    })
 end
 
 return M

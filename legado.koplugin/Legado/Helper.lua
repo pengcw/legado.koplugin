@@ -4,8 +4,23 @@ local Device = require("device")
 local ffiUtil = require("ffi/util")
 local DataStorage = require("datastorage")
 
-local M = {}
-local plugin_name = "legado"
+local M = {
+    plugin_path = nil,
+    plugin_name = nil
+}
+
+M.initialize = function(name, path)
+    M.plugin_name = name
+    -- fix Android path
+    if type(path) == "string" then
+        path = path:gsub("/+", "/")
+    end
+    M.plugin_path = path
+end
+
+M.get_plugin_path = function()
+    return M.plugin_path
+end
 
 M.if_nil = function(a, b)
     if nil == a then
@@ -325,7 +340,7 @@ M.checkAndCreateFolder = function(d_path)
 end
 
 M.getUserSettingsPath = function()
-    return M.joinPath(DataStorage:getSettingsDir(), plugin_name .. '.lua')
+    return M.joinPath(DataStorage:getSettingsDir(), M.plugin_name .. '.lua')
 end
 
 M.getUserPatchesDirectory = function()
@@ -333,14 +348,19 @@ M.getUserPatchesDirectory = function()
     return M.checkAndCreateFolder(patches_dir)
 end
 
+M.getKoreaderDirectory = function()
+    return DataStorage:getDataDir()
+end
+
 M.getTempDirectory = function()
-    local plugin_cache_dir = plugin_name .. '.cache'
+    local plugin_cache_dir = M.plugin_name .. '.cache'
     local plugin_cache_path = M.joinPath(DataStorage:getDataDir(), 'cache/' .. plugin_cache_dir)
     return M.checkAndCreateFolder(plugin_cache_path)
 end
 
 M.getPluginDirectory = function()
-    return table.concat({DataStorage:getDataDir(), "/plugins/", plugin_name, '.koplugin'})
+    local plugin_path_bak = table.concat({DataStorage:getDataDir(), "/plugins/", M.plugin_name, '.koplugin'})
+    return M.plugin_path or plugin_path_bak
 end
 
 M.getBookCachePath = function(book_cache_id)

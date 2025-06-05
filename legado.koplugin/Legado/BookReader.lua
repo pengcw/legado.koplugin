@@ -47,14 +47,14 @@ function M:show(options)
 end
 
 function M:initializeFromReaderUI(ui, add_menu)
-    if self.is_showing and add_menu ~= true then
-        ui.menu:registerToMainMenu(M)
+    if ui and ui.name == "ReaderUI" then
+        if ui.menu and self.is_showing and add_menu ~= true then
+            ui.menu:registerToMainMenu(M)
+        end
+        ui:registerPostInitCallback(function()
+            self:hookWithPriorityOntoReaderUiEvents(ui)
+        end)
     end
-
-    ui:registerPostInitCallback(function()
-        self:hookWithPriorityOntoReaderUiEvents(ui)
-    end)
-
 end
 
 function M:hookWithPriorityOntoReaderUiEvents(ui)

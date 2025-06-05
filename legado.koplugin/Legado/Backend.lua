@@ -429,6 +429,20 @@ function M:show_notice(msg, timeout)
     Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
 end
 
+function M:checkOta(is_compel)
+    local setting_data = self:getSettings()
+    local last_check = tonumber(setting_data.last_check_ota) or 0
+    local need_check = is_compel == true or (os.time() - last_check > 432000)
+
+    if need_check and NetworkMgr:isConnected() then
+        local legado_update = require("Legado.Update")
+        legado_update:ota(function()
+            setting_data.last_check_ota = os.time()
+            self:saveSettings(setting_data)
+        end)
+    end
+end
+
 function M:backgroundCacheConfig()
     return LuaSettings:open(H.getTempDirectory() .. '/cache.lua')
 end
@@ -2728,4 +2742,3 @@ require("ffi/__gc")(M, {
 })
 
 return M
-

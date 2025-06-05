@@ -434,7 +434,7 @@ function LibraryView:openMenu()
                 })
         end
     }}, {{
-        text = Icons.FA_QUESTION_CIRCLE .. ' ' .. "关于",
+        text = Icons.FA_QUESTION_CIRCLE .. ' ' .. "关于/更新",
         callback = function()
             UIManager:close(dialog)
             local about_txt = [[
@@ -453,17 +453,17 @@ function LibraryView:openMenu()
 请到 Github：pengcw/legado.koplugin 反馈 issues
 
 版本: ver_%4]]
-
-            local version = ''
-            local ok, config_or_err = pcall(dofile, H.getPluginDirectory() .. "/_meta.lua")
-            if ok then
-                version = config_or_err.version
-            end
-            about_txt = T(about_txt, Icons.FA_DOWNLOAD, Icons.FA_CHECK_CIRCLE, Icons.FA_THUMB_TACK, version)
+            local legado_update = require("Legado.Update")
+            local curren_version = legado_update:getCurrentPluginVersion() or ""
+            about_txt = T(about_txt, Icons.FA_DOWNLOAD, Icons.FA_CHECK_CIRCLE, Icons.FA_THUMB_TACK, curren_version)
             MessageBox:custom({
                 text = about_txt,
                 alignment = "left"
             })
+            
+            UIManager:nextTick(function()
+                Backend:checkOta(true)
+            end)
         end
     }}}
 
