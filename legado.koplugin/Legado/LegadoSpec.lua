@@ -39,7 +39,7 @@ return {
             path = "/getBookContent",
             method = "GET",
             required_params = {"url", "index"},
-            optional_params = {"v", "cache"},
+            optional_params = {"v", "cache", "refresh"},
             expected_status = {200}
         },
         saveBookProgress = {
@@ -52,7 +52,6 @@ return {
             optional_params = {"v"},
             expected_status = {200}
         },
-
         getAvailableBookSource = {
             path = "/getAvailableBookSource",
             method = "POST",
@@ -61,7 +60,6 @@ return {
             payload = {"url", "refresh"},
             expected_status = {200}
         },
-
         setBookSource = {
             path = "/setBookSource",
             method = "POST",
@@ -70,7 +68,6 @@ return {
             payload = {"bookUrl", "bookSourceUrl", "newUrl"},
             expected_status = {200}
         },
-
         searchBookSource = {
             path = "/searchBookSource",
             method = "GET",
@@ -117,7 +114,6 @@ return {
             unattended_params = true,
             expected_status = {200}
         },
-
         deleteBook = {
             path = "/deleteBook",
             method = "POST",
@@ -151,6 +147,14 @@ return {
         getCover = {
             path = "/getCover",
             method = "GET",
+            expected_status = {200}
+        },
+        refreshToc = {
+            path = "/refreshToc",
+            method = "POST",
+            required_params = {"url"},
+            payload = {"url"},
+            optional_params = {"v"},
             expected_status = {200}
         }
     }

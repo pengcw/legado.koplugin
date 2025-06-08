@@ -460,7 +460,7 @@ function LibraryView:openMenu()
                 text = about_txt,
                 alignment = "left"
             })
-            
+
             UIManager:nextTick(function()
                 Backend:checkOta(true)
             end)
@@ -496,10 +496,10 @@ function LibraryView:openMenu()
     UIManager:show(dialog)
 end
 
-function LibraryView:openSearchBooksDialog()
+function LibraryView:openSearchBooksDialog(def_search_input)
     require("Legado/BookSourceResults"):searchAndShow(function()
         self:onRefreshLibrary()
-    end)
+    end, def_search_input)
 end
 
 function LibraryView:onMenuSelect(entry, pos)
@@ -526,9 +526,19 @@ end
 
 local BookReader = require("Legado/BookReader")
 local ReaderUI = require("apps/reader/readerui")
-local LuaSettings = require("luasettings")
 function LibraryView:initializeRegisterEvent(legado_main)
-
+    local is_legado_path = function(file_path, instance)
+        if instance and instance.document and instance.document.file then
+            file_path = instance.document.file
+        end
+        return type(file_path) == 'string' and file_path:lower():find('cache/legado.cache/', 1, true)
+    end
+    local get_chapter_event = function()
+        if LibraryView.instance and LibraryView.instance.chapter_listing and
+            LibraryView.instance.chapter_listing.book_reader then
+            return LibraryView.instance.chapter_listing.book_reader.chapter_call_event
+        end
+    end
     function legado_main:onShowLegadoLibraryView()
         -- FileManager menu only
         if not (self.ui and self.ui.document) then
@@ -587,10 +597,18 @@ function LibraryView:initializeRegisterEvent(legado_main)
         end
         return true
     end
-
+    local calculate_goto_page = function(chapter_call_event, page_count)
+        if chapter_call_event == "next" then
+            return 1
+        elseif page_count and chapter_call_event == "pre" then
+            return page_count
+        end
+    end
     function legado_main:onDocSettingsLoad(doc_settings, document)
-        if doc_settings and doc_settings.data and type(doc_settings.readSetting) == 'function' and document and
-            type(document.file) == 'string' and document.file:find('/legado.cache/', 1, true) then
+
+        if document and is_legado_path(document.file) and doc_settings and doc_settings.data and
+            self.ui then
+
             local directory, file_name = util.splitFilePathName(document.file)
             local _, extension = util.splitFileNameSuffix(file_name or "")
             if not (type(directory) == "string" or type(file_name) == 'string' and directory ~= "" and file_name ~= "") then
@@ -602,7 +620,7 @@ function LibraryView:initializeRegisterEvent(legado_main)
 
             -- document.is_new = nil ?
             if util.fileExists(book_defaults_path) then
-                local book_defaults = LuaSettings:open(book_defaults_path)
+                local book_defaults = Backend:getLuaConfig(book_defaults_path)
                 if document_is_new == true and type(book_defaults.data) == 'table' then
                     local summary = doc_settings.data.summary -- keep status
                     local book_defaults_data = util.tableDeepCopy(book_defaults.data)
@@ -622,14 +640,12 @@ function LibraryView:initializeRegisterEvent(legado_main)
                 doc_settings.data.css = "./data/fb2.css"
             end
 
-            if LibraryView.instance and LibraryView.instance.chapter_listing and
-                LibraryView.instance.chapter_listing.bookinfo then
-                -- statistics.koplugin
-                if document then
-                    document.is_pic = true
-                end
-                -- 是否影响后续 ？
-                --[=[
+            -- statistics.koplugin
+            if document then
+                document.is_pic = true
+            end
+            -- 是否影响后续 ？
+            --[=[
                     if document_is_new then  
                         local bookinfo = LibraryView.instance.chapter_listing.bookinfo
                         doc_settings.data.doc_props = doc_settings.data.doc_props or {}
@@ -638,25 +654,26 @@ function LibraryView:initializeRegisterEvent(legado_main)
                     end
                 ]=]
 
+            -- current_page == nil
+            -- self.ui.document:getPageCount() unreliable, sometimes equal to 0
+            local chapter_call_event = get_chapter_event()
+            local page_count = doc_settings:readSetting("doc_pages") or 99999
+            -- koreader some cases is goto last_page
+            local page_number = calculate_goto_page(chapter_call_event, page_count)
+            if H.is_num(page_number) then
+                doc_settings.data.last_page = page_number
             end
 
         end
     end
     -- or UIManager:flushSettings() --onFlushSettings
     function legado_main:onSaveSettings()
-        local is_valid_reader_ui = self.ui and self.ui.name == "ReaderUI" and type(self.ui.doc_settings) == "table" and
-                                       type(self.ui.doc_settings.readSetting) == "function"
-
-        local is_library_visible = LibraryView.instance and type(LibraryView.instance.selected_item) == "table" and
-                                       type(BookReader.getIsShowing) == "function" and BookReader:getIsShowing()
-
-        if not (is_valid_reader_ui and is_library_visible) then
+        if not (self.ui and is_legado_path(nil, self.ui) and self.ui.doc_settings) then
             return
         end
-
-        local filepath = self.ui.doc_settings:readSetting("doc_path") or ""
+        local filepath = self.ui.document.file or self.ui.doc_settings:readSetting("doc_path")
         local directory, file_name = util.splitFilePathName(filepath)
-        if not (type(directory) == "string" and directory:find('/legado.cache/', 1, true)) then
+        if not is_legado_path(directory) then
             return
         end
 
@@ -664,7 +681,7 @@ function LibraryView:initializeRegisterEvent(legado_main)
         if self.ui.doc_settings and type(self.ui.doc_settings.data) == 'table' then
             local persisted_settings_keys = require("Legado/BookMetaData")
             local book_defaults_path = H.joinPath(directory, "book_defaults.lua")
-            local book_defaults = LuaSettings:open(book_defaults_path)
+            local book_defaults = Backend:getLuaConfig(book_defaults_path)
             local doc_settings_data = util.tableDeepCopy(self.ui.doc_settings.data)
             for k, v in pairs(doc_settings_data) do
                 if persisted_settings_keys[k] then
@@ -675,60 +692,68 @@ function LibraryView:initializeRegisterEvent(legado_main)
         end
     end
 
+    -- .cbz call twice ?
     function legado_main:onReaderReady(doc_settings)
         -- logger.dbg("document.is_pic",self.ui.document.is_pic)
         -- logger.dbg(doc_settings.data.summary.status)
-        if LibraryView.instance and LibraryView.instance.chapter_listing and
-            LibraryView.instance.chapter_listing.book_reader then
-            logger.dbg("test_book_reader.chapter_call_event",
-                LibraryView.instance.chapter_listing.book_reader.chapter_call_event)
-            logger.dbg("test_book_reader.is_showing", LibraryView.instance.chapter_listing.book_reader.is_showing)
-        end
-        if not (self.ui.name == "ReaderUI" and doc_settings and LibraryView.instance and
-            LibraryView.instance.chapter_listing and LibraryView.instance.chapter_listing.book_reader and
-            LibraryView.instance.chapter_listing.book_reader.chapter_call_event and type(BookReader.getIsShowing) ==
-            'function' and BookReader:getIsShowing() == true and type(doc_settings.readSetting) == 'function') then
-            return
-        end
+        if self.ui and self.ui.link and is_legado_path(nil, self.ui) and doc_settings then
 
-        local chapter_listing = LibraryView.instance.chapter_listing
-        local chapter_call_event = chapter_listing.book_reader.chapter_call_event
-        local filepath = doc_settings:readSetting("doc_path") or ""
-
-        if not filepath:find('/legado.cache/', 1, true) then
-            return
-        end
-
-        local has_doc_props = doc_settings:readSetting("doc_props") ~= nil
-        local current_page = self.ui:getCurrentPage() or 0
-
-        if not has_doc_props then
-            -- new doc
-            if chapter_call_event == 'pre' then
-                self.ui.gotopage:onGoToEnd()
+            local chapter_call_event = get_chapter_event()
+            if not chapter_call_event then
+                return
             end
-        else
-            local doc_pages = doc_settings:readSetting("doc_pages") or 0
-            if chapter_call_event == 'next' then
-                if current_page ~= 1 then
-                    self.ui.gotopage:onGoToBeginning()
+            local document_is_new = doc_settings:readSetting("doc_props") == nil
+            if document_is_new and chapter_call_event == "next" then
+                return
+            end
+
+            local function make_pages_continuous(chapter_event)
+                local current_page = self.ui:getCurrentPage()
+                if not current_page or current_page == 0 then
+                    -- fallback to another method if current_page is unavailable
+                    -- self.ui.document.info.has_pages == self.ui.paging
+                    if self.ui.paging or self.ui.document.info.has_pages then
+                        current_page = self.view.state.page
+                    else
+                        current_page = self.ui.document:getXPointer()
+                        current_page = self.ui.document:getPageFromXPointer(current_page)
+                    end
                 end
-            elseif chapter_call_event == 'pre' then
-                if current_page ~= doc_pages then
-                    self.ui.gotopage:onGoToEnd()
+
+                local page_count = self.ui.document:getPageCount()
+                if not (H.is_num(page_count) and page_count > 0) then
+                    page_count = doc_settings:readSetting("doc_pages")
+                end
+
+                local page_number = calculate_goto_page(chapter_event, page_count)
+
+                if H.is_num(page_number) and current_page ~= page_number then
+                    self.ui.link:addCurrentLocationToStack()
+                    self.ui:handleEvent(Event:new("GotoPage", page_number))
                 end
             end
+            make_pages_continuous(chapter_call_event)
         end
-
     end
 
     function legado_main:onCloseDocument()
-        if not (self.ui and self.ui.name == "ReaderUI" and self.ui.rolling and self.ui.rolling.c8eeb679f ~= true and
-            self.ui.document and type(self.ui.document.file) == 'string' and
-            self.ui.document.file:find('/legado.cache/', 1, true)) then
-            return
+        if not self.patches_ok and is_legado_path(nil, self.ui) then
+            require("readhistory"):removeItemByPath(self.document.file)
         end
-        require("readhistory"):removeItemByPath(self.document.file)
+    end
+
+    function legado_main:onShowLegadoSearch()
+        local def_search_input
+        if self.ui and self.ui.doc_settings and self.ui.doc_settings.data.doc_props then
+            local doc_props = self.ui.doc_settings.data.doc_props
+            def_search_input = doc_props.authors or doc_props.title
+        end
+        if LibraryView.instance then
+            LibraryView.instance:openSearchBooksDialog(def_search_input)
+        else
+            require("Legado/BookSourceResults"):searchAndShow(nil, def_search_input)
+        end
+        return true
     end
 
     table.insert(legado_main.ui, 3, legado_main)

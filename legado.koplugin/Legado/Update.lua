@@ -51,7 +51,7 @@ function M:ota(ok_callback)
         if update_response == true then
             MessageBox:askForRestart("Updated. Restart KOReader for changes to apply.")
             if util.fileExists(zip_path) then
-                os.remove(zip_path)
+                pcall(os.remove, zip_path)
             end
             if H.is_func(ok_callback) then
                 ok_callback()
@@ -113,7 +113,7 @@ function M:_getLatestReleaseInfo()
         logger.warn("github 返回数据格式错误：", tostring(data))
         return
     end
-    if not (type(data) == "table" and data.tag_name and data.assets) then
+    if not (type(data) == "table" and data.tag_name and data.assets and data.assets[1]) then
         logger.warn("获取版本数据错误：", err)
         return
     end
@@ -159,7 +159,7 @@ function M:_downloadUpdate(release_info)
         url = url,
         method = "GET",
         file = file,
-        timeout = 200,
+        timeout = 20,
         maxtime = 300
     }
 

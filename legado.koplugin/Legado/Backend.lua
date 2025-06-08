@@ -21,7 +21,8 @@ local M = {
     dbManager = {},
     settings_data = nil,
     task_pid_file = nil,
-    apiClient = nil
+    apiClient = nil,
+    httpReq = nil
 }
 
 local function wrap_response(data, err_message)
@@ -50,49 +51,6 @@ local function get_img_src(html)
     end
 
     return img_sources
-end
-
-local function get_extension_from_mimetype(content_type)
-    local extensions = {
-        ["image/jpeg"] = "jpg",
-        ["image/png"] = "png",
-        ["image/gif"] = "gif",
-        ["image/bmp"] = "bmp",
-        ["image/webp"] = "webp",
-        ["image/tiff"] = "tiff",
-        ["image/svg+xml"] = "svg",
-        ["application/xhtml+xml"] = "html",
-        ["text/javascript"] = "js",
-        ["text/css"] = "css",
-        ["application/opentype"] = "otf",
-        ["application/truetype"] = "ttf",
-        ["application/font-woff"] = "woff",
-        ["application/epub+zip"] = "epub"
-    }
-
-    return extensions[content_type] or ""
-end
-
-local function get_image_format_head8(image_data)
-    if type(image_data) ~= "string" then
-        return "bin"
-    end
-
-    local header = image_data:sub(1, 8)
-
-    if header:sub(1, 3) == "\xFF\xD8\xFF" then
-        return "jpg"
-    elseif header:sub(1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then
-        return "png"
-    elseif header:sub(1, 4) == "\x47\x49\x46\x38" then
-        return "gif"
-    elseif header:sub(1, 2) == "\x42\x4D" then
-        return "bmp"
-    elseif header:sub(1, 4) == "\x52\x49\x46\x46" then
-        return "webp"
-    else
-        return "bin"
-    end
 end
 
 local function get_url_extension(url)
@@ -159,73 +117,11 @@ local function convertToGrayscale(image_data)
 
 end
 
-local function pGetUrlContent(url, timeout, maxtime)
-
-    local ltn12 = require("ltn12")
-    local socket = require("socket")
-    local http = require("socket.http")
-    local socketutil = require("socketutil")
-
-    timeout = timeout or 600
-    maxtime = maxtime or 700
-
-    local parsed = socket_url.parse(url)
-    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
-        error("Unsupported protocol")
+local function pGetUrlContent(options)
+    if not M.httpReq then 
+        M.httpReq = require("Legado.HttpRequest")
     end
-
-    local sink = {}
-    local request = {
-        url = url,
-        method = "GET",
-        headers = {
-            ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
-        },
-        sink = maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink),
-        create = socketutil.tcp
-    }
-
-    socketutil:set_timeout(timeout, maxtime)
-    local code, headers, status = socket.skip(1, http.request(request))
-    socketutil:reset_timeout()
-
-    if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
-        logger.err("request interrupted:", code)
-        error("request interrupted:" .. tostring(code))
-    end
-
-    if headers == nil then
-        logger.warn("No HTTP headers:", status or code or "network unreachable")
-        error("Network or remote server unavailable")
-    end
-    if type(code) ~= 'number' or code < 200 or code > 299 then
-        logger.warn("HTTP status not okay:", status or code or "network unreachable")
-        logger.dbg("Response headers:", headers)
-        error("Remote server error or unavailable")
-    end
-
-    local content = table.concat(sink)
-    if headers and headers["content-length"] then
-        local content_length = tonumber(headers["content-length"])
-        if #content ~= content_length then
-            error("Incomplete content received")
-        end
-    end
-
-    local extension = ""
-    local contentType = headers["content-type"]
-    if contentType then
-        extension = get_extension_from_mimetype(contentType)
-        if not extension or extension == "" and contentType:match("^image/") then
-            extension = get_image_format_head8(content)
-        end
-    end
-
-    return {
-        data = content,
-        ext = extension,
-        headers = headers
-    }
+    return M.httpReq(options, true)
 end
 
 local function pDownload_CreateCBZ(filePath, img_sources)
@@ -261,7 +157,11 @@ local function pDownload_CreateCBZ(filePath, img_sources)
     for i, img_src in ipairs(img_sources) do
 
         dbg.v('Download_Image start', i, img_src)
-        local status, err = pcall(pGetUrlContent, img_src)
+        local status, err = pGetUrlContent({
+                url = img_src,
+                timeout = 15,
+                maxtime = 60
+        })
 
         if status and H.is_tbl(err) and err['data'] then
 
@@ -341,7 +241,7 @@ function M:loadSpore()
     require("Spore.Middleware.Legado3Auth").call = function(args, req)
         local spore = req.env.spore
 
-        if self.settings_data.data.reader3_un ~= '' then
+        if self:_isReader3() and self.settings_data.data.reader3_un ~= '' then
 
             local loginSuccess, token = self:_reader3Login()
             if loginSuccess == true and type(token) == 'string' and token ~= '' then
@@ -367,8 +267,8 @@ function M:loadSpore()
 end
 
 function M:initialize()
-    self.settings_data = LuaSettings:open(H.getUserSettingsPath())
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
+    self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
 
     -- 兼容历史版本 <1.038
     if not self.settings_data.data.setting_url and not self.settings_data.data.reader3_un and
@@ -424,32 +324,46 @@ function M:installPatches()
     UIManager:restartKOReader()
 end
 
-function M:show_notice(msg, timeout)
-    local Notification = require("ui/widget/notification")
-    Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
-end
-
 function M:checkOta(is_compel)
+    local check_interval = 518400
     local setting_data = self:getSettings()
     local last_check = tonumber(setting_data.last_check_ota) or 0
-    local need_check = is_compel == true or (os.time() - last_check > 432000)
+    local need_check = is_compel == true or (os.time() - last_check > check_interval)
 
     if need_check and NetworkMgr:isConnected() then
         local legado_update = require("Legado.Update")
+        setting_data.last_check_ota = (os.time() - check_interval + 259200)
+        self:saveSettings(setting_data)
+
         legado_update:ota(function()
+            local setting_data = self:getSettings()
             setting_data.last_check_ota = os.time()
             self:saveSettings(setting_data)
         end)
     end
 end
 
+function M:show_notice(msg, timeout)
+    local Notification = require("ui/widget/notification")
+    Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
+end
+function M:launchProcess(job)
+    if H.is_func(job) then
+        return ffiUtil.runInSubProcess(job, nil ,true)
+    end
+end
+function M:getLuaConfig(path)
+    return LuaSettings:open(path)
+end
 function M:backgroundCacheConfig()
-    return LuaSettings:open(H.getTempDirectory() .. '/cache.lua')
+    return self:getLuaConfig(H.getTempDirectory() .. '/cache.lua')
 end
 function M:resetReader3Token()
     self:backgroundCacheConfig():delSetting('r3k'):flush()
 end
 
+function M:_isReader3() return self.settings_data.data.server_type == 2 end
+function M:_isLegadoApp() return self.settings_data.data.server_type == 1 end
 function M:_reader3Login()
     local cache_config = self:backgroundCacheConfig()
     if H.is_str(cache_config.data.r3k) then
@@ -514,7 +428,7 @@ function M:legadoSporeApi(requestFunc, callback, opts, logName)
         timeouts = {8, 12}
     end
 
-    if isServerOnly == true and self.settings_data.data.server_type ~= 2 then
+    if isServerOnly == true and not self:_isReader3() then
         return wrap_response(nil, "仅支持服务器版本\r\n其它请在 app 操作后刷新")
     end
 
@@ -617,7 +531,6 @@ function M:refreshLibraryCache(last_refresh_time)
         -- data=bookinfos
         return self.apiClient:getBookshelf({
             refresh = 0,
-
             v = os.time()
         })
     end, function(response)
@@ -692,7 +605,7 @@ function M:getAvailableBookSource(bookinfo)
     local bookUrl = bookinfo.bookUrl
     local name = bookinfo.name
     local author = bookinfo.author
-    if self.settings_data.data.server_type == 1 then
+    if self:_isLegadoApp() then
         return self:searchBookSocket(name, {
             name = name,
             author = author
@@ -763,6 +676,40 @@ function M:setBookSource(newBookSource)
 
 end
 
+function M:refreshBookContent(chapter)
+
+    local bookUrl = chapter.bookUrl
+    local chapters_index = chapter.chapters_index
+    local down_chapters_index = chapter.chapters_index
+
+    if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
+        return wrap_response(nil, '刷新章节出错')
+    end
+
+    if self:_isLegadoApp() then
+        -- 刷新书籍, 仅legado app，不支持单章刷新
+        self:legadoSporeApi(function()
+            return self.apiClient:refreshToc({
+                url = bookUrl,
+                v = os.time()
+            })
+        end, nil, {
+            timeouts = {10, 20}
+        }, 'refreshToc')
+    elseif self:_isReader3() then
+        self:legadoSporeApi(function()
+            return self.apiClient:getBookContent({
+                url = bookUrl,
+                index = down_chapters_index,
+                refresh = 1,
+                v = os.time()
+            })
+        end, nil, {
+            timeouts = {10, 20}
+        }, 'GetChapterContent')
+    end
+end
+
 function M:searchBookSource(bookUrl, lastIndex, searchSize)
     if not H.is_str(bookUrl) then
         return wrap_response(nil, '获取更多书源参数错误')
@@ -795,7 +742,7 @@ function M:searchBookSocket(search_text, filter, timeout)
         return wrap_response(nil, "输入参数错误")
     end
 
-    if self.settings_data.data.server_type ~= 1 then
+    if not self:_isLegadoApp() then
         return wrap_response(nil, "仅支持阅读 APP")
     end
 
@@ -1430,7 +1377,11 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy, callbac
         return resources_relpath
     end
 
-    local status, err = pcall(pGetUrlContent, processed_src)
+    local status, err = pGetUrlContent({
+                url = processed_src,
+                timeout = 15,
+                maxtime = 60
+        })
     if status and H.is_tbl(err) and err["data"] then
         if not ext or ext == "" then
             ext = err["ext"] or ""
@@ -1538,7 +1489,11 @@ function M:_AnalyzingChapters(chapter, content)
             -- 一张图片就不打包cbz了
             if #img_sources == 1 then
                 local res_url = img_sources[1]
-                local status, err = pcall(pGetUrlContent, res_url)
+                local status, err = pGetUrlContent({
+                        url = res_url,
+                        timeout = 15,
+                        maxtime = 60
+                })
                 if not status then
                     error('请求错误，' .. H.errorHandler(err))
                 end
@@ -1580,7 +1535,11 @@ function M:_AnalyzingChapters(chapter, content)
         if html_url == nil or html_url == '' then
             error('转换失败')
         end
-        local status, err = pcall(pGetUrlContent, html_url)
+        local status, err = pGetUrlContent({
+                        url = html_url,
+                        timeout = 15,
+                        maxtime = 60
+                })
         if not status then
             error('请求错误，' .. H.errorHandler(err))
         end
@@ -1891,7 +1850,6 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
         return htmlUrl
     end
     local server_address = self.settings_data.data['server_address']
-    local server_type = self.settings_data.data.server_type
     if server_address:match("/reader3$") and htmlUrl:match("%.x?html$") then
         local api_root_url = server_address:gsub("/reader3$", "")
         -- 可能有空格 "data": "/book-assets/guest/紫川_老猪/紫川 作者：老猪.epub/index/OEBPS/Text/chapter_0.html"
@@ -1910,11 +1868,10 @@ function M:getProxyImageUrl(bookUrl, img_src)
     local res_img_src = img_src
     local width = Device.screen:getWidth() or 800
     local server_address = self.settings_data.data.server_address
-    local server_type = self.settings_data.data.server_type
-    if server_type == 1 then
+    if self:_isLegadoApp() then
         res_img_src = table.concat({server_address, '/image?url=', util.urlEncode(bookUrl), '&path=',
                                     util.urlEncode(img_src), '&width=', width})
-    elseif server_type == 2 then
+    elseif self:_isReader3() then
         local api_root_url = server_address:gsub("/reader3$", "")
         -- <img src='__API_ROOT__/book-assets/guest/剑来_/剑来.cbz/index/1.png' />
         res_img_src = custom_urlEncode(img_src):gsub("^__API_ROOT__", "")
@@ -1938,7 +1895,11 @@ function M:getPorxyPicUrls(bookUrl, content)
 end
 
 function M:pDownload_Image(img_src, timeout)
-    local status, err = pcall(pGetUrlContent, img_src, timeout)
+    local status, err = pGetUrlContent({
+                    url = img_src,
+                    timeout = timeout or 15,
+                    maxtime = 60
+                })
     if status and H.is_tbl(err) and err['data'] then
         return wrap_response(err)
     else
@@ -2028,7 +1989,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
 
     self:closeDbManager()
 
-    local task_pid, err = ffiUtil.runInSubProcess(function()
+    local task_pid, err = self:launchProcess(function()
 
         pcall(function()
 
@@ -2158,7 +2119,7 @@ function M:preLoadingChapters(chapter, download_chapter_count)
 
         return true
 
-    end, nil, true)
+    end)
 
     if not task_pid then
         dbg.log("Multithreaded task creation failed:" .. tostring(err))
@@ -2366,7 +2327,9 @@ function M:ChangeChapterCache(chapter)
                 cacheFilePath = '_NULL'
             })
         end)()
-
+        self:launchProcess(function()
+            self:refreshBookContent(chapter)
+        end)
         return wrap_response(true)
     end
 end
@@ -2433,8 +2396,11 @@ end
 
 function M:download_cover_img(book_cache_id, coverUrl)
     local img_src = self:getProxyCoverUrl(coverUrl)
-    local status, err = pcall(pGetUrlContent, img_src)
-
+    local status, err = pGetUrlContent({
+                        url = img_src,
+                        timeout = 15,
+                        maxtime = 60
+                })
     if status and err and err['data'] then
         local cover_img_data = err['data']
         local cover_img_path = H.getCoverCacheFilePath(book_cache_id) .. '.' .. ext

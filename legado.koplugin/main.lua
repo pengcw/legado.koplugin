@@ -8,19 +8,16 @@ local H = require("Legado/Helper") -- need to load first
 local Backend = require("Legado/Backend") -- two
 local BookReader = require("Legado/BookReader")
 local LibraryView = require("Legado/LibraryView")
+local verify_patched = require("patches.core").verifyPatched
 
 local Legado = WidgetContainer:extend({
     name = "开源阅读插件",
     patches_ok = nil
 })
 
-local function testPatches()
-    return not not require("apps/reader/modules/readerrolling").c8eeb679f
-end
-
 function Legado:init()
     -- on open FileManager or ReaderUI
-    self.patches_ok = testPatches()
+    self.patches_ok = verify_patched()
     if not H.plugin_path then
         H.initialize("legado", self.path)
     end
@@ -58,6 +55,12 @@ function Legado:onDispatcherRegisterActions()
         category = "none",
         event = "ShowLegadoToc",
         title = _("返回 Legado 目录"),
+        reader = true
+    })
+    Dispatcher:registerAction("show_legado_search", {
+        category = "none",
+        event = "ShowLegadoSearch",
+        title = _("以书籍信息搜索 Legado 书源"),
         reader = true
     })
 end

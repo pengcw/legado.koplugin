@@ -5,6 +5,7 @@ local logger = require("logger")
 local dbg = require("dbg")
 local Event = require("ui/event")
 local ReaderUI = require("apps/reader/readerui")
+local verify_patched = require("patches.core").verifyPatched
 
 local Device = require("device")
 local Screen = Device.screen
@@ -32,7 +33,7 @@ function M:show(options)
     local book_path = options.chapter.cacheFilePath
 
     if self.is_showing and ReaderUI.instance then
-        if ReaderUI.instance.rolling and ReaderUI.instance.rolling.c8eeb679f ~= true and
+        if ReaderUI.instance.rolling and verify_patched(ReaderUI.instance.rolling) ~= true and
             ReaderUI.instance.rolling.c8eeb679k ~= true then
             M.overriderollingHandler()
         end

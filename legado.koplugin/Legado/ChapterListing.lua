@@ -227,7 +227,7 @@ function ChapterListing:onMenuHold(item)
             end)
         end
     }}, {{
-        text = table.concat({Icons.FA_DOWNLOAD, (isDownLoaded and ' 删除' or ' 下载'), '缓存'}),
+        text = table.concat({Icons.FA_DOWNLOAD, (isDownLoaded and ' 刷新' or ' 下载'), '章节'}),
         callback = function()
             UIManager:close(dialog)
             Backend:HandleResponse(Backend:ChangeChapterCache({
