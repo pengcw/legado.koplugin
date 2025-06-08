@@ -32,7 +32,8 @@ local M = Menu:extend{
     last_index = nil,
     -- callback to be called when pressing the back button
     on_return_callback = nil,
-    results_menu_container = nil
+    results_menu_container = nil,
+    _last_search_input = nil
 }
 
 function M:init()
@@ -531,13 +532,18 @@ local function validateInput(text)
     return type(text) == 'string' and text:gsub("%s+", "") ~= ""
 end
 
-function M:searchAndShow(onReturnCallback)
+function M:searchAndShow(onReturnCallback, def_input)
     local inputText = ""
     local dialog
+
+    if self._last_search_input and not def_input then
+        def_input = self._last_search_input
+    end
     dialog = MessageBox:input(
         "请键入要搜索的书籍或作者名称：\n(多源搜索可使用 '=书名' 语法精确匹配)", nil, {
             title = '搜索书籍',
             input_hint = "如：剑来",
+            input = def_input,
             buttons = {{{
                 text = "单源搜索",
                 callback = function()
@@ -884,7 +890,7 @@ function M:onCloseUI()
     end
     if self.paths then
         local path = table.remove(self.paths)
-        if path then
+        if path and type(path.callback) == "function" then
             path.callback()
         end
     end

@@ -1,5 +1,16 @@
 local logger = require("logger")
 
+--- Common timeout values
+-- Large content 块超时 总超时
+local LARGE_BLOCK_TIMEOUT = 10
+local LARGE_TOTAL_TIMEOUT = 30
+-- File downloads
+local FILE_BLOCK_TIMEOUT = 15
+local FILE_TOTAL_TIMEOUT = 60
+-- Upstream defaults
+local DEFAULT_BLOCK_TIMEOUT = 60
+local DEFAULT_TOTAL_TIMEOUT = -1   
+
 local default_headers = {
     ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
 }
@@ -56,7 +67,7 @@ local function pGetUrlContent(options, is_create)
 
     local url = options.url
     local timeout = options.timeout or 10
-    local maxtime = options.maxtime or 30
+    local maxtime = options.maxtime or options.timeout + 20
     local file_fp = options.file
 
     local parsed = socket_url.parse(url)

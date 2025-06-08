@@ -333,7 +333,7 @@ M.joinPath = function(path1, path2)
 end
 
 M.checkAndCreateFolder = function(d_path)
-    if not util.pathExists(d_path) then
+    if not util.directoryExists(d_path) then
         util.makePath(d_path)
     end
     return d_path
