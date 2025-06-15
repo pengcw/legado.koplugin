@@ -61,25 +61,33 @@ local function split_title_advanced(title)
     end
 
     local words_len = #words
-    if count == 0 or count == words_len then
-        return "", title
+    if count > 0 and count < words_len then
+        local part_end = count
+        local subpart_start = count + 1
+        -- 跳过字符
+        if is_need_clean == true then
+            subpart_start = subpart_start + 1
+        end
+
+        if subpart_start > words_len then
+            -- 去掉结尾字符
+            return "", table.concat(words, "", 1, words_len - 1)
+        end
+        local part = table.concat(words, "", 1, part_end)
+        local subpart = table.concat(words, "", subpart_start)
+        -- logger.info(part, subpart)
+        return part, subpart
     end
 
-    local part_end = count
-    local subpart_start = count + 1
-    -- 跳过字符
-    if is_need_clean == true then
-        subpart_start = subpart_start + 1
+    -- 回退支持: 中文“第X章/节/卷”开头
+    local matched = title:match("^(第[%d一二三四五六七八九十百千万零〇两]+[章节卷集篇回话页季部])")
+    if matched and #matched < #title then
+        local part = matched
+        local subpart = title:sub(#matched + 1)
+        return part, subpart
     end
-
-    if subpart_start > words_len then
-        -- 去掉结尾字符
-        return "", table.concat(words, "", 1, words_len - 1)
-    end
-    local part = table.concat(words, "", 1, part_end)
-    local subpart = table.concat(words, "", subpart_start)
-    -- logger.info(part, subpart)
-    return part, subpart
+    
+    return "", title
 end
 
 M.addCssRes = function(book_cache_id)

@@ -625,7 +625,7 @@ function M:getBookinfo(bookShelfId, bookCacheId)
     local sql_stmt = [[
     SELECT bookCacheId, name, author, bookUrl, origin, originName, 
     originOrder, durChapterIndex, durChapterPos, durChapterTime, durChapterTitle, 
-    wordCount, intro, totalChapterNum, kind, sortOrder, cacheExt FROM books WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId =? ;
+    wordCount, intro, totalChapterNum, kind, sortOrder, cacheExt, coverUrl FROM books WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId =? ;
     ]]
     local result = self:execute(sql_stmt, {bookShelfId, bookCacheId})
     local book = {}
@@ -652,7 +652,8 @@ function M:getBookinfo(bookShelfId, bookCacheId)
                 totalChapterNum = tonumber(row[14]),
                 kind = row[15],
                 sortOrder = tonumber(row[16]),
-                cacheExt = row[17]
+                cacheExt = row[17],
+                coverUrl = row[18]
             }
         end
     end

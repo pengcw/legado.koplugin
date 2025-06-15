@@ -1842,7 +1842,12 @@ function M:getProxyCoverUrl(coverUrl)
         return coverUrl
     end
     local server_address = self.settings_data.data['server_address']
-    return table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
+    if self:_isReader3() then
+        local api_root_url = server_address:gsub("/reader3$", "")
+        return socket_url.absolute(api_root_url, coverUrl)
+    else
+        return table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
+    end
 end
 
 function M:getProxyEpubUrl(bookUrl, htmlUrl)
@@ -2394,7 +2399,11 @@ function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
     checkTask()
 end
 
-function M:download_cover_img(book_cache_id, coverUrl)
+function M:download_cover_img(book_cache_id, coverUrl, cover_path_no_ext)
+    if not (H.is_str(book_cache_id) and H.is_str(coverUrl) and H.is_str(cover_path_no_ext)) then
+        logger.err("download_cover_img parameter error")
+        return
+    end
     local img_src = self:getProxyCoverUrl(coverUrl)
     local status, err = pGetUrlContent({
                         url = img_src,
@@ -2403,8 +2412,28 @@ function M:download_cover_img(book_cache_id, coverUrl)
                 })
     if status and err and err['data'] then
         local cover_img_data = err['data']
-        local cover_img_path = H.getCoverCacheFilePath(book_cache_id) .. '.' .. ext
-        util.writeToFile(cover_img_data, cover_img_path)
+        local path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
+
+        local cover_img_path = string.format("%s.%s", path_no_ext, err['ext'] or "jpg")
+        local dir, image_filename = util.splitFilePathName(cover_img_path)
+        if not (dir and image_filename) then
+            logger.err("download_cover_img name error: ",dir, image_filename)
+            return
+        end
+
+        H.checkAndCreateFolder(dir)
+
+        local cover_file_name = util.getSafeFilename(image_filename)
+        if not cover_file_name then
+            logger.err("download_cover_img getSafeFilename error")
+            return
+        end
+        local safe_cover_img_path = H.joinPath(dir, image_filename)
+        util.writeToFile(cover_img_data, safe_cover_img_path, true)
+
+        return cover_img_path, image_filename
+    else
+        logger.err("download_cover_img error: ", err)
     end
 end
 

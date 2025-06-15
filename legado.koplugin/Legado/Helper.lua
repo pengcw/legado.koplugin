@@ -236,6 +236,10 @@ M.flatten = function(tbl)
 
     return result
 end
+-- pay attention to infinite recursion
+M.deep_equal = function(a, b)
+    return util.tableEquals(a, b, true)
+end
 
 M.require_on_exported_call = function(require_path)
     return setmetatable({}, {
@@ -268,11 +272,11 @@ M.n_to_b = function(n)
 end
 -- 路径转换
 M.replaceAllInvalidChars = function(str)
-    if util.replaceAllInvalidChars then 
-            return util.replaceAllInvalidChars(str)
+    if util.replaceAllInvalidChars then
+        return util.replaceAllInvalidChars(str)
     end
     if str then
-        return str:gsub('[\\,%/,:,%*,%?,%",%<,%>,%|]','_')
+        return str:gsub('[\\,%/,:,%*,%?,%",%<,%>,%|]', '_')
     end
 end
 
@@ -335,6 +339,9 @@ end
 M.checkAndCreateFolder = function(d_path)
     if not util.directoryExists(d_path) then
         util.makePath(d_path)
+        if not util.directoryExists(d_path) then
+            os.execute(string.format('"mkdir -p "%s"', d_path))
+        end
     end
     return d_path
 end
@@ -342,46 +349,42 @@ end
 M.getUserSettingsPath = function()
     return M.joinPath(DataStorage:getSettingsDir(), M.plugin_name .. '.lua')
 end
-
 M.getUserPatchesDirectory = function()
     local patches_dir = M.joinPath(DataStorage:getDataDir(), 'patches')
     return M.checkAndCreateFolder(patches_dir)
 end
-
 M.getKoreaderDirectory = function()
     return DataStorage:getDataDir()
 end
-
 M.getTempDirectory = function()
     local plugin_cache_dir = M.plugin_name .. '.cache'
     local plugin_cache_path = M.joinPath(DataStorage:getDataDir(), 'cache/' .. plugin_cache_dir)
     return M.checkAndCreateFolder(plugin_cache_path)
 end
-
 M.getPluginDirectory = function()
     local plugin_path_bak = table.concat({DataStorage:getDataDir(), "/plugins/", M.plugin_name, '.koplugin'})
     return M.plugin_path or plugin_path_bak
 end
-
 M.getBookCachePath = function(book_cache_id)
     assert(type(book_cache_id) == "string", "Error: The variable is not a string.")
     local plugin_cache_path = M.getTempDirectory()
     local book_cache_path = M.joinPath(plugin_cache_path, book_cache_id .. '.sdr')
     M.checkAndCreateFolder(book_cache_path)
-    M.checkAndCreateFolder(M.joinPath(book_cache_path,"resources"))
+    M.checkAndCreateFolder(M.joinPath(book_cache_path, "resources"))
     return book_cache_path
 end
-
 M.getCoverCacheFilePath = function(book_cache_id)
     local book_cache_path = M.getBookCachePath(book_cache_id)
     return M.joinPath(book_cache_path, 'cover')
 end
-
 M.getChapterCacheFilePath = function(book_cache_id, chapters_index, book_name)
     book_name = util.getSafeFilename(book_name)
     local book_cache_path = M.getBookCachePath(book_cache_id)
-    local chapter_cache_name =  string.format("%s-%s", book_name or "", chapters_index)
+    local chapter_cache_name = string.format("%s-%s", book_name or "", chapters_index)
     return M.joinPath(book_cache_path, chapter_cache_name)
 end
-
+M.getHomeDir = function()
+    return G_reader_settings and G_reader_settings:readSetting("home_dir") or
+               require("apps/filemanager/filemanagerutil").getDefaultDir()
+end
 return M
