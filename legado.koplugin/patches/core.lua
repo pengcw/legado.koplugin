@@ -27,7 +27,13 @@ M.install = function()
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
         end
-        return type(file_path) == 'string' and file_path:lower():find('cache/legado.cache/', 1, true)
+        return type(file_path) == 'string' and file_path:lower():find('/cache/legado.cache/', 1, true) or false
+    end
+    local is_legado_browser_path = function(file_path, instance)
+        if instance and instance.document and instance.document.file then
+            file_path = instance.document.file
+        end
+        return type(file_path) == 'string' and file_path:find("/Legado\u{200B}书目/", 1, true) or false
     end
     local ReaderRolling = require("apps/reader/modules/readerrolling")
     local onGotoViewRel_original = ReaderRolling.onGotoViewRel
@@ -61,7 +67,7 @@ M.install = function()
     local ReadHistory = require("readhistory")
     local original_addItem = ReadHistory.addItem
     function ReadHistory:addItem(file, ts, no_flush)
-        if is_legado_path(file) then
+        if is_legado_path(file) or is_legado_browser_path(file) then
             return
         end
         return original_addItem(self, file, ts, no_flush)
@@ -75,20 +81,52 @@ M.install = function()
     local ReaderToc = require("apps/reader/modules/readertoc")
     local original_onShowToc = ReaderToc.onShowToc
     function ReaderToc:onShowToc()
-        if self.ui and is_legado_path(nil, self.ui) then
+        if is_legado_path(nil, self.ui) then
             self.ui:handleEvent(Event:new("ShowLegadoToc"))
             return true
         else
             return original_onShowToc(self)
         end
     end
-    local ReaderUI = require("apps/reader/readerui")
-    local original_showFileManager = ReaderUI.showFileManager
-    function ReaderUI:showFileManager(file, selected_files)
-        original_showFileManager(self, file, selected_files)
-        local FileManager = require("apps/filemanager/filemanager")
-        if is_legado_path(file) and FileManager.instance and FileManager.instance.handleEvent then
-            FileManager.instance:handleEvent(Event:new("ShowLegadoLibraryView"))
+    local FileManager = require("apps/filemanager/filemanager")
+    local original_showOpenWithDialog = FileManager.showOpenWithDialog
+    function FileManager:showOpenWithDialog(file)
+        if file and is_legado_browser_path(file) then
+            self:handleEvent(Event:new("ShowLegadoLibraryView"))
+        else
+            original_showOpenWithDialog(self, file)
+        end
+    end
+    local original_showFiles = FileManager.showFiles
+    function FileManager:showFiles(path, focused_file, selected_files)
+        if is_legado_path(path) then
+            local home_dir = G_reader_settings:readSetting("home_dir") or
+                                 require("apps/filemanager/filemanagerutil").getDefaultDir()
+            if home_dir then
+                local legado_homedir = home_dir .. "/Legado\u{200B}书目"
+                path = legado_homedir
+            end
+        end
+        original_showFiles(self, path, focused_file, selected_files)
+    end
+    local filemanagerutil = require("apps/filemanager/filemanagerutil")
+    local original_genBookCoverButton = filemanagerutil.genBookCoverButton
+    function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
+        if file and is_legado_browser_path(file) then
+            return {
+                text = "legado 设置",
+                enabled = true,
+                callback = function()
+                    caller_callback()
+                    local ui = require("apps/filemanager/filemanager").instance or
+                                   require("apps/reader/readerui").instance
+                    if ui then
+                        ui:handleEvent(Event:new("ShowLegadoBrowserOption", file))
+                    end
+                end
+            }
+        else
+            return original_genBookCoverButton(file, book_props, caller_callback, button_disabled)
         end
     end
     -- fix koreader .cbz next chapter crash

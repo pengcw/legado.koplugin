@@ -15,7 +15,6 @@ local Screen = Device.screen
 local Backend = require("Legado/Backend")
 local Icons = require("Legado/Icons")
 local MessageBox = require("Legado/MessageBox")
-local BookReader = require("Legado/BookReader")
 local StreamImageView = require("Legado/StreamImageView")
 local H = require("Legado/Helper")
 
@@ -34,8 +33,8 @@ local ChapterListing = Menu:extend{
     chapter_sorting_mode = nil,
     all_chapters_count = nil,
     on_return_callback = nil,
+    on_show_chapter_callback = nil,
     ui_refresh_time = nil,
-    book_reader = nil
 }
 
 function ChapterListing:init()
@@ -66,7 +65,6 @@ end
 
 function ChapterListing:updateChapterList()
     self:refreshItems()
-    self:gotoLastReadChapter()
     Backend:onBookOpening(self.bookinfo.cache_id)
 end
 
@@ -86,9 +84,8 @@ function ChapterListing:refreshItems(no_recalculate_dimen)
         self.multilines_show_more_text = true
         self.items_per_page = 1
     end
-
     Menu.updateItems(self, nil, no_recalculate_dimen)
-
+    self:gotoLastReadChapter()
 end
 
 function ChapterListing:generateEmptyViewItemTable()
@@ -134,7 +131,7 @@ end
 function ChapterListing:onReturn()
     local path = table.remove(self.paths)
     self:closeUI()
-    path.callback()
+    pcall(path.callback)
 end
 
 function ChapterListing:onCloseWidget()
@@ -142,7 +139,7 @@ function ChapterListing:onCloseWidget()
     Menu.onCloseWidget(self)
 end
 
-function ChapterListing:fetchAndShow(bookinfo, onReturnCallback, accept_cached_results)
+function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results)
     accept_cached_results = accept_cached_results or false
 
     if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.cache_id) then
@@ -158,8 +155,8 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallback, accept_cached_r
     local chapter_listing = ChapterListing:new{
         bookinfo = bookinfo,
         chapter_sorting_mode = settings.chapter_sorting_mode,
-        on_return_callback = onReturnCallback,
-
+        on_return_callback = onReturnCallBack,
+        on_show_chapter_callback = showChapterCallBack,
         covers_fullscreen = true,
         subtitle = "目录",
         title = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
@@ -327,7 +324,7 @@ function ChapterListing:onSwipe(arg, ges_ev)
     Menu.onSwipe(self, arg, ges_ev)
 end
 
-function ChapterListing:onBookReaderCallback(chapter)
+function ChapterListing:onBookReaderCallback(chapter, closeReaderUiCallback)
 
     local nextChapter = Backend:findNextChapter({
         chapters_index = chapter.chapters_index,
@@ -341,12 +338,12 @@ function ChapterListing:onBookReaderCallback(chapter)
         nextChapter.call_event = chapter.call_event
         self:openChapterOnReader(nextChapter, true)
     else
-
-        BookReader:closeReaderUi(function()
-            self:refreshItems(true)
-            UIManager:show(self)
-            self.book_reader = nil
-        end)
+        if H.is_func(closeReaderUiCallback) then
+            closeReaderUiCallback(function()
+                self:refreshItems(true)
+                UIManager:show(self)
+            end)
+        end
     end
 
 end
@@ -378,32 +375,7 @@ function ChapterListing:onRefreshChapters()
 end
 
 function ChapterListing:showReaderUI(chapter)
-
-    ChapterListing.onReturnCallback = function()
-        self:refreshItems(true)
-        UIManager:show(self)
-    end
-
-    ChapterListing.onStartOfBookCallback = function()
-        chapter.call_event = 'pre'
-        self:onBookReaderCallback(chapter)
-    end
-
-    ChapterListing.onEndOfBookCallback = function()
-        chapter.call_event = 'next'
-        self:onBookReaderCallback(chapter)
-    end
-
-    self.book_reader = BookReader:show({
-        chapter = chapter,
-        on_end_of_book_callback = ChapterListing.onEndOfBookCallback,
-        on_start_of_book_callback = ChapterListing.onStartOfBookCallback,
-        on_return_callback = ChapterListing.onReturnCallback,
-        chapter_call_event = chapter.call_event
-    })
-
-    Backend:after_reader_chapter_show(chapter)
-
+    self.on_show_chapter_callback(chapter)
 end
 
 function ChapterListing:openChapterOnReader(chapter, is_callback)
@@ -677,4 +649,3 @@ function ChapterListing:openMenu()
 end
 
 return ChapterListing
-
