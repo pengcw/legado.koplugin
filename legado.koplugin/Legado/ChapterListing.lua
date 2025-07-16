@@ -18,7 +18,7 @@ local MessageBox = require("Legado/MessageBox")
 local StreamImageView = require("Legado/StreamImageView")
 local H = require("Legado/Helper")
 
-if not dbg.log then 
+if not dbg.log then
     dbg.log = logger.dbg
 end
 
@@ -28,13 +28,17 @@ local ChapterListing = Menu:extend{
     is_popout = false,
     title = "catalogue",
     align_baselines = true,
+    is_borderless = true,
+    linesize = 0,
+    single_line = true,
+    toc_items_per_page_default = 14,
 
     bookinfo = nil,
     chapter_sorting_mode = nil,
     all_chapters_count = nil,
     on_return_callback = nil,
     on_show_chapter_callback = nil,
-    ui_refresh_time = nil,
+    ui_refresh_time = nil
 }
 
 function ChapterListing:init()
@@ -111,16 +115,10 @@ function ChapterListing:generateItemTableFromChapters(chapters)
         table.insert(item_table, {
             chapters_index = chapter.chapters_index,
             text = chapter.title or tostring(chapter.chapters_index),
-            mandatory = mandatory
+            mandatory = mandatory ~= "" and mandatory or "  "
         })
-
     end
-
     return item_table
-end
-
-function ChapterListing:closeUI()
-    Menu.onClose(self)
 end
 
 function ChapterListing:onClose()
@@ -129,9 +127,13 @@ function ChapterListing:onClose()
 end
 
 function ChapterListing:onReturn()
-    local path = table.remove(self.paths)
-    self:closeUI()
-    pcall(path.callback)
+    Menu.onClose(self)
+    if H.is_tbl(self.paths) then
+        local path = table.remove(self.paths)
+        if H.is_tbl(path) and H.is_func(path.callback) then
+            pcall(path.callback)
+        end
+    end
 end
 
 function ChapterListing:onCloseWidget()
@@ -139,7 +141,7 @@ function ChapterListing:onCloseWidget()
     Menu.onCloseWidget(self)
 end
 
-function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results)
+function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, hide)
     accept_cached_results = accept_cached_results or false
 
     if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.cache_id) then
@@ -152,25 +154,34 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
         MessageBox:error('获取设置出错')
         return
     end
+
+    local items_per_page = G_reader_settings:readSetting("toc_items_per_page") or self.toc_items_per_page_default
+    local items_font_size = G_reader_settings:readSetting("toc_items_font_size") or Menu.getItemFontSize(items_per_page)
+    local items_with_dots = G_reader_settings:nilOrTrue("toc_items_with_dots")
+
     local chapter_listing = ChapterListing:new{
         bookinfo = bookinfo,
         chapter_sorting_mode = settings.chapter_sorting_mode,
         on_return_callback = onReturnCallBack,
         on_show_chapter_callback = showChapterCallBack,
-        covers_fullscreen = true,
+
         subtitle = "目录",
+        with_dots = items_with_dots,
+        items_per_page = items_per_page,
+        items_font_size = items_font_size,
         title = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
             Backend:getSettings().stream_image_view == true) and "[流式]" or "")
     }
-    UIManager:show(chapter_listing)
+    if not hide then
+        UIManager:show(chapter_listing)
+    end
     return chapter_listing
 end
 
 function ChapterListing:gotoLastReadChapter()
     local last_read_chapter = Backend:getLastReadChapter(self.bookinfo.cache_id)
     if H.is_num(last_read_chapter) then
-        last_read_chapter = tonumber(last_read_chapter + 1)
-        self:onGotoPage(self:getPageNumber(last_read_chapter))
+        self:switchItemTable(nil, self.item_table, last_read_chapter)
     end
 end
 
@@ -194,7 +205,7 @@ function ChapterListing:onMenuChoice(item)
         end)
         Backend:show_notice("流式漫画开启")
     else
-        self:openChapterOnReader(chapter)
+        self:showReaderUI(chapter)
     end
 end
 
@@ -280,7 +291,7 @@ function ChapterListing:onMenuHold(item)
                         dbg.log('向后下载出错：', H.errorHandler(err))
                     end
                 end,
-                extra_callback =function()
+                extra_callback = function()
                     MessageBox:confirm("请确认缓存全部章节 (短时间大量下载有可能触发反爬)",
                         function(result)
                             if result then
@@ -317,35 +328,9 @@ function ChapterListing:onSwipe(arg, ges_ev)
     local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
     if direction == "south" then
         self:onRefreshChapters()
-
         return
     end
-
     Menu.onSwipe(self, arg, ges_ev)
-end
-
-function ChapterListing:onBookReaderCallback(chapter, closeReaderUiCallback)
-
-    local nextChapter = Backend:findNextChapter({
-        chapters_index = chapter.chapters_index,
-        call_event = chapter.call_event,
-        book_cache_id = chapter.book_cache_id,
-        totalChapterNum = chapter.totalChapterNum
-    })
-
-    if nextChapter ~= nil then
-
-        nextChapter.call_event = chapter.call_event
-        self:openChapterOnReader(nextChapter, true)
-    else
-        if H.is_func(closeReaderUiCallback) then
-            closeReaderUiCallback(function()
-                self:refreshItems(true)
-                UIManager:show(self)
-            end)
-        end
-    end
-
 end
 
 function ChapterListing:onRefreshChapters()
@@ -375,43 +360,9 @@ function ChapterListing:onRefreshChapters()
 end
 
 function ChapterListing:showReaderUI(chapter)
-    self.on_show_chapter_callback(chapter)
-end
-
-function ChapterListing:openChapterOnReader(chapter, is_callback)
-
-    local cache_chapter = Backend:getCacheChapterFilePath(chapter)
-
-    if (H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)) then
-        if is_callback ~= true then
-            self:closeUI()
-        end
-        self:showReaderUI(cache_chapter)
-    else
-        Backend:closeDbManager()
-        return MessageBox:loading("正在下载正文", function()
-            return Backend:downloadChapter(chapter)
-        end, function(state, response)
-            if state == true then
-                Backend:HandleResponse(response, function(data)
-                    if not H.is_tbl(data) or not H.is_str(data.cacheFilePath) then
-                        MessageBox:error('下载失败')
-                        return
-                    end
-                    if is_callback ~= true then
-                        self:closeUI()
-                    end
-                    self:showReaderUI(data)
-                end, function(err_msg)
-                    Backend:show_notice("请检查并刷新书架")
-                    MessageBox:error(err_msg or '错误')
-                end)
-            end
-
-        end)
-
+    if H.is_func(self.on_show_chapter_callback) then
+        self.on_show_chapter_callback(chapter)
     end
-
 end
 
 function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, down_chapters_count, dismiss_callback,
@@ -517,12 +468,11 @@ function ChapterListing:syncProgressShow(chapter)
                     }, true)
                     self:refreshItems(true)
                     Backend:show_notice('同步完成')
-                    local last_chapter = tonumber(bookinfo.durChapterIndex + 1)
-                    self:onGotoPage(self:getPageNumber(last_chapter))
+                    self:switchItemTable(nil, self.item_table, tonumber(bookinfo.durChapterIndex))
                     self.ui_refresh_time = os.time()
                 end
             end, function(err_msg)
-                MessageBox:error('同步失败：'..tostring(err_msg))
+                MessageBox:error('同步失败：' .. tostring(err_msg))
             end)
         end
     end)
@@ -538,8 +488,8 @@ function ChapterListing:openMenu()
             UIManager:close(dialog)
             NetworkMgr:runWhenOnline(function()
                 require("Legado/BookSourceResults"):autoChangeSource(self.bookinfo, function()
-                        self:onReturn()
-                    end) 
+                    self:onReturn()
+                end)
             end)
         end
     }}, {{
@@ -645,7 +595,5 @@ function ChapterListing:openMenu()
     }
 
     UIManager:show(dialog)
-
 end
-
 return ChapterListing

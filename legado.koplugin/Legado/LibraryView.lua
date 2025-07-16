@@ -24,7 +24,7 @@ local LibraryView = {
     disk_available = nil,
     -- record the current reading items
     selected_item = nil,
-    chapter_listing = nil,
+    book_toc = nil,
     ui_refresh_time = os.time(),
     displayed_chapter = nil,
     readerui_is_showing = nil,
@@ -36,18 +36,12 @@ local LibraryView = {
     book_browser_homedir = nil
 }
 
-function LibraryView:init(start_hidden)
-    self.book_browser_homedir = self:getBrowserHomeDir()
-    local mode_is_browser = self:BookViewIsBrowserMode()
-    local view = not mode_is_browser and self:getMenuWidget() or self:getBrowserWidget()
-
-    if not start_hidden then
-        view:show_view()
+function LibraryView:init()
+    if LibraryView.instance then
+        return
     end
+    self.book_browser_homedir = self:getBrowserHomeDir(true)
     self:backupDbWithPreCheck()
-
-    view:refreshItems()
-    self[not mode_is_browser and "book_menu" or "book_browser"] = view
     LibraryView.instance = self
 end
 
@@ -99,32 +93,33 @@ function LibraryView:backupDbWithPreCheck()
 end
 
 function LibraryView:fetchAndShow()
-    local library_view = LibraryView.instance
-    if not library_view then
-        self:init()
-    else
-        library_view.book_menu = self:getMenuWidget()
-        library_view.book_menu:show_view()
-        library_view.book_menu:refreshItems(true)
+    local library_view = LibraryView.instance or self:getInstance()
+    local is_first = not LibraryView.instance
+    local use_browser = not self:isDisableBrowserMode() and is_first and self:browserViewHasLnk()
+    local widget = use_browser and self:getBrowserWidget() or self:getMenuWidget()
+    if widget then
+        widget:show_view()
+        widget:refreshItems()
     end
     return self
 end
 
-function LibraryView:BookViewIsBrowserMode()
-    local lua_config_path = self:getBrowserConfigPath()
-    if util.fileExists(lua_config_path) then
-        local lua_config = Backend:getLuaConfig(lua_config_path)
-        if lua_config and lua_config.data and next(lua_config.data) then
-            return true
-        end
-    end
-    return false
+function LibraryView:isDisableBrowserMode()
+    local settings = Backend:getSettings()
+    return settings and settings.disable_browser == true
+end
+function LibraryView:browserViewHasLnk()
+    local browser_homedir = self:getBrowserHomeDir(true)
+    return browser_homedir and util.directoryExists(browser_homedir) and not util.isEmptyDir(browser_homedir)
 end
 
-function LibraryView:addBkShortcut(bookinfo)
-    if NetworkMgr:isConnected() then
-        self:getBrowserWidget()
-        self.book_browser:addBookShortcut(bookinfo)
+function LibraryView:addBkShortcut(bookinfo, always_add)
+    if not always_add and self:isDisableBrowserMode() then
+        return
+    end
+    local browser = self:getBrowserWidget()
+    if browser then
+        browser:addBookShortcut(bookinfo)
     end
 end
 
@@ -215,18 +210,17 @@ function LibraryView:openInstalledReadSource()
 end
 
 function LibraryView:openBrowserMenu(file)
-    local dialog
     self:getInstance()
     self:getBrowserWidget()
+    local dialog
     local buttons = {{{
         text = "清空书籍快捷方式",
         callback = function()
             UIManager:close(dialog)
             MessageBox:confirm("是否清除所有书籍快捷方式?", function(result)
                 if result then
-                    self.book_browser:goHome()
-                    local browser_homedir = self:getBrowserHomeDir()
-                    if self.book_browser:deleteFile(browser_homedir) then
+                    local browser_homedir = self:getBrowserHomeDir(true)
+                    if self:deleteFile(browser_homedir) then
                         MessageBox:notice("已清除")
                     end
                 end
@@ -272,7 +266,7 @@ function LibraryView:openBrowserMenu(file)
             end
         end
     }}, {{
-        text = "其他设置",
+        text = "更多设置",
         callback = function()
             UIManager:close(dialog)
             self:openMenu()
@@ -295,14 +289,21 @@ function LibraryView:openMenu()
     self:getInstance()
     local settings = Backend:getSettings()
     local buttons = {{{
-        text = Icons.FA_BOOK .. " 漫画模式 " .. (settings.stream_image_view and '[流式]' or '[缓存]'),
+        text = Icons.FA_GLOBE .. " Legado WEB地址",
+        callback = function()
+            UIManager:close(dialog)
+            self:openInstalledReadSource()
+        end
+    }}, {{
+        text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,
+            (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
             MessageBox:confirm(string.format(
                 "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
                 (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
                 if result then
-                    settings.stream_image_view = not settings.stream_image_view
+                    settings.stream_image_view = not settings.stream_image_view or nil
                     Backend:HandleResponse(Backend:saveSettings(settings), function(data)
                         MessageBox:notice("设置成功")
                         self:closeMenu()
@@ -316,13 +317,32 @@ function LibraryView:openMenu()
             })
         end
     }}, {{
-        text = Icons.FA_GLOBE .. " Legado WEB地址",
+        text = string.format("%s 自动生成快捷方式 %s", Icons.FA_FOLDER,
+            (settings.disable_browser and Icons.UNICODE_STAR_OUTLINE or Icons.UNICODE_STAR)),
         callback = function()
             UIManager:close(dialog)
-            self:openInstalledReadSource()
+            MessageBox:confirm(string.format(
+                "自动生成快捷方式：%s \r\n \r\n 打开书籍目录时自动在文件浏览器 Home 目录中生成对应书籍快捷方式，支持封面显示, 关闭后可在书架菜单手动生成",
+                (settings.disable_browser and '[关闭]' or '[开启]')), function(result)
+                if result then
+                    local ok_msg = "设置已开启"
+                    settings.disable_browser = not settings.disable_browser or nil
+                    if settings.disable_browser then
+                        ok_msg = "设置已关闭，请手动删除目录"
+                    end
+                    Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                        MessageBox:notice(ok_msg)
+                    end, function(err_msg)
+                        MessageBox:error('设置失败:', err_msg)
+                    end)
+                end
+            end, {
+                ok_text = "切换",
+                cancel_text = "取消"
+            })
         end
     }}, {{
-        text = Icons.FA_TIMES .. ' ' .. "Clear all caches",
+        text = string.format("%s Clear all caches", Icons.FA_TIMES),
         callback = function()
             UIManager:close(dialog)
             MessageBox:confirm(
@@ -441,18 +461,73 @@ function LibraryView:openLegadoFolder(path, focused_file, selected_files, done_c
     end)
 end
 
+function LibraryView:loadAndRenderChapter(chapter)
+
+    local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+
+    if (H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)) then
+        self:showReaderUI(cache_chapter)
+    else
+        Backend:closeDbManager()
+        return MessageBox:loading("正在下载正文", function()
+            return Backend:downloadChapter(chapter)
+        end, function(state, response)
+            if state == true then
+                Backend:HandleResponse(response, function(data)
+                    if not H.is_tbl(data) or not H.is_str(data.cacheFilePath) then
+                        MessageBox:error('下载失败')
+                        return
+                    end
+                    self:showReaderUI(data)
+                end, function(err_msg)
+                    Backend:show_notice("请检查并刷新书架")
+                    MessageBox:error(err_msg or '错误')
+                end)
+            end
+
+        end)
+    end
+end
+
 function LibraryView:ReaderUIEventCallback(chapter_call_event)
-    self.chapter_call_event = chapter_call_event
+    if not (H.is_str(chapter_call_event) and H.is_tbl(self.displayed_chapter)) then
+        return
+    end
     local chapter = self.displayed_chapter
+    self.chapter_call_event = chapter_call_event
     chapter.call_event = chapter_call_event
-    self.chapter_listing:onBookReaderCallback(chapter, function(done_callback)
-        self:openLegadoFolder(nil, nil, nil, done_callback)
-    end)
+
+    local nextChapter = Backend:findNextChapter({
+        chapters_index = chapter.chapters_index,
+        call_event = chapter.call_event,
+        book_cache_id = chapter.book_cache_id,
+        totalChapterNum = chapter.totalChapterNum
+    })
+
+    if H.is_tbl(nextChapter) then
+        nextChapter.call_event = chapter.call_event
+        self:loadAndRenderChapter(nextChapter)
+    else
+        self:openLegadoFolder(nil, nil, nil, function()
+            if self.book_toc then
+                UIManager:show(self.book_toc)
+            end
+        end)
+    end
 end
 
 function LibraryView:showReaderUI(chapter)
+    if not (H.is_tbl(chapter) and H.is_str(chapter.cacheFilePath)) then
+        return
+    end
     self.displayed_chapter = chapter
     local book_path = chapter.cacheFilePath
+    if not util.fileExists(book_path) then
+        return MessageBox:error(book_path, "不存在")
+    end
+    if self.book_toc then
+        UIManager:close(self.book_toc)
+    end
     if ReaderUI.instance then
         ReaderUI.instance:switchDocument(book_path, true)
     else
@@ -462,7 +537,18 @@ function LibraryView:showReaderUI(chapter)
     Backend:after_reader_chapter_show(chapter)
 end
 
-function LibraryView:initializeRegisterEvent(legado_parent)
+function LibraryView:initializeRegisterEvent(parent_ref)
+    local DocSettings = require("docsettings")
+    local FileManager = require("apps/filemanager/filemanager")
+    local util = require("util")
+    local logger = require("logger")
+    local Event = require("ui/event")
+    local UIManager = require("ui/uimanager")
+    local ChapterListing = require("Legado/ChapterListing")
+    local Backend = require("Legado/Backend")
+    local H = require("Legado/Helper")
+
+    local library_view_ref = self
 
     local is_legado_path = function(file_path, instance)
         if instance and instance.document and instance.document.file then
@@ -477,12 +563,12 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         return type(file_path) == 'string' and file_path:find("/Legado\u{200B}书目/", 1, true) or false
     end
     local get_chapter_event = function()
-        if LibraryView.instance then
-            return LibraryView.instance.chapter_call_event
+        if library_view_ref.instance then
+            return library_view_ref.instance.chapter_call_event
         end
     end
 
-    function legado_parent:onShowLegadoLibraryView()
+    function parent_ref:onShowLegadoLibraryView()
         -- FileManager menu only
         if not (self.ui and self.ui.document) then
             self:openLibraryView()
@@ -490,17 +576,68 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         return true
     end
 
-    function legado_parent:onShowLegadoToc(book_cache_id, onReturnCallBack)
-        LibraryView:getInstance()
-        if not LibraryView.instance then
+    function parent_ref:openLastReadChapter(book_cache_id)
+        local last_read_chapter = Backend:getLastReadChapter(book_cache_id)
+        library_view_ref:getInstance()
+        if not library_view_ref.instance then
+            logger.warn("openLastReadChapter LibraryView instance not loaded")
+            return
+        end
+        if H.is_num(last_read_chapter) then
+            local bookinfo = Backend:getBookInfoCache(book_cache_id)
+            if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
+                -- no sync
+                self:onShowLegadoLibraryView()
+                MessageBox:notice("书籍不存在于书架,请刷新同步")
+                return
+            end
+
+            local chapters_index = last_read_chapter - 1
+            if chapters_index < 0 then
+                chapters_index = 0
+            end
+            local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+            if H.is_tbl(chapter) then
+                if not library_view_ref.instance.book_toc then
+                    library_view_ref.instance.book_toc = ChapterListing:fetchAndShow({
+                        cache_id = bookinfo.cache_id,
+                        bookUrl = bookinfo.bookUrl,
+                        durChapterIndex = bookinfo.durChapterIndex,
+                        name = bookinfo.name,
+                        author = bookinfo.author,
+                        cacheExt = bookinfo.cacheExt,
+                        origin = bookinfo.origin,
+                        originName = bookinfo.originName,
+                        originOrder = bookinfo.originOrder
+                    }, function()
+                    end, function(chapter)
+                        library_view_ref.instance:loadAndRenderChapter(chapter)
+                    end, true, true)
+                end
+                chapter.call_event = "next"
+                library_view_ref.instance:loadAndRenderChapter(chapter)
+                return true
+            end
+        end
+
+        local dir = library_view_ref.instance:getBrowserHomeDir()
+        self:onShowLegadoToc(book_cache_id, function()
+            -- Sometimes LibraryView instance may not start
+            library_view_ref:openLegadoFolder(dir)
+        end)
+    end
+
+    function parent_ref:onShowLegadoToc(book_cache_id, onReturnCallBack)
+        library_view_ref:getInstance()
+        if not library_view_ref.instance then
             logger.warn("ShowLegadoToc LibraryView instance not loaded")
             return true
         end
         if not book_cache_id then
-            if LibraryView.instance.displayed_chapter then
-                book_cache_id = LibraryView.instance.displayed_chapter.book_cache_id
-            elseif LibraryView.instance.selected_item then
-                book_cache_id = LibraryView.instance.selected_item.cache_id
+            if library_view_ref.instance.displayed_chapter then
+                book_cache_id = library_view_ref.instance.displayed_chapter.book_cache_id
+            elseif library_view_ref.instance.selected_item then
+                book_cache_id = library_view_ref.instance.selected_item.cache_id
             end
         end
         if not book_cache_id then
@@ -521,7 +658,7 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         end
 
         local fetch_show_chapter = function()
-            LibraryView.instance.chapter_listing = ChapterListing:fetchAndShow({
+            library_view_ref.instance.book_toc = ChapterListing:fetchAndShow({
                 cache_id = bookinfo.cache_id,
                 bookUrl = bookinfo.bookUrl,
                 durChapterIndex = bookinfo.durChapterIndex,
@@ -532,13 +669,14 @@ function LibraryView:initializeRegisterEvent(legado_parent)
                 originName = bookinfo.originName,
                 originOrder = bookinfo.originOrder
             }, onReturnCallBack, function(chapter)
-                LibraryView.instance:showReaderUI(chapter)
+                library_view_ref.instance:loadAndRenderChapter(chapter)
             end, true)
         end
 
         -- If under ReaderUI, exit it first.
+        local ReaderUI = require("apps/reader/readerui")
         if ReaderUI and ReaderUI.instance then
-            LibraryView:openLegadoFolder(nil, nil, nil, fetch_show_chapter)
+            library_view_ref:openLegadoFolder(nil, nil, nil, fetch_show_chapter)
         else
             fetch_show_chapter()
         end
@@ -552,7 +690,7 @@ function LibraryView:initializeRegisterEvent(legado_parent)
             return page_count
         end
     end
-    function legado_parent:onDocSettingsLoad(doc_settings, document)
+    function parent_ref:onDocSettingsLoad(doc_settings, document)
         if not (doc_settings and doc_settings.data and document) then
             return
         end
@@ -565,9 +703,12 @@ function LibraryView:initializeRegisterEvent(legado_parent)
             end
 
             local book_defaults_path = H.joinPath(directory, "book_defaults.lua")
-            local document_is_new = doc_settings:readSetting("doc_props") == nil
+            -- document.is_new = nil ? at readerui
+            local document_is_new = (document.is_new == true) or doc_settings:readSetting("doc_props") == nil
+            if document_is_new then
+                doc_settings:saveSetting("legado_doc_is_new", true)
+            end
 
-            -- document.is_new = nil ?
             if util.fileExists(book_defaults_path) then
                 local book_defaults = Backend:getLuaConfig(book_defaults_path)
                 if book_defaults and H.is_tbl(book_defaults.data) then
@@ -596,7 +737,7 @@ function LibraryView:initializeRegisterEvent(legado_parent)
             -- Does it affect the future ？
             --[=[
                     if document_is_new then  
-                        local bookinfo = LibraryView.instance.chapter_listing.bookinfo
+                        local bookinfo = library_view_ref.instance.book_toc.bookinfo
                         doc_settings.data.doc_props = doc_settings.data.doc_props or {}
                         doc_settings.data.doc_props.title = bookinfo.name or "N/A"
                         doc_settings.data.doc_props.authors = bookinfo.author or "N/A"
@@ -618,7 +759,7 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         end
     end
     -- or UIManager:flushSettings() --onFlushSettings
-    function legado_parent:onSaveSettings()
+    function parent_ref:onSaveSettings()
         if not (self.ui and self.ui.doc_settings) then
             return
         end
@@ -636,7 +777,7 @@ function LibraryView:initializeRegisterEvent(legado_parent)
                 local book_defaults = Backend:getLuaConfig(book_defaults_path)
                 local doc_settings_data = util.tableDeepCopy(self.ui.doc_settings.data)
                 local is_updated
-        
+
                 for k, v in pairs(doc_settings_data) do
                     if persisted_settings_keys[k] and not H.deep_equal(book_defaults.data[k], v) then
                         book_defaults.data[k] = v
@@ -654,7 +795,7 @@ function LibraryView:initializeRegisterEvent(legado_parent)
     end
 
     -- .cbz call twice ?
-    function legado_parent:onReaderReady(doc_settings)
+    function parent_ref:onReaderReady(doc_settings)
         -- logger.dbg("document.is_pic",self.ui.document.is_pic)
         -- logger.dbg(doc_settings.data.summary.status)
         if not (doc_settings and doc_settings.data and self.ui) then
@@ -662,14 +803,14 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         end
 
         if not is_legado_path(nil, self.ui) then
-            if LibraryView.instance then
-                LibraryView.instance.readerui_is_showing = false
+            if library_view_ref.instance then
+                library_view_ref.instance.readerui_is_showing = false
             end
             return
         elseif self.ui.link and self.ui.document then
 
-            if LibraryView.instance then
-                LibraryView.instance.readerui_is_showing = true
+            if library_view_ref.instance then
+                library_view_ref.instance.readerui_is_showing = true
             end
 
             local chapter_call_event = get_chapter_event()
@@ -677,7 +818,9 @@ function LibraryView:initializeRegisterEvent(legado_parent)
                 return
             end
 
-            local document_is_new = doc_settings:readSetting("doc_props") == nil
+            local document_is_new =
+                (self.ui.document.is_new == true) or doc_settings:readSetting("legado_doc_is_new") == true
+            doc_settings:delSetting("legado_doc_is_new")
             if document_is_new and chapter_call_event == "next" then
                 return
             end
@@ -711,10 +854,10 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         end
     end
 
-    function legado_parent:onCloseDocument()
+    function parent_ref:onCloseDocument()
         if is_legado_path(nil, self.ui) then
-            if LibraryView.instance then
-                LibraryView.instance.readerui_is_showing = false
+            if library_view_ref.instance then
+                library_view_ref.instance.readerui_is_showing = false
             end
             if not self.patches_ok then
                 require("readhistory"):removeItemByPath(self.document.file)
@@ -722,7 +865,7 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         end
     end
 
-    function legado_parent:onShowLegadoSearch()
+    function parent_ref:onShowLegadoSearch()
         local def_search_input
         if self.ui and self.ui.doc_settings and self.ui.doc_settings.data.doc_props then
             local doc_props = self.ui.doc_settings.data.doc_props
@@ -736,25 +879,12 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         return true
     end
 
-    function legado_parent:onEndOfBook()
+    function parent_ref:onEndOfBook()
         if is_legado_path(nil, self.ui) then
-            LibraryView:getInstance()
-            if LibraryView.instance then
+            library_view_ref:getInstance()
+            if library_view_ref.instance then
                 local chapter_call_event = "next"
-                LibraryView.instance:ReaderUIEventCallback(chapter_call_event)
-            else
-                self:openLibraryView()
-            end
-        end
-        return true
-    end
-
-    function legado_parent:onStartOfBook()
-        if is_legado_path(nil, self.ui) then
-            LibraryView:getInstance()
-            if LibraryView.instance then
-                local chapter_call_event = "pre"
-                LibraryView.instance:ReaderUIEventCallback(chapter_call_event)
+                library_view_ref.instance:ReaderUIEventCallback(chapter_call_event)
             else
                 self:openLibraryView()
             end
@@ -762,44 +892,67 @@ function LibraryView:initializeRegisterEvent(legado_parent)
         end
     end
 
-    function legado_parent:onShowLegadoBrowserOption(file)
-        -- logger.info("Received ShowLegadoBrowserOption event", file)
-        LibraryView:getInstance()
-        if FileManager.instance and LibraryView.instance then
-            LibraryView.instance:openBrowserMenu(file)
+    function parent_ref:onStartOfBook()
+        if is_legado_path(nil, self.ui) then
+            library_view_ref:getInstance()
+            if library_view_ref.instance then
+                local chapter_call_event = "pre"
+                library_view_ref.instance:ReaderUIEventCallback(chapter_call_event)
+            else
+                self:openLibraryView()
+            end
+            return true
         end
     end
 
-    table.insert(legado_parent.ui, 3, legado_parent)
+    function parent_ref:onShowLegadoBrowserOption(file)
+        -- logger.info("Received ShowLegadoBrowserOption event", file)
+        library_view_ref:getInstance()
+        if FileManager.instance and library_view_ref.instance then
+            library_view_ref.instance:openBrowserMenu(file)
+        end
+    end
 
-    function legado_parent:openFile(file)
-        if is_legado_browser_path(file) then
-            local dir, name = util.splitFilePathName(file)
-            -- prioritize using custom matedata book_cache_id
-            local doc_settings = DocSettings:open(file)
-            local book_cache_id = doc_settings:readSetting("book_cache_id")
-            if not book_cache_id and dir then
-                -- use dir here
-                local lua_config_path = H.joinPath(dir, "legado.sdr/config.lua")
-                if util.fileExists(lua_config_path) then
-                    local cover_md5 = util.partialMD5(file)
-                    local lua_config = Backend:getLuaConfig(lua_config_path)
-                    book_cache_id = lua_config:readSetting(cover_md5)
-                end
-            end
+    function parent_ref:onSuspend()
+        Backend:closeDbManager()
+    end
 
-            if book_cache_id then
-                self:onShowLegadoToc(book_cache_id, function()
-                    -- Sometimes LibraryView instance may not start
-                    LibraryView:openLegadoFolder(dir)
-                end)
-                return true
+    table.insert(parent_ref.ui, 3, parent_ref)
+
+    function parent_ref:openFile(file)
+        if not H.is_str(file) then
+            return
+        end
+        local function open_regular_file(file)
+            local ReaderUI = require("apps/reader/readerui")
+            UIManager:broadcastEvent(Event:new("SetupShowReader"))
+            ReaderUI:showReader(file, nil, true)
+        end
+        if not (is_legado_browser_path(file) and file:find("\u{200B}.html", 1, true)) then
+            open_regular_file(file)
+            return
+        end
+        -- prioritize using custom matedata book_cache_id
+        local doc_settings = DocSettings:open(file)
+        local book_cache_id = doc_settings:readSetting("book_cache_id")
+
+        if not book_cache_id then
+            local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, file)
+            if ok and lnk_config then
+                book_cache_id = lnk_config:readSetting("book_cache_id")
             end
         end
-
-        local ReaderUI = require("apps/reader/readerui")
-        UIManager:broadcastEvent(Event:new("SetupShowReader"))
-        ReaderUI:showReader(file, nil, true)
+        if book_cache_id then
+            local ok, err = pcall(function()
+                return self:openLastReadChapter(book_cache_id)
+            end)
+            if not ok then
+                logger.err("fail to open file:", err)
+            end
+            return true
+        else
+            open_regular_file(file)
+        end
     end
 end
 
@@ -808,73 +961,71 @@ local function init_book_browser(parent)
         return parent.book_browser
     end
 
-    parent.book_browser = {
-        item_table = {}
+    local book_browser = {
+        parent = parent
     }
 
-    function parent.book_browser:show_view(focused_file, selected_files)
-        local homedir = parent:getBrowserHomeDir()
-        if homedir then
-            parent:openLegadoFolder(homedir, focused_file, selected_files)
+    function book_browser:show_view(focused_file, selected_files)
+        local homedir = self.parent:getBrowserHomeDir()
+        if not homedir then
+            return
         end
+        local current_dir = self.parent:getBrowserCurrentDir()
+        if current_dir and current_dir == homedir then
+            if not self.parent.book_menu then
+                self.parent.book_menu = self.parent:getMenuWidget()
+            end
+            self.parent.book_menu:show_view()
+            self.parent.book_menu:refreshItems(true)
+            return
+        end
+        self.parent:openLegadoFolder(homedir, focused_file, selected_files)
     end
 
-    function parent.book_browser:goHome()
+    function book_browser:goHome()
         if FileManager.instance then
             FileManager.instance:goHome()
         end
     end
 
-    function parent.book_browser:refreshItems()
+    function book_browser:refreshItems()
         if FileManager.instance then
             FileManager.instance:onRefresh()
         end
     end
 
-    function parent.book_browser:deleteFile(file, is_file)
-        if FileManager.instance then
-            return FileManager.instance:deleteFile(file, is_file)
-        end
-        -- util.removeFile(file)
-        -- local purgeDir = require("ffi/util").purgeDir
-        -- pcall(purgeDir, file)
+    function book_browser:deleteFile(file, is_file)
+        self.parent:deleteFile(file, is_file)
     end
-
-    function parent.book_browser:verifyBooksMetadata()
-
+    function book_browser:verifyBooksMetadata()
         -- possible cover name change
-        local browser_homedir = parent:getBrowserHomeDir()
+        local browser_homedir = self.parent:getBrowserHomeDir()
+        if not util.directoryExists(browser_homedir) then
+            return
+        end
 
-        local lua_config_path = parent:getBrowserConfigPath()
-        local lua_config = Backend:getLuaConfig(lua_config_path)
+        local function is_valid_book_file(fullpath, name)
+            return util.fileExists(fullpath) and H.is_str(name) and name:find("\u{200B}.html", 1, true)
+        end
+
+        local function get_book_id(fullpath)
+            local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, fullpath)
+            if ok and H.is_tbl(lnk_config) and lnk_config.readSetting then
+                return lnk_config:readSetting("book_cache_id")
+            end
+            local doc_settings = DocSettings:open(fullpath)
+            return doc_settings:readSetting("book_cache_id")
+        end
 
         util.findFiles(browser_homedir, function(fullpath, name)
-            if not (util.fileExists(fullpath) and H.is_str(name)) then
+            if not is_valid_book_file(fullpath, name) then
                 goto continue
             end
 
-            if name:match("%.lua$") then
-                goto continue
-            end
-
-            local DocumentRegistry = require("document/documentregistry")
-            if not DocumentRegistry:isImageFile(name) then
-                goto continue
-            end
-
-            local cover_md5 = util.partialMD5(fullpath)
-            if not cover_md5 then
-                goto continue
-            end
-
-            local book_cache_id = lua_config:readSetting(cover_md5)
+            local book_cache_id = get_book_id(fullpath)
             if not book_cache_id then
-                local doc_settings = DocSettings:open(fullpath)
-                local book_cache_id = doc_settings:readSetting("book_cache_id")
-                if not book_cache_id then
-                    self:deleteFile(fullpath, true)
-                    goto continue
-                end
+                self:deleteFile(fullpath, true)
+                goto continue
             end
 
             local bookinfo = Backend:getBookInfoCache(book_cache_id)
@@ -886,59 +1037,86 @@ local function init_book_browser(parent)
             self:refreshBookMetadata(nil, fullpath, bookinfo)
             ::continue::
         end, true)
-
     end
 
-    function parent.book_browser:getCustomMateData(filepath)
-        local custom_metadata_file = DocSettings:findCustomMetadataFile(filepath)
-        return custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
-    end
-
-    function parent.book_browser:addBookShortcut(bookinfo)
-        local browser_homedir = parent:getBrowserHomeDir()
-        if not (browser_homedir and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id and bookinfo.coverUrl) then
-            logger.err("addBookShortcut: parameter error")
+    function book_browser:wirteLnk(bookinfo)
+        local home_dir = self.parent:getBrowserHomeDir()
+        if not (home_dir and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id) then
+            logger.err("book_browser.wirteLnk: parameter error")
             return
         end
 
         local book_cache_id = bookinfo.cache_id
-        local cover_url = bookinfo.coverUrl
         local book_name = bookinfo.name
         local book_author = bookinfo.author or "未知作者"
-        H.checkAndCreateFolder(browser_homedir)
-        if not util.directoryExists(browser_homedir) then
-            logger.err("addBookShortcut: failed to create browser_homedir")
+
+        local book_lnk_name = string.format("%s-%s\u{200B}.html", book_name, book_author)
+        book_lnk_name = util.getSafeFilename(book_lnk_name)
+        if not book_lnk_name then
+            logger.err("book_browser.wirteLnk: getSafeFilename error")
+            return
+        end
+        local book_lnk_path = H.joinPath(home_dir, book_lnk_name)
+        if book_lnk_path and util.fileExists(book_lnk_path) then
+            return book_lnk_path, book_lnk_name
+        end
+
+        local book_lnk_config = Backend:getLuaConfig(book_lnk_path)
+        book_lnk_config:saveSetting("book_cache_id", book_cache_id):flush()
+
+        return book_lnk_path, book_lnk_name
+    end
+
+    function book_browser:getCustomMateData(filepath)
+        local custom_metadata_file = DocSettings:findCustomMetadataFile(filepath)
+        return custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
+    end
+
+    function book_browser:addBookShortcut(bookinfo)
+        local home_dir = self.parent:getBrowserHomeDir()
+        if not (home_dir and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id and bookinfo.coverUrl) then
+            logger.err("addBookShortcut: parameter error")
             return
         end
 
-        local lua_config_path = parent:getBrowserConfigPath()
-        local lua_config = Backend:getLuaConfig(lua_config_path)
-
-        local cover_file_name = lua_config:readSetting(book_cache_id)
-        if cover_file_name then
-            local cover_file_path = H.joinPath(browser_homedir, cover_file_name)
-
-            -- if it exists, check it matedata
-            if util.fileExists(cover_file_path) then
-                if self:getCustomMateData(cover_file_path) then
-                    -- logger.info("addBookShortcut inspect matedata")
-                    self:bind_provider(cover_file_path)
-                else
-                    logger.warn("addBookShortcut supplementary book metadata")
-                    self:refreshBookMetadata(cover_file_name, cover_file_path, bookinfo)
-                end
-                return true
-            end
+        local book_lnk_path, book_lnk_name = self:wirteLnk(bookinfo)
+        if not (book_lnk_path and util.fileExists(book_lnk_path)) then
+            logger.err("addBookShortcut: failed to create lnk")
+            return
         end
 
-        local cover_path_no_ext = H.joinPath(browser_homedir, string.format("%s-%s", book_name, book_author))
-        Backend:launchProcess(function()
-            local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
-            self:refreshBookMetadata(cover_name, cover_path, bookinfo)
-        end)
+        if not self:getCustomMateData(book_lnk_path) then
+            self:refreshBookMetadata(book_lnk_name, book_lnk_path, bookinfo)
+        else
+            self:bind_provider(book_lnk_path)
+        end
+
+        if DocSettings:findCustomCoverFile(book_lnk_path) then
+            return
+        end
+
+        if not NetworkMgr:isConnected() then
+            return
+        end
+        local book_cache_id = bookinfo.cache_id
+        local cover_url = bookinfo.coverUrl
+        if cover_url then
+            Backend:runTaskWithRetry(function()
+                if DocSettings:findCustomCoverFile(book_lnk_path) then
+                    self:emitMetadataChanged(book_lnk_path)
+                    return true
+                end
+            end, 12000, 2000)
+            Backend:launchProcess(function()
+                local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url)
+                if cover_path and util.fileExists(cover_path) then
+                    DocSettings:flushCustomCover(book_lnk_path, cover_path)
+                end
+            end)
+        end
     end
 
-    function parent.book_browser:emitMetadataChanged(path)
+    function book_browser:emitMetadataChanged(path)
         --[[
         local prop_updated = {
             filepath = file,
@@ -951,7 +1129,7 @@ local function init_book_browser(parent)
         UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
     end
 
-    function parent.book_browser:bind_provider(file)
+    function book_browser:bind_provider(file)
         local doc_settings = DocSettings:open(file)
         local provider = doc_settings:readSetting("provider")
         if provider ~= "legado" then
@@ -960,26 +1138,16 @@ local function init_book_browser(parent)
         return doc_settings
     end
 
-    function parent.book_browser:refreshBookMetadata(cover_name, cover_path, bookinfo)
-        cover_name = cover_name or (H.is_str(cover_path) and select(2, util.splitFilePathName(cover_path)))
-        if not (util.fileExists(cover_path) and H.is_str(cover_name) and H.is_tbl(bookinfo) and bookinfo.cache_id and
+    function book_browser:refreshBookMetadata(lnk_name, lnk_path, bookinfo)
+        lnk_name = lnk_name or (H.is_str(lnk_path) and select(2, util.splitFilePathName(lnk_path)))
+        if not (util.fileExists(lnk_path) and H.is_str(lnk_name) and H.is_tbl(bookinfo) and bookinfo.cache_id and
             bookinfo.name) then
             logger.err("browser.refreshBookMetadata parameter error")
             return
         end
 
         local book_cache_id = bookinfo.cache_id
-        local cover_md5 = util.partialMD5(cover_path)
-        local lua_config_path = parent:getBrowserConfigPath()
-        local lua_config = Backend:getLuaConfig(lua_config_path)
-
-        local config_book_cache_id = lua_config:readSetting(cover_md5)
-        if not config_book_cache_id then
-            lua_config:saveSetting(book_cache_id, cover_name)
-            lua_config:saveSetting(cover_md5, book_cache_id):flush()
-        end
-
-        local doc_settings = self:bind_provider(cover_path)
+        local doc_settings = self:bind_provider(lnk_path)
         if doc_settings and doc_settings.data then
             doc_settings.data = {}
             doc_settings:saveSetting("custom_props", {
@@ -990,20 +1158,21 @@ local function init_book_browser(parent)
             doc_settings:saveSetting("book_cache_id", book_cache_id)
             doc_settings:saveSetting("doc_props", {
                 pages = 1
-            }):flushCustomMetadata(cover_path)
+            }):flushCustomMetadata(lnk_path)
         end
 
-        self:emitMetadataChanged(cover_path)
+        self:emitMetadataChanged(lnk_path)
     end
 
-    return parent.book_browser
+    parent.book_browser = book_browser
+    return book_browser
 end
 
 local function init_book_menu(parent)
     if parent.book_menu then
         return parent.book_menu
     end
-    parent.book_menu = Menu:new{
+    local book_menu = Menu:new{
         name = "library_view",
         is_enable_shortcut = false,
         is_popout = false,
@@ -1020,16 +1189,17 @@ local function init_book_menu(parent)
         close_callback = function()
             Backend:closeDbManager()
         end,
-        show_search_item = nil
+        show_search_item = nil,
+        parent_ref = parent
     }
 
     if Device:hasKeys({"Home"}) or Device:hasDPad() then
-        parent.book_menu.key_events.Close = {{Device.input.group.Back}}
-        parent.book_menu.key_events.RefreshLibrary = {{"Home"}}
-        parent.book_menu.key_events.FocusRight = {{"Right"}}
+        book_menu.key_events.Close = {{Device.input.group.Back}}
+        book_menu.key_events.RefreshLibrary = {{"Home"}}
+        book_menu.key_events.FocusRight = {{"Right"}}
     end
 
-    function parent.book_menu:onFocusRight()
+    function book_menu:onFocusRight()
         local focused_widget = Menu.getFocusItem(self)
         if focused_widget then
 
@@ -1045,7 +1215,7 @@ local function init_book_menu(parent)
             return true
         end
     end
-    function parent.book_menu:onSwipe(arg, ges_ev)
+    function book_menu:onSwipe(arg, ges_ev)
         local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
         if direction == "south" then
             self:onRefreshLibrary()
@@ -1054,7 +1224,7 @@ local function init_book_menu(parent)
         Menu.onSwipe(self, arg, ges_ev)
     end
 
-    function parent.book_menu:refreshItems(no_recalculate_dimen)
+    function book_menu:refreshItems(no_recalculate_dimen)
         local books_cache_data = Backend:getBookShelfCache()
         if H.is_tbl(books_cache_data) and #books_cache_data > 0 then
             self.item_table = self:generateItemTableFromMangas(books_cache_data)
@@ -1068,18 +1238,18 @@ local function init_book_menu(parent)
         self:updateItems(nil, no_recalculate_dimen)
     end
 
-    function parent.book_menu:onPrimaryMenuChoice(item)
+    function book_menu:onPrimaryMenuChoice(item)
         if not item.cache_id then
-            parent:openSearchBooksDialog()
+            self.parent_ref:openSearchBooksDialog()
             return
         end
         local bookinfo = Backend:getBookInfoCache(item.cache_id)
-        parent.selected_item = item
-        parent.onReturnCallback = function()
+        self.parent_ref.selected_item = item
+        self.parent_ref.onReturnCallback = function()
             self:show_view()
             self:refreshItems(true)
         end
-        parent.chapter_listing = ChapterListing:fetchAndShow({
+        self.parent_ref.book_toc = ChapterListing:fetchAndShow({
             cache_id = bookinfo.cache_id,
             bookUrl = bookinfo.bookUrl,
             durChapterIndex = bookinfo.durChapterIndex,
@@ -1089,16 +1259,16 @@ local function init_book_menu(parent)
             origin = bookinfo.origin,
             originName = bookinfo.originName,
             originOrder = bookinfo.originOrder
-        }, parent.onReturnCallback, function(chapter)
-            parent:showReaderUI(chapter)
+        }, self.parent_ref.onReturnCallback, function(chapter)
+            self.parent_ref.instance:loadAndRenderChapter(chapter)
         end, true)
         UIManager:nextTick(function()
-            parent:addBkShortcut(bookinfo)
+            self.parent_ref:addBkShortcut(bookinfo)
         end)
         self:onClose()
     end
 
-    function parent.book_menu:onRefreshLibrary()
+    function book_menu:onRefreshLibrary()
         NetworkMgr:runWhenOnline(function()
             Backend:closeDbManager()
             MessageBox:loading("Refreshing Library", function()
@@ -1109,7 +1279,7 @@ local function init_book_menu(parent)
                         MessageBox:notice('同步成功')
                         self.show_search_item = true
                         self:refreshItems()
-                        parent.ui_refresh_time = os.time()
+                        self.parent_ref.ui_refresh_time = os.time()
                     end, function(err_msg)
                         MessageBox:notice(response.message or '同步失败')
                     end)
@@ -1120,9 +1290,9 @@ local function init_book_menu(parent)
 
     end
 
-    function parent.book_menu:onMenuHold(item)
+    function book_menu:onMenuHold(item)
         if not item.cache_id then
-            parent:openSearchBooksDialog()
+            self.parent_ref:openSearchBooksDialog()
             return
         end
         local bookinfo = Backend:getBookInfoCache(item.cache_id)
@@ -1144,10 +1314,18 @@ local function init_book_menu(parent)
             no_ok_button = true,
             other_buttons_first = true,
             other_buttons = {{{
-                text = (bookinfo.sortOrder > 0) and '置顶' or '取消置顶',
+                text = (bookinfo.sortOrder > 0) and '置顶书籍' or '取消置顶',
                 callback = function()
                     Backend:setBooksTopUp(item.cache_id, bookinfo.sortOrder)
                     self:refreshItems(true)
+                end
+            }}, {{
+                text = "快捷方式",
+                callback = function()
+                    UIManager:nextTick(function()
+                        self.parent_ref:addBkShortcut(bookinfo, true)
+                    end)
+                    MessageBox:notice("已调用生成，请到 Home 目录查看")
                 end
             }}, {{
                 text = '换源',
@@ -1191,7 +1369,7 @@ local function init_book_menu(parent)
 
     end
 
-    function parent.book_menu:onMenuSelect(entry, pos)
+    function book_menu:onMenuSelect(entry, pos)
         if entry.select_enabled == false then
             return true
         end
@@ -1203,7 +1381,7 @@ local function init_book_menu(parent)
         end
     end
 
-    function parent.book_menu:generateEmptyViewItemTable()
+    function book_menu:generateEmptyViewItemTable()
         return {{
             text = string.format("No books found in library. Try%s swiping down to refresh.",
                 (Device:hasKeys({"Home"}) and ' Press the home button or ' or '')),
@@ -1212,7 +1390,7 @@ local function init_book_menu(parent)
         }}
     end
 
-    function parent.book_menu:generateItemTableFromMangas(books)
+    function book_menu:generateItemTableFromMangas(books)
         local item_table = {}
         if self.show_search_item == true then
             item_table[1] = {
@@ -1237,30 +1415,63 @@ local function init_book_menu(parent)
         return item_table
     end
 
-    function parent.book_menu:show_view()
+    function book_menu:show_view()
         UIManager:show(self)
     end
-    return parent.book_menu
+
+    parent.book_menu = book_menu
+    return book_menu
 end
 
-function LibraryView:getBrowserHomeDir()
-    local home_dir = H.getHomeDir()
-    self.book_browser_homedir = H.joinPath(home_dir, "Legado\u{200B}书目")
-    pcall(H.checkAndCreateFolder, self.book_browser_homedir)
+function LibraryView:getBrowserHomeDir(skip_check)
+    if not self.book_browser_homedir then
+        local home_dir = H.getHomeDir()
+        self.book_browser_homedir = H.joinPath(home_dir, "Legado\u{200B}书目")
+    end
+    if not skip_check then
+        local success, err = pcall(H.checkAndCreateFolder, self.book_browser_homedir)
+        if not (success and util.directoryExists(self.book_browser_homedir)) then
+            logger.err("LibraryView.getBrowserHomeDir: failed to create directory - " ..
+                           tostring(err or "unknown error"))
+            return nil
+        end
+    end
     return self.book_browser_homedir
 end
 
-function LibraryView:getBrowserConfigPath()
-    local browser_homedir = self:getBrowserHomeDir()
-    local lua_config_dir = H.joinPath(browser_homedir, "legado.sdr/")
-    pcall(H.checkAndCreateFolder, lua_config_dir)
-    local lua_config_path = H.joinPath(lua_config_dir, "config.lua")
-    return lua_config_path
+function LibraryView:deleteFile(file, is_file)
+    local exists = is_file and util.fileExists(file) or util.directoryExists(file)
+    if not exists then
+        return false
+    end
+
+    if FileManager.instance then
+        FileManager.instance:goHome()
+        FileManager.instance:deleteFile(file, is_file)
+        FileManager.instance:onRefresh()
+        return true
+    end
+    if is_file then
+        return util.removeFile(file)
+    else
+        return pcall(ffiUtil.purgeDir, file)
+    end
+end
+
+function LibraryView:getBrowserCurrentDir()
+    local file_manager = FileManager.instance
+    if file_manager and file_manager.file_chooser then
+        return file_manager.file_chooser.path
+    end
+    local readerui = ReaderUI.instance
+    if readerui then
+        return readerui:getLastDirFile()
+    end
 end
 
 function LibraryView:getInstance()
     if not LibraryView.instance then
-        self:init(true)
+        self:init()
     end
     return self
 end

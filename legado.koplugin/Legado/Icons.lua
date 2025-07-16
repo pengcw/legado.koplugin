@@ -1,5 +1,4 @@
 return {
-
     FA_CHECK_CIRCLE = "\u{F058}",
     FA_THUMB_TACK = "\u{F08D}",
     FA_FILE_ALT = "\u{F15C}",
@@ -54,9 +53,9 @@ return {
     UNICODE_CHECK = "\u{2713}",
     UNICODE_CROSS = "\u{2717}",
     UNICODE_STAR = "\u{2605}",
+    UNICODE_STAR_OUTLINE = "\u{2606}",
     UNICODE_HEART = "\u{2665}",
     UNICODE_WARNING = "\u{26A0}",
     UNICODE_INFO = "\u{2139}",
     UNICODE_GEAR = "\u{2699}"
-
 }

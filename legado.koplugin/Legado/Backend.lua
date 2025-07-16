@@ -297,7 +297,8 @@ function M:initialize()
             reader3_un = '',
             reader3_pwd = '',
             servers_history = {},
-            stream_image_view = false
+            stream_image_view = nil,
+            disable_browser = nil
         }
         self.settings_data:flush()
     end
@@ -2399,16 +2400,19 @@ function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
     checkTask()
 end
 
-function M:download_cover_img(book_cache_id, coverUrl, cover_path_no_ext)
-    if not (H.is_str(book_cache_id) and H.is_str(coverUrl) and H.is_str(cover_path_no_ext)) then
+function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
+    if not (H.is_str(book_cache_id) and H.is_str(cover_url)) then
         logger.err("download_cover_img parameter error")
         return
     end
-    local img_src = self:getProxyCoverUrl(coverUrl)
+    
+    cover_path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
+    
+    local img_src = self:getProxyCoverUrl(cover_url)
     local status, err = pGetUrlContent({
                         url = img_src,
                         timeout = 15,
-                        maxtime = 60
+                        maxtime = 60,
                 })
     if status and err and err['data'] then
         local cover_img_data = err['data']
@@ -2433,7 +2437,7 @@ function M:download_cover_img(book_cache_id, coverUrl, cover_path_no_ext)
 
         return cover_img_path, image_filename
     else
-        logger.err("download_cover_img error: ", err)
+        logger.err("download_cover_img error: ", cover_url, err)
     end
 end
 
