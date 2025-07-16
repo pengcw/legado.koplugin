@@ -189,7 +189,7 @@ function M:_installUpdate(update_zip_path)
     -- zip plugins/xxx
     local target_unzip_dir = H.getKoreaderDirectory()
 
-    local unzip_command = string.format("unzip -o '%s' -d '%s'", update_zip_path, target_unzip_dir)
+    local unzip_command = string.format("unzip -qqo '%s' -d '%s'", update_zip_path, target_unzip_dir)
     logger.dbg("installUpdate - Executing: " .. unzip_command)
     local ret_code, err_code, err_msg_os = os.execute(unzip_command)
     if ret_code ~= 0 then
