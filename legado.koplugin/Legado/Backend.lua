@@ -1042,10 +1042,13 @@ utf8proc_ssize_t utf8proc_iterate(const utf8proc_uint8_t *, utf8proc_ssize_t, ut
                 -- 计算起始指针，转换为Lua字符串
                 local char = ffi.string(str_p + pos - 1, bytes)
                 local ret_pos = tonumber(pos)
-                pos = reverse and (pos - bytes) or (pos + bytes - 1)
+                -- [修复] 修正了反向遍历成功时的指针更新逻辑
+                -- 它应该回退到当前字符之前的位置，以便下一次循环可以正确地处理前一个字节
+                pos = reverse and (pos - bytes + 1) or (pos + bytes - 1)
                 return ret_pos, tonumber(codepoint[0]), char
             elseif bytes < 0 then
-                pos = reverse and (pos - 1) or (pos + 1)
+                -- [修复] 解码失败时（bytes < 0），不做任何操作
+                -- 循环会自动将指针移动到前一个/后一个字节继续尝试，避免跳字节
             end
         end
     end
@@ -1436,11 +1439,20 @@ local txt2html = function(book_cache_id, content, title)
             if #title > 9 and string.find(line, title, 1, true) == 1 then
                 line = plain_text_replace(line, title, "", 1)
             end
+            
             local rep_text = line:match(util.UTF8_CHAR_PATTERN)
-            line = plain_text_replace(line, rep_text, "", 1)
-            el_tags = string.format('<p style="text-indent: 0em;"><span class="duokan-dropcaps-two">%s</span>%s</p>',
-                rep_text, line)
-            dropcaps = true
+            
+            -- [修复] 增加对 rep_text 的有效性检查
+            if rep_text and rep_text ~= "" then
+                -- 只有在成功获取到首字符时，才进行替换和格式化
+                line = plain_text_replace(line, rep_text, "", 1)
+                el_tags = string.format('<p style="text-indent: 0em;"><span class="duokan-dropcaps-two">%s</span>%s</p>',
+                    rep_text, line)
+                dropcaps = true
+            else
+                -- 如果没有有效的首字符（例如，行是空的或只包含不可见字符），则作为普通段落处理
+                el_tags = (line ~= "") and string.format('<p>%s</p>', line) or "<br>"
+            end
         else
             el_tags = (line ~= "") and string.format('<p>%s</p>', line) or "<br>"
         end
