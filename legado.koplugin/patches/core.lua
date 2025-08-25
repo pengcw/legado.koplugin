@@ -64,6 +64,20 @@ M.install = function()
         end
         return true
     end
+    local ReaderStatus = require("apps/reader/modules/readerstatus")
+    local addToMainMenu_readerstatus_orig = ReaderStatus.addToMainMenu
+    function ReaderStatus:addToMainMenu(menu_items)
+        if not is_legado_path(nil, self.ui) then
+            addToMainMenu_readerstatus_orig(self, menu_items)
+        end
+    end
+    local FileManagerBookInfo = require("apps/filemanager/filemanagerbookinfo")
+    local addToMainMenu_filemanagerbookinfo_orig = FileManagerBookInfo.addToMainMenu
+    function FileManagerBookInfo:addToMainMenu(menu_items)
+        if not is_legado_path(nil, self.ui) then
+            addToMainMenu_filemanagerbookinfo_orig(self, menu_items)
+        end
+    end
     local ReadHistory = require("readhistory")
     local original_addItem = ReadHistory.addItem
     function ReadHistory:addItem(file, ts, no_flush)
@@ -104,7 +118,12 @@ M.install = function()
                                  require("apps/filemanager/filemanagerutil").getDefaultDir()
             if home_dir then
                 local legado_homedir = home_dir .. "/Legado\u{200B}书目"
-                path = legado_homedir
+                local util = require("util")
+                if util and util.fileExists(legado_homedir) then
+                    path = legado_homedir
+                else
+                    path = home_dir
+                end
             end
         end
         original_showFiles(self, path, focused_file, selected_files)
@@ -114,7 +133,7 @@ M.install = function()
     function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
         if file and is_legado_browser_path(file) then
             return {
-                text = "legado 设置",
+                text = "legado 书籍",
                 enabled = true,
                 callback = function()
                     caller_callback()

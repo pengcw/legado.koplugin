@@ -7,7 +7,7 @@ local util = require("util")
 local md5 = require("ffi/sha2").md5
 local H = require("Legado/Helper")
 
-if not dbg.log then 
+if not dbg.log then
     dbg.log = logger.dbg
 end
 
@@ -117,7 +117,7 @@ function M:new(o)
 end
 
 function M:init()
-    self:_createDB()
+    self:_initDB()
 end
 
 function M:nil_object()
@@ -178,7 +178,7 @@ function M:_openDB()
     self.isConnected = true
     self.in_transaction = false
 
-    self.db:set_busy_timeout(15000)
+    self.db:set_busy_timeout(5000)
 
     dbg.v("Database opened successfully at: " .. self.dbPath)
 
@@ -187,10 +187,10 @@ function M:_openDB()
     return self.db
 end
 
-function M:_createDB()
-    local db = self:_openDB()
-
+function M:_initDB(is_repair)
+    local db
     local success, rc = pcall(function()
+        db = self:_openDB()
         db:exec(string.format("PRAGMA user_version=%d;", BOOKINFO_DB_VERSION))
         return db:exec(BOOKINFO_DB_SCHEMA)
     end)
@@ -200,6 +200,22 @@ function M:_createDB()
         self:closeDB()
     else
         dbg.log("Failed to initialize database schema. Return code: " .. tostring(rc))
+        local last_backup_db = self.dbPath .. ".bak"
+        local has_backup = util.fileExists(last_backup_db)
+        if has_backup then
+            H.copyFileFromTo(last_backup_db, self.dbPath)
+            util.removeFile(last_backup_db)
+            dbg.log("The backup database has been restored")
+        else
+            if util.fileExists(self.dbPath) then
+                util.removeFile(self.dbPath)
+                dbg.log("Removed corrupt database file")
+            end
+        end
+        if not is_repair then
+            self:closeDB()
+            self:_initDB(true)
+        end
     end
 end
 
@@ -221,7 +237,7 @@ end
 function M:getDB()
 
     if not util.fileExists(self.dbPath) then
-        self:_createDB()
+        self:_initDB()
     end
     if not self.isConnected or not self.db then
         return self:_openDB()
@@ -1376,6 +1392,53 @@ function M:getDownloadProgress(bookCacheId, target_indexes)
     ret = tonumber(ret)
 
     return ret
+end
+
+function M:setBooksTopStatus(bookShelfId, book_cache_id, isPinnedManually, isPinnedByTime)
+    if not (H.is_str(bookShelfId) and H.is_str(book_cache_id)) then
+        dbg.log('DB setBooksTopStatus error')
+        return false
+    end
+
+    local set_sortorder = 0
+    local where_sortorder = {
+        _where = ' > 0'
+    }
+    if 0 == isPinnedByTime then
+        local sql_stmt = [[
+        SELECT bookCacheId FROM books 
+        WHERE isEnabled = 1 AND bookShelfId = '%s' AND sortOrder != 0 
+        ORDER BY sortOrder DESC LIMIT 1;
+    ]]
+        sql_stmt = string.format(sql_stmt, bookShelfId)
+        local ok, firstBookCacheId = pcall(function()
+            return self:getDB():rowexec(sql_stmt)
+        end)
+        if ok and firstBookCacheId and firstBookCacheId == book_cache_id then
+            -- logger.info(book_cache_id, "it's the first, don't update it anymore")
+            return true
+        end
+
+        set_sortorder = {
+            _set = "= strftime('%s', 'now')"
+        }
+        where_sortorder = {
+            _where = ' > 0'
+        }
+    elseif 0 == isPinnedManually then 
+        set_sortorder = {
+            _set = "= strftime('%s', 'now')"
+        }
+        where_sortorder = 0
+    end
+
+    return self:dynamicUpdate('books', {
+        sortOrder = set_sortorder
+    }, {
+        bookCacheId = book_cache_id,
+        bookShelfId = bookShelfId,
+        sortOrder = where_sortorder
+    })
 end
 
 return M

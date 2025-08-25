@@ -50,51 +50,40 @@ function LibraryView:backupDbWithPreCheck()
     local last_backup_db = H.joinPath(temp_dir, "bookinfo.db.bak")
     local bookinfo_db_path = H.joinPath(temp_dir, "bookinfo.db")
 
-    -- 防御性编码,koreader又又崩了
+    if not util.fileExists(bookinfo_db_path) then
+        logger.warn("legado plugin: source database file does not exist - " .. bookinfo_db_path)
+        return false
+    end
+
+    local setting_data = Backend:getSettings()
+    local last_backup_time = setting_data.last_backup_time or 0
+    local has_backup = util.fileExists(last_backup_db)
+    local needs_backup = not has_backup or (os.time() - last_backup_time > 86400)
+
+    if not needs_backup then
+        return true
+    end
+
     local status, err = pcall(function()
         Backend:getBookShelfCache()
     end)
-    if status then
-        local setting_data = Backend:getSettings()
-        local last_backup_time = setting_data.last_backup_time
-        if not last_backup_time or os.time() - last_backup_time > 86400 then
-            if util.fileExists(last_backup_db) then
-                util.removeFile(last_backup_db)
-            end
-            H.copyFileFromTo(bookinfo_db_path, last_backup_db)
-            logger.info("legado plugin: backup successful")
-            setting_data.last_backup_time = os.time()
-            Backend:saveSettings(setting_data)
-        end
-    else
-        local has_backup = util.fileExists(last_backup_db)
-        logger.err('legado plugin err:', H.errorHandler(err))
-
-        MessageBox:confirm(string.format(
-            "初始化失败\n疑似缓存文件损坏，如果多次重试失败，请执行还原或者清理！"),
-            function(result)
-                if result then
-                    util.removeFile(bookinfo_db_path)
-                    if util.fileExists(last_backup_db) then
-                        H.copyFileFromTo(last_backup_db, bookinfo_db_path)
-                        util.removeFile(last_backup_db)
-                    end
-                    self:closeMenu()
-                    MessageBox:info(string.format("缓存文件损坏已%s，请重试打开",
-                        has_backup and "还原" or "清除"))
-                else
-                    UIManager:restartKOReader()
-                end
-            end, {
-                ok_text = has_backup and "还原" or "清除",
-                cancel_text = "取消"
-            })
+    if not status then
+        logger.err("legado plugin: database pre-check failed - " .. tostring(err))
+        return false
     end
+
+    if has_backup then
+        util.removeFile(last_backup_db)
+    end
+    H.copyFileFromTo(bookinfo_db_path, last_backup_db)
+    logger.info("legado plugin: backup successful")
+    setting_data.last_backup_time = os.time()
+    Backend:saveSettings(setting_data)
 end
 
 function LibraryView:fetchAndShow()
-    local library_view = LibraryView.instance or self:getInstance()
     local is_first = not LibraryView.instance
+    local library_view = LibraryView.instance or self:getInstance()
     local use_browser = not self:isDisableBrowserMode() and is_first and self:browserViewHasLnk()
     local widget = use_browser and self:getBrowserWidget() or self:getMenuWidget()
     if widget then
@@ -197,6 +186,9 @@ function LibraryView:openInstalledReadSource()
         title = "设置阅读 API 接口地址",
         input = setting_url,
         description = description,
+        use_available_height = true,
+        fullscreen = true,
+        condensed = true,
         save_callback = save_callback,
         allow_newline = false,
         reset_button_text = '填入历史',
@@ -577,12 +569,16 @@ function LibraryView:initializeRegisterEvent(parent_ref)
     end
 
     function parent_ref:openLastReadChapter(book_cache_id)
-        local last_read_chapter = Backend:getLastReadChapter(book_cache_id)
         library_view_ref:getInstance()
         if not library_view_ref.instance then
             logger.warn("openLastReadChapter LibraryView instance not loaded")
             return
         end
+        if not H.is_str(book_cache_id) then
+            MessageBox:notice("openLastReadChapter parameter error")
+            return
+        end
+        local last_read_chapter = Backend:getLastReadChapter(book_cache_id)
         if H.is_num(last_read_chapter) then
             local bookinfo = Backend:getBookInfoCache(book_cache_id)
             if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
@@ -592,32 +588,42 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 return
             end
 
+            local book_toc_instance = library_view_ref.instance.book_toc
+            if not (book_toc_instance and H.is_tbl(book_toc_instance.bookinfo) and book_toc_instance.bookinfo.cache_id ==
+                book_cache_id) then
+                library_view_ref.instance.book_toc = ChapterListing:fetchAndShow({
+                    cache_id = bookinfo.cache_id,
+                    bookUrl = bookinfo.bookUrl,
+                    durChapterIndex = bookinfo.durChapterIndex,
+                    name = bookinfo.name,
+                    author = bookinfo.author,
+                    cacheExt = bookinfo.cacheExt,
+                    origin = bookinfo.origin,
+                    originName = bookinfo.originName,
+                    originOrder = bookinfo.originOrder
+                }, function()
+                end, function(chapter)
+                    library_view_ref.instance:loadAndRenderChapter(chapter)
+                end, true, true)
+            end
+
             local chapters_index = last_read_chapter - 1
             if chapters_index < 0 then
                 chapters_index = 0
             end
             local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
-            if H.is_tbl(chapter) then
-                if not library_view_ref.instance.book_toc then
-                    library_view_ref.instance.book_toc = ChapterListing:fetchAndShow({
-                        cache_id = bookinfo.cache_id,
-                        bookUrl = bookinfo.bookUrl,
-                        durChapterIndex = bookinfo.durChapterIndex,
-                        name = bookinfo.name,
-                        author = bookinfo.author,
-                        cacheExt = bookinfo.cacheExt,
-                        origin = bookinfo.origin,
-                        originName = bookinfo.originName,
-                        originOrder = bookinfo.originOrder
-                    }, function()
-                    end, function(chapter)
-                        library_view_ref.instance:loadAndRenderChapter(chapter)
-                    end, true, true)
-                end
+            if H.is_tbl(chapter) and chapter.chapters_index then
+                -- jump to the reading position
                 chapter.call_event = "next"
                 library_view_ref.instance:loadAndRenderChapter(chapter)
-                return true
+            else
+                -- chapter does not exist, request refresh
+                if library_view_ref.instance.book_toc then
+                    UIManager:show(library_view_ref.instance.book_toc)
+                end
+                MessageBox:notice('请同步刷新目录数据')
             end
+            return true
         end
 
         local dir = library_view_ref.instance:getBrowserHomeDir()
@@ -1218,7 +1224,9 @@ local function init_book_menu(parent)
     function book_menu:onSwipe(arg, ges_ev)
         local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
         if direction == "south" then
-            self:onRefreshLibrary()
+            NetworkMgr:runWhenOnline(function()
+                self:onRefreshLibrary()
+            end)
             return
         end
         Menu.onSwipe(self, arg, ges_ev)
@@ -1240,7 +1248,9 @@ local function init_book_menu(parent)
 
     function book_menu:onPrimaryMenuChoice(item)
         if not item.cache_id then
-            self.parent_ref:openSearchBooksDialog()
+            require("Legado/BookSourceResults"):searchAndShow(function()
+                self:onRefreshLibrary()
+            end)
             return
         end
         local bookinfo = Backend:getBookInfoCache(item.cache_id)
@@ -1263,13 +1273,13 @@ local function init_book_menu(parent)
             self.parent_ref.instance:loadAndRenderChapter(chapter)
         end, true)
         UIManager:nextTick(function()
+            Backend:autoPinToTop(bookinfo.cache_id, bookinfo.sortOrder)
             self.parent_ref:addBkShortcut(bookinfo)
         end)
         self:onClose()
     end
 
     function book_menu:onRefreshLibrary()
-        NetworkMgr:runWhenOnline(function()
             Backend:closeDbManager()
             MessageBox:loading("Refreshing Library", function()
                 return Backend:refreshLibraryCache(parent.ui_refresh_time)
@@ -1285,9 +1295,6 @@ local function init_book_menu(parent)
                     end)
                 end
             end)
-
-        end)
-
     end
 
     function book_menu:onMenuHold(item)
@@ -1316,7 +1323,7 @@ local function init_book_menu(parent)
             other_buttons = {{{
                 text = (bookinfo.sortOrder > 0) and '置顶书籍' or '取消置顶',
                 callback = function()
-                    Backend:setBooksTopUp(item.cache_id, bookinfo.sortOrder)
+                    Backend:manuallyPinToTop(item.cache_id, bookinfo.sortOrder)
                     self:refreshItems(true)
                 end
             }}, {{
@@ -1424,10 +1431,25 @@ local function init_book_menu(parent)
 end
 
 function LibraryView:getBrowserHomeDir(skip_check)
-    if not self.book_browser_homedir then
-        local home_dir = H.getHomeDir()
-        self.book_browser_homedir = H.joinPath(home_dir, "Legado\u{200B}书目")
+    local home_dir = H.getHomeDir()
+    if not H.is_str(home_dir) then
+        logger.err("LibraryView.getBrowserHomeDir: home_dir is nil")
+        return nil
     end
+    local browser_dir_name = "Legado\u{200B}书目"
+    local expected_path = H.joinPath(home_dir, browser_dir_name)
+    -- nil or home_dir changed
+    if not H.is_str(self.book_browser_homedir) or self.book_browser_homedir ~= expected_path then
+        -- 特殊情况：设置以 browser_dir_name 为主目录
+        local clean_home_dir = home_dir:gsub("/+$", "")
+        local last_folder = clean_home_dir:match("([^/]+)$")
+        if last_folder and last_folder == browser_dir_name then
+            self.book_browser_homedir = home_dir
+        else
+            self.book_browser_homedir = expected_path
+        end
+    end
+
     if not skip_check then
         local success, err = pcall(H.checkAndCreateFolder, self.book_browser_homedir)
         if not (success and util.directoryExists(self.book_browser_homedir)) then

@@ -1438,6 +1438,11 @@ local txt2html = function(book_cache_id, content, title)
             -- 尝试清理重复标题 >9 避免单字误判
             if #title > 9 and string.find(line, title, 1, true) == 1 then
                 line = plain_text_replace(line, title, "", 1)
+                line = M:utf8_trim(line)
+                if line == "" then
+                    -- 抛弃仅重复标题行
+                    goto continue
+                end
             end
             
             local rep_text = line:match(util.UTF8_CHAR_PATTERN)
@@ -1457,6 +1462,7 @@ local txt2html = function(book_cache_id, content, title)
             el_tags = (line ~= "") and string.format('<p>%s</p>', line) or "<br>"
         end
         table.insert(lines, el_tags)
+        ::continue::
     end
 
     if #lines > 0 then
@@ -2195,30 +2201,14 @@ function M:getcompleteReadAheadChapters(current_chapter)
     return self.dbManager:getcompleteReadAheadChapters(current_chapter)
 end
 
-function M:setBooksTopUp(bookCacheId, sortOrder)
+function M:manuallyPinToTop(bookCacheId, sortOrder)
     local bookShelfId = self:getServerPathCode()
     if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
         return wrap_response(nil, '参数错误')
     end
-
-    local set_sortorder = 0
-    local where_sortorder = {
-        _where = ' > 0'
-    }
-    if sortOrder == 0 then
-        set_sortorder = {
-            _set = "= strftime('%s', 'now')"
-        }
-        where_sortorder = 0
-    end
-
-    self.dbManager:dynamicUpdate('books', {
-        sortOrder = set_sortorder
-    }, {
-        bookCacheId = bookCacheId,
-        bookShelfId = bookShelfId,
-        sortOrder = where_sortorder
-    })
+    self.dbManager:transaction(function()
+        return self.dbManager:setBooksTopStatus(bookShelfId, bookCacheId, sortOrder)
+    end)()
     return wrap_response(true)
 end
 
@@ -2227,22 +2217,17 @@ function M:getBookShelfCache()
     return self.dbManager:getAllBooksByUI(bookShelfId)
 end
 
-function M:onBookOpening(bookCacheId)
-    if not H.is_str(bookCacheId) then
-        return
+function M:autoPinToTop(bookCacheId, sortOrder)
+    if 0 == sortOrder then
+        -- If it is manually placed on top
+        return wrap_response(true)
     end
     local bookShelfId = self:getServerPathCode()
-    return self.dbManager:dynamicUpdate('books', {
-        sortOrder = {
-            _set = "= strftime('%s', 'now')"
-        }
-    }, {
-        bookCacheId = bookCacheId,
-        bookShelfId = bookShelfId,
-        sortOrder = {
-            _where = " > 0"
-        }
-    })
+    if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
+        return wrap_response(nil, '参数错误')
+    end
+    self.dbManager:setBooksTopStatus(bookShelfId, bookCacheId, nil, 0)
+    return wrap_response(true)
 end
 
 function M:getLastReadChapter(bookCacheId)
@@ -2602,9 +2587,9 @@ function M:after_reader_chapter_show(chapter)
     if chapter.isRead ~= true and NetworkMgr:isConnected() then
         local complete_count = self:getcompleteReadAheadChapters(chapter)
         if complete_count < 40 then
-            local preDownloadNum = 5
+            local preDownloadNum = 3
             if chapter.cacheExt and chapter.cacheExt == 'cbz' then
-                preDownloadNum = 3
+                preDownloadNum = 1
             end
             self:preLoadingChapters(chapter, preDownloadNum)
         end
