@@ -64,12 +64,7 @@ function ChapterListing:init()
     end
 
     self.ui_refresh_time = os.time()
-    self:updateChapterList()
-end
-
-function ChapterListing:updateChapterList()
     self:refreshItems()
-    Backend:onBookOpening(self.bookinfo.cache_id)
 end
 
 function ChapterListing:refreshItems(no_recalculate_dimen)
@@ -188,8 +183,10 @@ end
 function ChapterListing:onMenuChoice(item)
     local book_cache_id = self.bookinfo.cache_id
     local chapters_index = item.chapters_index
+    if item.chapters_index == nil then
+        return true
+    end
     local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
-
     if chapter.cacheExt == 'cbz' and Backend:getSettings().stream_image_view == true then
         ChapterListing.onReturnCallback = function()
             self:gotoLastReadChapter()
@@ -213,8 +210,11 @@ function ChapterListing:onMenuHold(item)
 
     local book_cache_id = self.bookinfo.cache_id
     local chapters_index = item.chapters_index
+    if item.chapters_index == nil then
+        self:onRefreshChapters()
+        return true
+    end
     local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
-
     local is_read = chapter.isRead
     local cacheFilePath = chapter.cacheFilePath
     local isDownLoaded = chapter.isDownLoaded
@@ -321,20 +321,20 @@ function ChapterListing:onMenuHold(item)
     }
 
     UIManager:show(dialog)
-
 end
 
 function ChapterListing:onSwipe(arg, ges_ev)
     local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
     if direction == "south" then
-        self:onRefreshChapters()
+        NetworkMgr:runWhenOnline(function()
+            self:onRefreshChapters()
+        end)
         return
     end
     Menu.onSwipe(self, arg, ges_ev)
 end
 
 function ChapterListing:onRefreshChapters()
-    NetworkMgr:runWhenOnline(function()
         Backend:closeDbManager()
         MessageBox:loading("正在刷新章节数据", function()
             return Backend:refreshChaptersCache({
@@ -355,7 +355,6 @@ function ChapterListing:onRefreshChapters()
                     end
                 end)
             end
-        end)
     end)
 end
 

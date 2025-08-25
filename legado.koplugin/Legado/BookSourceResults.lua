@@ -541,7 +541,7 @@ function M:searchAndShow(onReturnCallback, def_input)
     end
     dialog = MessageBox:input(
         "请键入要搜索的书籍或作者名称：\n(多源搜索可使用 '=书名' 语法精确匹配)", nil, {
-            title = '搜索书籍',
+            title = '添加书籍',
             input_hint = "如：剑来",
             input = def_input,
             buttons = {{{
