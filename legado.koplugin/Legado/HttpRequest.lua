@@ -83,6 +83,7 @@ local function pGetUrlContent(options, is_create)
         sink = not file_fp and (maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink)) or
             (maxtime and socketutil.file_sink(file_fp) or ltn12.sink.file(file_fp)),
         source = options.source,
+        redirect = options.redirect,
         -- Strictly customized TCP GitHub API error
         create = is_create and socketutil.tcp,
     }
