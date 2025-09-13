@@ -366,7 +366,6 @@ end
 
 function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, down_chapters_count, dismiss_callback,
     cancel_callback)
-
     if not H.is_num(begin_chapters_index) then
         MessageBox:error('下载参数错误')
         return
@@ -387,53 +386,40 @@ function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, dow
     if down_chapters_count == nil then
         down_chapters_count = Backend:getChapterCount(book_cache_id)
     end
-
     down_chapters_count = tonumber(down_chapters_count)
-    local status, err = Backend:preLoadingChapters(begin_chapter, down_chapters_count)
 
-    if not status then
-        MessageBox:error('后台下载任务提交出错', tostring(err))
+    if not (down_chapters_count and down_chapters_count > 0) then
+        MessageBox:error('没有查询到可下载章节')
         return
     end
 
-    local chapter_down_tasks = err
+    -- down_chapters_count > 10 call progressBar
+    local dialog_title = string.format("缓存书籍共%s章", down_chapters_count)
+    local loading_msg = down_chapters_count > 10 and 
+        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max =  down_chapters_count, parent = self}) or 
+        MessageBox:showloadingMessage(dialog_title, {progress_max = down_chapters_count, parent = self})
 
-    dbg.v('chapter_down_tasks:', chapter_down_tasks)
-
-    if H.is_tbl(chapter_down_tasks) and chapter_down_tasks[1] ~= nil and chapter_down_tasks[1].book_cache_id ~= nil then
-
-        local job = {
-            poll = function()
-
-                return Backend:check_the_background_download_job(chapter_down_tasks)
-            end,
-            requestCancellation = function()
-
-                Backend:quit_the_background_download_job()
-                if H.is_func(cancel_callback) then
-                    cancel_callback()
-                end
-
-            end
-        }
-
-        local dialog = require("Legado/DownloadUnreadChaptersJobDialog"):new{
-            show_parent = self,
-            job = job,
-            job_inspection_interval = 0.8,
-            dismiss_callback = function()
-                Backend:show_notice('下载结束')
-                self:refreshItems(true)
-                if H.is_func(dismiss_callback) then
-                    dismiss_callback()
-                end
-            end
-        }
-        dialog:show()
-    else
-        MessageBox:error('下载任务返回参数出错')
+    if not (loading_msg and loading_msg.reportProgress and loading_msg.close) then
+        return MessageBox:error("进度显示控件生成失败")
     end
 
+    local result_progress_callback = function(progress, err_msg)
+        if progress == false or progress == true then
+            loading_msg:close()
+            if progress == true then
+                Backend:show_notice('下载完成')
+                self:refreshItems(true)
+            elseif err_msg then
+                MessageBox:error('后台下载任务出错:', tostring(err_msg))
+            end
+        end
+        if H.is_num(progress) then
+            loading_msg:reportProgress(progress)
+        end
+         logger.dbg("result_progress_callback:", progress, err_msg)
+    end
+
+    Backend:preLoadingChapters(begin_chapter, down_chapters_count, result_progress_callback)
 end
 
 function ChapterListing:syncProgressShow(chapter)

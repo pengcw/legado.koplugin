@@ -1151,21 +1151,6 @@ function M:updateIsRead(chapter, isRead, is_update_timestamp)
     return self:dynamicUpdateChapters(chapter, update_state)
 end
 
-function M:updateDownloadState(chapter, is_downloaded)
-    local content = ''
-    if is_downloaded == true then
-        content = 'downloaded'
-    elseif is_downloaded == nil or is_downloaded == false then
-        content = self.nil_object()
-    else
-        content = is_downloaded
-    end
-
-    return self:dynamicUpdateChapters(chapter, {
-        content = content
-    })
-end
-
 function M:updateCacheFilePath(chapter, cacheFilePath)
 
     local cacheFilePath_add = ''
@@ -1198,42 +1183,6 @@ function M:isDownloaded(bookCacheId, chapterIndex)
         is_downed = false
     end
     return is_downed
-end
-
-function M:cleanDownloading()
-    local sql_stmt = [[
-    UPDATE chapters 
-SET content = NULL 
-WHERE 
-  content = 'downloading_' AND
-  cacheFilePath IS NULL;
-    ]]
-    return self:getDB():exec(sql_stmt)
-end
-
-function M:isDownloading(bookCacheId, chapterIndex)
-    if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
-        dbg.log('Db isDownloading Error parameters')
-        return true
-    end
-
-    local sql_stmt = [[
-        SELECT  1 
-        FROM chapters
-        WHERE bookCacheId = '%s'
-          AND chapterIndex = %d AND content = 'downloading_';
-    ]]
-
-    sql_stmt = string.format(sql_stmt, bookCacheId, chapterIndex)
-    local ok, ret = pcall(function()
-        return self:getDB():rowexec(sql_stmt)
-    end)
-    local is_downing = ret == 1
-
-    if not ok then
-        is_downing = true
-    end
-    return is_downing
 end
 
 function M:clearBooks(bookShelfId)
@@ -1371,27 +1320,6 @@ function M:dynamicUpdate(tableName, updateData, conditions)
 
     -- logger.info(sql_stmt)
     return self:execute(sql_stmt, params)
-end
-
-function M:getDownloadProgress(bookCacheId, target_indexes)
-
-    local sql_template =
-        "SELECT COUNT(*) AS total_count FROM chapters WHERE content = 'downloaded' AND chapterIndex IN (%s) AND bookCacheId='%s';"
-
-    local function generate_placeholders(arr)
-        local validated = {}
-        for _, v in ipairs(arr) do
-            table.insert(validated, tostring(v))
-        end
-        return table.concat(validated, ",")
-    end
-
-    local query = string.format(sql_template, generate_placeholders(target_indexes), bookCacheId)
-
-    local ret = self:getDB():rowexec(query)
-    ret = tonumber(ret)
-
-    return ret
 end
 
 function M:setBooksTopStatus(bookShelfId, book_cache_id, isPinnedManually, isPinnedByTime)
