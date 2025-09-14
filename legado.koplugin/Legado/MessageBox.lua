@@ -264,8 +264,6 @@ function M:showloadingMessage(message, options)
     local current_progress_text = ""
     local progress_max = defaultOptions.progress_max
     local has_progress_max = type(progress_max) == "number"
-    local show_parent = options.parent
-    local dirty_region
     updateText = function()
         if has_progress_max and current_progress then
             current_progress_text = progress_max and string.format("[%s/%s]", current_progress, progress_max) or ""
@@ -275,17 +273,9 @@ function M:showloadingMessage(message, options)
             current_progress_text = spinner
         end
 
-        dirty_region = (message_dialog and message_dialog.getVisibleArea) and message_dialog:getVisibleArea()
-        if dirty_region then
-            UIManager:setDirty(show_parent, function()
-                return 'ui', dirty_region
-            end)
-        end
-
         defaultOptions.text = string.format("%s %s ...", message, current_progress_text)
         message_dialog = InfoMessage:new(defaultOptions)
-        dirty_region = message_dialog.getVisibleArea and message_dialog:getVisibleArea()
-        UIManager:show(message_dialog, "partial", dirty_region)
+        UIManager:show(message_dialog)
 
         UIManager:scheduleIn(defaultOptions.update_interval, updateText)
     end

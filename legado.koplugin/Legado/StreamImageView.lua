@@ -96,7 +96,7 @@ function M:loadChatperInitImage(chapter)
         return self.image
     else
         logger.err("获取章节图片列表失败 Init")
-        Backend:show_notice("内容加载失败")
+        MessageBox:notice("内容加载失败")
         return RenderImage:renderImageFile("resources/koreader.png", false)
     end
 end
@@ -120,7 +120,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             current_chapter_index = current_chapter_index - 1
             logger.dbg("切换到上一章节：", current_chapter_index)
         else
-            Backend:show_notice("已经是第一章")
+            MessageBox:notice("已经是第一章")
             return
         end
         -- 处理正常翻页逻辑
@@ -162,7 +162,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             end
         else
             logger.err("获取章节图片列表失败：", current_chapter_index)
-            Backend:show_notice("内容加载失败" .. tostring(current_chapter_index))
+            MessageBox:notice("内容加载失败" .. tostring(current_chapter_index))
             return
         end
     end
@@ -186,7 +186,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         self:update()
     else
         logger.err("最终图片加载失败")
-        Backend:show_notice("页面加载失败，请重试")
+        MessageBox:notice("页面加载失败，请重试")
     end
 end
 
@@ -206,7 +206,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
             current_chapter_index = current_chapter_index - 1
             logger.dbg("切换到上一章节：", current_chapter_index)
         else
-            Backend:show_notice("已经是第一章")
+            MessageBox:notice("已经是第一章")
             return
         end
 
@@ -278,7 +278,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
                 self:update()
             else
                 logger.err("最终图片加载失败")
-                Backend:show_notice("页面加载失败，请重试")
+                MessageBox:notice("页面加载失败，请重试")
             end
         end
     end)

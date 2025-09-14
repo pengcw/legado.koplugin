@@ -139,14 +139,14 @@ function M:fetchAndShow(bookinfo, onReturnCallback)
             Backend:HandleResponse(response, function(data)
 
                 if not H.is_tbl(data) then
-                    return Backend:show_notice('返回书源错误')
+                    return MessageBox:notice('返回书源错误')
                 end
                 if #data == 0 then
                     return MessageBox:error('没有可用源')
                 end
                 results_data = data
             end, function(err_msg)
-                Backend:show_notice(err_msg or '加载失败')
+                MessageBox:notice(err_msg or '加载失败')
             end)
 
             self.results_menu_container = self:menuCenterShow(M:new{
@@ -191,7 +191,7 @@ end
 function M:autoChangeSourceSocket(bookinfo, onReturnCallback)
 
     if Backend:getSettings().server_type ~= 1 then
-        Backend:show_notice("仅支持阅读 App")
+        MessageBox:notice("仅支持阅读 App")
         return
     end
 
@@ -228,7 +228,7 @@ function M:autoChangeSourceSocket(bookinfo, onReturnCallback)
                     results_data = data
                 end
             end, function(err_msg)
-                Backend:show_notice(err_msg or '加载失败')
+                MessageBox:notice(err_msg or '加载失败')
             end)
 
             total_source_count = #results_data
@@ -314,7 +314,7 @@ function M:autoChangeSourceSocket(bookinfo, onReturnCallback)
             end, function(state, response)
                 results_data = nil
                 if state == true and H.is_tbl(response) and response.bookUrl and response.origin then
-                        Backend:show_notice("换源成功")
+                        MessageBox:notice("换源成功")
                         Backend:refreshLibraryCache()
                          return self:onCloseUI()
              
@@ -363,14 +363,14 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
             Backend:HandleResponse(response, function(data)
 
                 if not H.is_tbl(data) then
-                    return Backend:show_notice('返回书源错误')
+                    return MessageBox:notice('返回书源错误')
                 end
                 if #data == 0 then
                     return MessageBox:error('没有可用源')
                 end
                 results_data = data
             end, function(err_msg)
-                Backend:show_notice(err_msg or '加载失败')
+                MessageBox:notice(err_msg or '加载失败')
             end)
             total_source_count = #results_data
 
@@ -548,13 +548,13 @@ function M:searchAndShow(onReturnCallback, def_input)
                 text = "单源搜索",
                 callback = function()
                     if Backend:getSettings().server_type == 1 then
-                        return Backend:show_notice('阅读 App 仅支持多源搜索')
+                        return MessageBox:notice('阅读 App 仅支持多源搜索')
                     end
                     inputText = dialog:getInputText()
                     inputText = util.trim(inputText)
 
                     if not validateInput(inputText) then
-                        return Backend:show_notice("请输入有效书籍或作者名称")
+                        return MessageBox:notice("请输入有效书籍或作者名称")
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
@@ -568,7 +568,7 @@ function M:searchAndShow(onReturnCallback, def_input)
                     inputText = dialog:getInputText()
                     inputText = util.trim(inputText)
                     if not validateInput(inputText) then
-                        return Backend:show_notice("请输入有效书籍或作者名称")
+                        return MessageBox:notice("请输入有效书籍或作者名称")
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
@@ -599,10 +599,10 @@ function M:handleSingleSourceSearch(searchText)
             if state == true then
                 Backend:HandleResponse(response, function(data)
                     if not H.is_tbl(data) then
-                        return Backend:show_notice('服务器返回错误')
+                        return MessageBox:notice('服务器返回错误')
                     end
                     if #data == 0 or not H.is_tbl(data[1]) then
-                        return Backend:show_notice('未找到相关书籍')
+                        return MessageBox:notice('未找到相关书籍')
                     end
 
                     self.results_menu_container = self:menuCenterShow(M:new{
@@ -617,7 +617,7 @@ function M:handleSingleSourceSearch(searchText)
                     self.results_menu_container.show_parent = sourceMenu.show_parent
 
                 end, function(err_msg)
-                    Backend:show_notice(err_msg or '搜索请求失败')
+                    MessageBox:notice(err_msg or '搜索请求失败')
                 end)
             end
         end)
@@ -627,7 +627,7 @@ end
 function M:searchBookSocket(search_text)
 
     if not (H.is_str(search_text) and search_text ~= "") then
-        Backend:show_notice("参数错误")
+        MessageBox:notice("参数错误")
         return
     end
 
@@ -638,7 +638,7 @@ function M:searchBookSocket(search_text)
         if state == true then
             Backend:HandleResponse(response, function(data)
                 if not H.is_tbl(data) or not H.is_tbl(data[1]) then
-                    return Backend:show_notice('服务器返回为空')
+                    return MessageBox:notice('服务器返回为空')
                 end
 
                 self.results_menu_container = self:menuCenterShow(M:new{
@@ -649,7 +649,7 @@ function M:searchBookSocket(search_text)
                     items_font_size = Menu.getItemFontSize(8)
                 })
             end, function(err_msg)
-                Backend:show_notice(err_msg or '搜索请求失败')
+                MessageBox:notice(err_msg or '搜索请求失败')
             end)
         end
     end)
@@ -657,7 +657,7 @@ end
 
 function M:handleMultiSourceSearch(search_text, is_more_call)
     if not (H.is_str(search_text) and search_text ~= "") then
-        Backend:show_notice("参数错误")
+        MessageBox:notice("参数错误")
         return
     end
 
@@ -670,10 +670,10 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
         if state == true then
             Backend:HandleResponse(response, function(data)
                 if not H.is_tbl(data) or not H.is_tbl(data.list) then
-                    return Backend:show_notice('服务器返回错误')
+                    return MessageBox:notice('服务器返回错误')
                 end
                 if #data.list == 0 then
-                    return Backend:show_notice('未找到相关书籍')
+                    return MessageBox:notice('未找到相关书籍')
                 end
 
                 logger.dbg("当前data.lastIndex:", data.lastIndex)
@@ -693,7 +693,7 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
                 end
 
             end, function(err_msg)
-                Backend:show_notice(err_msg or '搜索请求失败')
+                MessageBox:notice(err_msg or '搜索请求失败')
             end)
         end
     end)
@@ -707,7 +707,7 @@ function M:selectBookSource(selectCallback)
         if state == true then
             Backend:HandleResponse(response, function(data)
                 if not H.is_tbl(data) then
-                    return Backend:show_notice('返回数据错误')
+                    return MessageBox:notice('返回数据错误')
                 end
                 if #data == 0 then
                     return MessageBox:error('没有可用源')
@@ -748,7 +748,7 @@ function M:selectBookSource(selectCallback)
                 })
 
             end, function(err_msg)
-                Backend:show_notice('列表请求失败' .. tostring(err_msg))
+                MessageBox:notice('列表请求失败' .. tostring(err_msg))
             end)
         end
     end)
@@ -756,12 +756,12 @@ end
 
 function M:setBookSource(bookinfo)
     if not self.bookinfo then
-        Backend:show_notice('参数错误')
+        MessageBox:notice('参数错误')
         return
     end
     local old_bookUrl = self.bookinfo.bookUrl
     if not (self.call_mode > 10 and H.is_str(old_bookUrl) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.origin)) then
-        Backend:show_notice('参数错误')
+        MessageBox:notice('参数错误')
         return
     end
     Backend:closeDbManager()
@@ -774,7 +774,7 @@ function M:setBookSource(bookinfo)
     end, function(state, response)
         if state == true then
             Backend:HandleResponse(response, function(data)
-                Backend:show_notice('换源成功')
+                MessageBox:notice('换源成功')
                 self:onCloseUI()
             end, function(err_msg)
                 MessageBox:error(err_msg or '操作失败')
@@ -785,7 +785,7 @@ end
 
 function M:addBookToLibrary(bookinfo)
     if self.call_mode > 10 and self.call_mode ~= 31 then
-        Backend:show_notice('参数错误')
+        MessageBox:notice('参数错误')
         return
     end
     Backend:closeDbManager()
@@ -794,7 +794,7 @@ function M:addBookToLibrary(bookinfo)
     end, function(state, response)
         if state == true then
             Backend:HandleResponse(response, function(data)
-                Backend:show_notice('添加成功')
+                MessageBox:notice('添加成功')
                 self:onCloseUI()
             end, function(err_msg)
                 MessageBox:error(err_msg or '操作失败')
@@ -806,7 +806,7 @@ end
 function M:searchMoreBookSource()
     local old_bookUrl = self.bookinfo.bookUrl
     if not H.is_str(old_bookUrl) then
-        Backend:show_notice("参数错误")
+        MessageBox:notice("参数错误")
         return
     end
 
@@ -818,7 +818,7 @@ function M:searchMoreBookSource()
         if state == true then
             Backend:HandleResponse(response, function(data)
                 if not H.is_tbl(data) or not H.is_tbl(data.list) then
-                    return Backend:show_notice('返回书源错误')
+                    return MessageBox:notice('返回书源错误')
                 end
                 if #data.list == 0 then
                     return MessageBox:error('没有可用源')

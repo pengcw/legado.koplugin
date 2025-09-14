@@ -298,7 +298,9 @@ function M:initialize()
             reader3_pwd = '',
             servers_history = {},
             stream_image_view = nil,
-            disable_browser = nil
+            disable_browser = nil,
+            sync_reading = nil,
+            open_at_last_read = nil,
         }
         self.settings_data:flush()
     end
@@ -1747,7 +1749,7 @@ function M:_pDownloadChapter(chapter, message_dialog, is_recursive)
     end
 
     if not H.is_tbl(response) or response.type ~= 'SUCCESS' then
-        error(response.message or '章节下载失败')
+        error((response and response.message) or '章节下载失败')
     end
 
     return self:_AnalyzingChapters(chapter, response.body)
@@ -2246,9 +2248,12 @@ function M:refreshBookContentAsync(chapter)
     end)
 end
 
-function M:refreshBookContentAsync(chapter)
+function M:saveBookProgressAsync(chapter)
     self:launchProcess(function()
-        self:saveBookProgress(chapter)
+        local response = self:saveBookProgress(chapter)
+        if not H.is_tbl(response) or response.type ~= 'SUCCESS' then
+            logger.err("saveBookProgressAsync", (response and response.message) or '阅读进度上传失败')
+        end
     end)
 end
 
@@ -2429,14 +2434,21 @@ function M:after_reader_chapter_show(chapter)
         end
     end
 
-    if chapter.isRead ~= true and NetworkMgr:isConnected() then
-        local complete_count = self:getcompleteReadAheadChapters(chapter)
-        if complete_count < 40 then
-            local preDownloadNum = 3
-            if chapter.cacheExt and chapter.cacheExt == 'cbz' then
-                preDownloadNum = 1
+    if NetworkMgr:isConnected() then
+        local settings = self:getSettings()
+        if settings.sync_reading == true then
+            UIManager:unschedule(M.saveBookProgressAsync)
+            UIManager:scheduleIn(8, M.saveBookProgressAsync, self, chapter)
+        end
+        if chapter.isRead ~= true then
+            local complete_count = self:getcompleteReadAheadChapters(chapter)
+            if complete_count < 40 then
+                local preDownloadNum = 3
+                if chapter.cacheExt and chapter.cacheExt == 'cbz' then
+                    preDownloadNum = 1
+                end
+                self:preLoadingChapters(chapter, preDownloadNum)
             end
-            self:preLoadingChapters(chapter, preDownloadNum)
         end
     end
 
