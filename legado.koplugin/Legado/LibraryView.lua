@@ -287,7 +287,7 @@ function LibraryView:openMenu()
             self:openInstalledReadSource()
         end
     }}, {{
-        text = string.format("%s 流式漫画模式 %s", Icons.FA_BOOK,
+        text = string.format("%s 流式漫画模式  %s", Icons.FA_BOOK,
             (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
@@ -309,7 +309,23 @@ function LibraryView:openMenu()
             })
         end
     }}, {{
-        text = string.format("%s 自动生成快捷方式 %s", Icons.FA_FOLDER,
+        text = string.format("%s 自动上传阅读进度  %s", Icons.FA_FOLDER,
+            (settings.sync_reading and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        callback = function()
+            UIManager:close(dialog)
+            local ok_msg = "设置已开启"
+            if settings.sync_reading then
+                    ok_msg = "设置已关闭"
+            end
+            settings.sync_reading = not settings.sync_reading or nil
+            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                MessageBox:notice(ok_msg)
+            end, function(err_msg)
+                MessageBox:error('设置失败:', err_msg)
+            end)
+        end
+    }}, {{
+        text = string.format("%s 自动生成快捷方式  %s", Icons.FA_FOLDER,
             (settings.disable_browser and Icons.UNICODE_STAR_OUTLINE or Icons.UNICODE_STAR)),
         callback = function()
             UIManager:close(dialog)
@@ -318,10 +334,10 @@ function LibraryView:openMenu()
                 (settings.disable_browser and '[关闭]' or '[开启]')), function(result)
                 if result then
                     local ok_msg = "设置已开启"
-                    settings.disable_browser = not settings.disable_browser or nil
-                    if settings.disable_browser then
+                    if not settings.disable_browser then
                         ok_msg = "设置已关闭，请手动删除目录"
                     end
+                    settings.disable_browser = not settings.disable_browser or nil
                     Backend:HandleResponse(Backend:saveSettings(settings), function(data)
                         MessageBox:notice(ok_msg)
                     end, function(err_msg)
@@ -472,7 +488,7 @@ function LibraryView:loadAndRenderChapter(chapter)
                     end
                     self:showReaderUI(data)
                 end, function(err_msg)
-                    Backend:show_notice("请检查并刷新书架")
+                    MessageBox:notice("请检查并刷新书架")
                     MessageBox:error(err_msg or '错误')
                 end)
             end
@@ -495,7 +511,7 @@ function LibraryView:ReaderUIEventCallback(chapter_call_event)
         book_cache_id = chapter.book_cache_id,
         totalChapterNum = chapter.totalChapterNum
     })
-
+ 
     if H.is_tbl(nextChapter) then
         nextChapter.call_event = chapter.call_event
         self:loadAndRenderChapter(nextChapter)
@@ -526,7 +542,52 @@ function LibraryView:showReaderUI(chapter)
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
         ReaderUI:showReader(book_path, nil, true)
     end
-    Backend:after_reader_chapter_show(chapter)
+    UIManager:nextTick(function()
+        Backend:after_reader_chapter_show(chapter)
+    end)
+end
+
+function LibraryView:openLastReadChapter(bookinfo, onReturnCallback)
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+        logger.err("openLastReadChapter parameter error")
+        return false
+    end
+
+    local loading_msg = MessageBox:info("前往最近阅读章节...", 2)
+
+    local book_cache_id = bookinfo.cache_id
+    if not H.is_func(onReturnCallback) then
+        onReturnCallback = function() end
+    end
+
+    local last_read_chapter = Backend:getLastReadChapter(book_cache_id)
+    -- default 0
+    if H.is_num(last_read_chapter) then
+        self.book_toc = self:refreshBookTocWidget(bookinfo, onReturnCallback)
+
+        local chapters_index = last_read_chapter - 1
+        if chapters_index < 0 then
+            chapters_index = 0
+        end
+
+        local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+
+        --UIManager:close(loading_msg)
+
+        if H.is_tbl(chapter) and chapter.chapters_index then
+            -- jump to the reading position
+            chapter.call_event = "next"
+            self:loadAndRenderChapter(chapter)
+        else
+            -- chapter does not exist, request refresh
+            if self.book_toc then
+                UIManager:show(self.book_toc)
+            end
+            MessageBox:notice('请同步刷新目录数据')
+        end
+        
+        return true
+    end 
 end
 
 function LibraryView:initializeRegisterEvent(parent_ref)
@@ -578,56 +639,17 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             MessageBox:notice("openLastReadChapter parameter error")
             return
         end
-        local last_read_chapter = Backend:getLastReadChapter(book_cache_id)
-        if H.is_num(last_read_chapter) then
-            local bookinfo = Backend:getBookInfoCache(book_cache_id)
-            if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
-                -- no sync
-                self:onShowLegadoLibraryView()
-                MessageBox:notice("书籍不存在于书架,请刷新同步")
-                return
-            end
 
-            local book_toc_instance = library_view_ref.instance.book_toc
-            if not (book_toc_instance and H.is_tbl(book_toc_instance.bookinfo) and book_toc_instance.bookinfo.cache_id ==
-                book_cache_id) then
-                library_view_ref.instance.book_toc = ChapterListing:fetchAndShow({
-                    cache_id = bookinfo.cache_id,
-                    bookUrl = bookinfo.bookUrl,
-                    durChapterIndex = bookinfo.durChapterIndex,
-                    name = bookinfo.name,
-                    author = bookinfo.author,
-                    cacheExt = bookinfo.cacheExt,
-                    origin = bookinfo.origin,
-                    originName = bookinfo.originName,
-                    originOrder = bookinfo.originOrder
-                }, function()
-                end, function(chapter)
-                    library_view_ref.instance:loadAndRenderChapter(chapter)
-                end, true, true)
-            end
-
-            local chapters_index = last_read_chapter - 1
-            if chapters_index < 0 then
-                chapters_index = 0
-            end
-            local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
-            if H.is_tbl(chapter) and chapter.chapters_index then
-                -- jump to the reading position
-                chapter.call_event = "next"
-                library_view_ref.instance:loadAndRenderChapter(chapter)
-            else
-                -- chapter does not exist, request refresh
-                if library_view_ref.instance.book_toc then
-                    UIManager:show(library_view_ref.instance.book_toc)
-                end
-                MessageBox:notice('请同步刷新目录数据')
-            end
-            return true
+        local bookinfo = Backend:getBookInfoCache(book_cache_id)
+        if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
+            -- no sync
+            self:onShowLegadoLibraryView()
+            MessageBox:notice("书籍不存在于书架,请刷新同步")
+            return
         end
 
         local dir = library_view_ref.instance:getBrowserHomeDir()
-        self:onShowLegadoToc(book_cache_id, function()
+        return library_view_ref.instance:openLastReadChapter(bookinfo, function()
             -- Sometimes LibraryView instance may not start
             library_view_ref:openLegadoFolder(dir)
         end)
@@ -664,19 +686,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
 
         local fetch_show_chapter = function()
-            library_view_ref.instance.book_toc = ChapterListing:fetchAndShow({
-                cache_id = bookinfo.cache_id,
-                bookUrl = bookinfo.bookUrl,
-                durChapterIndex = bookinfo.durChapterIndex,
-                name = bookinfo.name,
-                author = bookinfo.author,
-                cacheExt = bookinfo.cacheExt,
-                origin = bookinfo.origin,
-                originName = bookinfo.originName,
-                originOrder = bookinfo.originOrder
-            }, onReturnCallBack, function(chapter)
-                library_view_ref.instance:loadAndRenderChapter(chapter)
-            end, true)
+            if library_view_ref.instance.book_toc then
+                UIManager:show(library_view_ref.instance.book_toc)
+            else
+                library_view_ref.instance.book_toc = library_view_ref.instance:refreshBookTocWidget(bookinfo, onReturnCallBack, true)
+            end
         end
 
         -- If under ReaderUI, exit it first.
@@ -1253,30 +1267,26 @@ local function init_book_menu(parent)
             end)
             return
         end
+        
         local bookinfo = Backend:getBookInfoCache(item.cache_id)
         self.parent_ref.selected_item = item
-        self.parent_ref.onReturnCallback = function()
+
+        if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+            return MessageBox:error("书籍信息查询出错")
+        end
+
+        local onReturnCallback = function()
             self:show_view()
             self:refreshItems(true)
         end
-        self.parent_ref.book_toc = ChapterListing:fetchAndShow({
-            cache_id = bookinfo.cache_id,
-            bookUrl = bookinfo.bookUrl,
-            durChapterIndex = bookinfo.durChapterIndex,
-            name = bookinfo.name,
-            author = bookinfo.author,
-            cacheExt = bookinfo.cacheExt,
-            origin = bookinfo.origin,
-            originName = bookinfo.originName,
-            originOrder = bookinfo.originOrder
-        }, self.parent_ref.onReturnCallback, function(chapter)
-            self.parent_ref.instance:loadAndRenderChapter(chapter)
-        end, true)
+        self.book_toc = self.parent_ref:refreshBookTocWidget(bookinfo, onReturnCallback, true)
+        self:onClose()
+        --self.parent_ref:openLastReadChapter(bookinfo, on_return_callback)
+        
         UIManager:nextTick(function()
             Backend:autoPinToTop(bookinfo.cache_id, bookinfo.sortOrder)
             self.parent_ref:addBkShortcut(bookinfo)
         end)
-        self:onClose()
     end
 
     function book_menu:onRefreshLibrary()
@@ -1504,6 +1514,42 @@ end
 
 function LibraryView:getMenuWidget()
     return init_book_menu(self)
+end
+
+function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallback, visible)
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+        logger.err("refreshBookTocWidget parameter error")
+        return self.book_toc
+    end
+
+    local book_cache_id = bookinfo.cache_id
+    if not H.is_func(onReturnCallback) then
+        onReturnCallback = function() end
+    end
+    
+    local book_toc_instance = self.book_toc
+    if not (H.is_tbl(book_toc_instance) and H.is_tbl(book_toc_instance.bookinfo) and 
+            book_toc_instance.bookinfo.cache_id == book_cache_id) then
+
+            self.book_toc = ChapterListing:fetchAndShow({
+                cache_id = bookinfo.cache_id,
+                bookUrl = bookinfo.bookUrl,
+                durChapterIndex = bookinfo.durChapterIndex,
+                name = bookinfo.name,
+                author = bookinfo.author,
+                cacheExt = bookinfo.cacheExt,
+                origin = bookinfo.origin,
+                originName = bookinfo.originName,
+                originOrder = bookinfo.originOrder
+
+            }, onReturnCallback, function(chapter)
+                    self:loadAndRenderChapter(chapter)
+            end, true, visible)
+    else
+        self.book_toc.on_return_callback = onReturnCallback
+    end
+
+    return self.book_toc
 end
 
 return LibraryView

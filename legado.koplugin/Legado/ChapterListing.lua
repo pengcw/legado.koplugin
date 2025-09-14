@@ -72,7 +72,7 @@ function ChapterListing:refreshItems(no_recalculate_dimen)
     local book_cache_id = self.bookinfo.cache_id
     local chapter_cache_data = Backend:getBookChapterCache(book_cache_id)
 
-    if chapter_cache_data and #chapter_cache_data > 0 then
+    if H.is_tbl(chapter_cache_data) and #chapter_cache_data > 0 then
 
         self.item_table = self:generateItemTableFromChapters(chapter_cache_data)
         self.multilines_show_more_text = false
@@ -136,14 +136,18 @@ function ChapterListing:onCloseWidget()
     Menu.onCloseWidget(self)
 end
 
-function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, hide)
+function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, visible)
     accept_cached_results = accept_cached_results or false
 
-    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.cache_id) then
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
         MessageBox:error('书籍信息出错')
         return
     end
 
+    if not H.is_func(onReturnCallBack) then
+        onReturnCallBack = function() end
+    end
+    
     local settings = Backend:getSettings()
     if not H.is_tbl(settings) then
         MessageBox:error('获取设置出错')
@@ -167,7 +171,7 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
         title = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
             Backend:getSettings().stream_image_view == true) and "[流式]" or "")
     }
-    if not hide then
+    if visible then
         UIManager:show(chapter_listing)
     end
     return chapter_listing
@@ -200,7 +204,7 @@ function ChapterListing:onMenuChoice(item)
                 })
             end)
         end)
-        Backend:show_notice("流式漫画开启")
+        MessageBox:notice("流式漫画开启")
     else
         self:showReaderUI(chapter)
     end
@@ -250,7 +254,7 @@ function ChapterListing:onMenuHold(item)
             }), function(data)
                 self:refreshItems(true)
                 if isDownLoaded == true then
-                    Backend:show_notice('删除成功')
+                    MessageBox:notice('删除成功')
                 else
                     MessageBox:success('后台下载章节任务已添加，请稍后下拉刷新')
                 end
@@ -344,14 +348,14 @@ function ChapterListing:onRefreshChapters()
         end, function(state, response)
             if state == true then
                 Backend:HandleResponse(response, function(data)
-                    Backend:show_notice('同步成功')
+                    MessageBox:notice('同步成功')
                     self:refreshItems()
                     self.all_chapters_count = nil
                     self.ui_refresh_time = os.time()
                 end, function(err_msg)
-                    Backend:show_notice(err_msg or '同步失败')
+                    MessageBox:notice(err_msg or '同步失败')
                     if err_msg ~= '处理中' then
-                        Backend:show_notice("请检查并刷新书架")
+                        MessageBox:notice("请检查并刷新书架")
                     end
                 end)
             end
@@ -378,7 +382,7 @@ function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, dow
     local begin_chapter = Backend:getChapterInfoCache(book_cache_id, begin_chapters_index)
     begin_chapter.call_event = call_event
 
-    if not H.is_tbl(begin_chapter) or begin_chapter.chapters_index == nil then
+    if not (H.is_tbl(begin_chapter) and begin_chapter.chapters_index ~= nil) then
         MessageBox:error('没有可下载章节')
         return
     end
@@ -396,8 +400,8 @@ function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, dow
     -- down_chapters_count > 10 call progressBar
     local dialog_title = string.format("缓存书籍共%s章", down_chapters_count)
     local loading_msg = down_chapters_count > 10 and 
-        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max =  down_chapters_count, parent = self}) or 
-        MessageBox:showloadingMessage(dialog_title, {progress_max = down_chapters_count, parent = self})
+        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max =  down_chapters_count}) or 
+        MessageBox:showloadingMessage(dialog_title, {progress_max = down_chapters_count})
 
     if not (loading_msg and loading_msg.reportProgress and loading_msg.close) then
         return MessageBox:error("进度显示控件生成失败")
@@ -407,7 +411,7 @@ function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, dow
         if progress == false or progress == true then
             loading_msg:close()
             if progress == true then
-                Backend:show_notice('下载完成')
+                MessageBox:notice('下载完成')
                 self:refreshItems(true)
             elseif err_msg then
                 MessageBox:error('后台下载任务出错:', tostring(err_msg))
@@ -452,7 +456,7 @@ function ChapterListing:syncProgressShow(chapter)
                         isRead = true
                     }, true)
                     self:refreshItems(true)
-                    Backend:show_notice('同步完成')
+                    MessageBox:notice('同步完成')
                     self:switchItemTable(nil, self.item_table, tonumber(bookinfo.durChapterIndex))
                     self.ui_refresh_time = os.time()
                 end
@@ -497,7 +501,7 @@ function ChapterListing:openMenu()
         text = table.concat({Icons.FA_THUMB_TACK, " 拉取网络进度"}),
         callback = function()
             if self.multilines_show_more_text == true then
-                Backend:show_notice('章节列表为空')
+                MessageBox:notice('章节列表为空')
                 return
             end
             UIManager:close(dialog)
@@ -513,7 +517,7 @@ function ChapterListing:openMenu()
             end, function(state, response)
                 if state == true then
                     Backend:HandleResponse(response, function(data)
-                        Backend:show_notice("已清理，刷新重新可添加")
+                        MessageBox:notice("已清理，刷新重新可添加")
                         self:onReturn()
 
                     end, function(err_msg)
@@ -530,7 +534,7 @@ function ChapterListing:openMenu()
         callback = function()
             UIManager:close(dialog)
             if self.multilines_show_more_text == true then
-                Backend:show_notice('章节列表为空')
+                MessageBox:notice('章节列表为空')
                 return
             end
             if Device.isAndroid() then
@@ -541,7 +545,7 @@ function ChapterListing:openMenu()
                 UIManager:show(SpinWidget:new{
                     value = 1,
                     value_min = 1,
-                    value_max = tonumber(all_chapters_count) or 10,
+                    value_max = tonumber(self.all_chapters_count) or 10,
                     value_step = 1,
                     value_hold_step = 5,
                     ok_text = "跳转",
