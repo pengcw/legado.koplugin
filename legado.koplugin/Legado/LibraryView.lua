@@ -451,7 +451,7 @@ end
 -- readerUI -> ReturnLegadoChapterListing event -> show ChapterListing -> close ->show LibraryView ->close -> ? 
 function LibraryView:openLegadoFolder(path, focused_file, selected_files, done_callback)
     UIManager:nextTick(function()
-        if ReaderUI.instance then
+        if ReaderUI and ReaderUI.instance then
             ReaderUI.instance:onClose()
             self.readerui_is_showing = false
         end
@@ -467,6 +467,10 @@ function LibraryView:openLegadoFolder(path, focused_file, selected_files, done_c
             done_callback()
         end
     end)
+end
+
+function LibraryView:afterCloseReaderUi(callback)
+    self:openLegadoFolder(nil, nil, nil, callback)
 end
 
 function LibraryView:loadAndRenderChapter(chapter)
@@ -516,10 +520,12 @@ function LibraryView:ReaderUIEventCallback(chapter_call_event)
         nextChapter.call_event = chapter.call_event
         self:loadAndRenderChapter(nextChapter)
     else
-        self:openLegadoFolder(nil, nil, nil, function()
-            if self.book_toc then
-                UIManager:show(self.book_toc)
-            end
+        local bookinfo = (self.book_toc and H.is_tbl(self.book_toc.bookinfo)) 
+            and self.book_toc.bookinfo 
+            or Backend:getBookInfoCache(chapter.book_cache_id)
+
+        self:afterCloseReaderUi(function()
+            self:showBookTocDialog(bookinfo)
         end)
     end
 end
@@ -547,23 +553,16 @@ function LibraryView:showReaderUI(chapter)
     end)
 end
 
-function LibraryView:openLastReadChapter(bookinfo, onReturnCallback)
+function LibraryView:openLastReadChapter(bookinfo)
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
         logger.err("openLastReadChapter parameter error")
         return false
     end
 
-    local loading_msg = MessageBox:info("前往最近阅读章节...", 2)
-
     local book_cache_id = bookinfo.cache_id
-    if not H.is_func(onReturnCallback) then
-        onReturnCallback = function() end
-    end
-
     local last_read_chapter = Backend:getLastReadChapter(book_cache_id)
     -- default 0
     if H.is_num(last_read_chapter) then
-        self.book_toc = self:refreshBookTocWidget(bookinfo, onReturnCallback)
 
         local chapters_index = last_read_chapter - 1
         if chapters_index < 0 then
@@ -571,18 +570,13 @@ function LibraryView:openLastReadChapter(bookinfo, onReturnCallback)
         end
 
         local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
-
-        --UIManager:close(loading_msg)
-
         if H.is_tbl(chapter) and chapter.chapters_index then
             -- jump to the reading position
             chapter.call_event = "next"
             self:loadAndRenderChapter(chapter)
         else
             -- chapter does not exist, request refresh
-            if self.book_toc then
-                UIManager:show(self.book_toc)
-            end
+            self:showBookTocDialog(bookinfo)
             MessageBox:notice('请同步刷新目录数据')
         end
         
@@ -629,14 +623,16 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
-    function parent_ref:openLastReadChapter(book_cache_id)
+    function parent_ref:loadLastReadChapter(book_cache_id)
         library_view_ref:getInstance()
-        if not library_view_ref.instance then
-            logger.warn("openLastReadChapter LibraryView instance not loaded")
+        local library_view_instance = library_view_ref.instance
+
+        if not library_view_instance then
+            logger.warn("oadLastReadChapter LibraryView instance not loaded")
             return
         end
         if not H.is_str(book_cache_id) then
-            MessageBox:notice("openLastReadChapter parameter error")
+            MessageBox:notice("oadLastReadChapter parameter error")
             return
         end
 
@@ -648,24 +644,33 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             return
         end
 
-        local dir = library_view_ref.instance:getBrowserHomeDir()
-        return library_view_ref.instance:openLastReadChapter(bookinfo, function()
+        local onReturnCallBack = function()
+            -- local dir = library_view_instance:getBrowserHomeDir()
             -- Sometimes LibraryView instance may not start
-            library_view_ref:openLegadoFolder(dir)
-        end)
+            -- library_view_ref:openLegadoFolder(dir)
+        end
+
+        library_view_instance:refreshBookTocWidget(bookinfo, onReturnCallBack)
+
+        return library_view_instance:openLastReadChapter(bookinfo)
     end
 
-    function parent_ref:onShowLegadoToc(book_cache_id, onReturnCallBack)
+    function parent_ref:onShowLegadoToc(book_cache_id)
         library_view_ref:getInstance()
-        if not library_view_ref.instance then
+        local library_view_instance = library_view_ref.instance
+
+        if not library_view_instance then
             logger.warn("ShowLegadoToc LibraryView instance not loaded")
             return true
         end
         if not book_cache_id then
-            if library_view_ref.instance.displayed_chapter then
-                book_cache_id = library_view_ref.instance.displayed_chapter.book_cache_id
-            elseif library_view_ref.instance.selected_item then
-                book_cache_id = library_view_ref.instance.selected_item.cache_id
+            if library_view_instance.displayed_chapter then
+                book_cache_id = library_view_instance.displayed_chapter.book_cache_id
+            elseif library_view_instance.book_toc and 
+                    library_view_instance.book_toc.bookinfo then
+                book_cache_id = library_view_instance.book_toc.bookinfo.cache_id
+            elseif library_view_instance.selected_item then
+                book_cache_id = library_view_instance.selected_item.cache_id
             end
         end
         if not book_cache_id then
@@ -679,27 +684,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             return
         end
 
-        if not H.is_func(onReturnCallBack) then
-            onReturnCallBack = function()
-                self:openLibraryView()
-            end
-        end
-
-        local fetch_show_chapter = function()
-            if library_view_ref.instance.book_toc then
-                UIManager:show(library_view_ref.instance.book_toc)
-            else
-                library_view_ref.instance.book_toc = library_view_ref.instance:refreshBookTocWidget(bookinfo, onReturnCallBack, true)
-            end
-        end
-
-        -- If under ReaderUI, exit it first.
-        local ReaderUI = require("apps/reader/readerui")
-        if ReaderUI and ReaderUI.instance then
-            library_view_ref:openLegadoFolder(nil, nil, nil, fetch_show_chapter)
-        else
-            fetch_show_chapter()
-        end
+        library_view_instance:showBookTocDialog(bookinfo)
         return true
     end
 
@@ -963,12 +948,15 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end
         end
         if book_cache_id then
+            local loading_msg = MessageBox:info("前往最近阅读章节...", 3)
             local ok, err = pcall(function()
-                return self:openLastReadChapter(book_cache_id)
+                return self:loadLastReadChapter(book_cache_id)
             end)
             if not ok then
-                logger.err("fail to open file:", err)
+                logger.err("fFailed to go to the last read chapter:", err)
+                MessageBox:error(string.format("打开失败: %s", tostring(err)))
             end
+            UIManager:close(loading_msg)
             return true
         else
             open_regular_file(file)
@@ -1275,11 +1263,16 @@ local function init_book_menu(parent)
             return MessageBox:error("书籍信息查询出错")
         end
 
-        local onReturnCallback = function()
+        local onReturnCallBack = function()
             self:show_view()
             self:refreshItems(true)
         end
-        self.book_toc = self.parent_ref:refreshBookTocWidget(bookinfo, onReturnCallback, true)
+
+        local update_toc_visibility = function()
+            self.parent_ref:refreshBookTocWidget(bookinfo, onReturnCallBack, true)
+        end
+
+        update_toc_visibility()
         self:onClose()
         --self.parent_ref:openLastReadChapter(bookinfo, on_return_callback)
         
@@ -1516,20 +1509,18 @@ function LibraryView:getMenuWidget()
     return init_book_menu(self)
 end
 
-function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallback, visible)
+function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible)
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
         logger.err("refreshBookTocWidget parameter error")
         return self.book_toc
     end
 
     local book_cache_id = bookinfo.cache_id
-    if not H.is_func(onReturnCallback) then
-        onReturnCallback = function() end
-    end
-    
-    local book_toc_instance = self.book_toc
-    if not (H.is_tbl(book_toc_instance) and H.is_tbl(book_toc_instance.bookinfo) and 
-            book_toc_instance.bookinfo.cache_id == book_cache_id) then
+
+    local toc_instance = self.book_toc
+    if not (H.is_tbl(toc_instance) and H.is_tbl(toc_instance.bookinfo) and 
+            toc_instance.bookinfo.cache_id == book_cache_id) then
+            logger.dbg("add new book_toc widget")
 
             self.book_toc = ChapterListing:fetchAndShow({
                 cache_id = bookinfo.cache_id,
@@ -1542,14 +1533,26 @@ function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallback, visible)
                 originName = bookinfo.originName,
                 originOrder = bookinfo.originOrder
 
-            }, onReturnCallback, function(chapter)
+            }, onReturnCallBack, function(chapter)
                     self:loadAndRenderChapter(chapter)
             end, true, visible)
+
     else
-        self.book_toc.on_return_callback = onReturnCallback
+        logger.dbg("update book_toc widget ReturnCallback")
+        self.book_toc:updateReturnCallback(onReturnCallBack)
+
+        if visible == true then
+            self.book_toc:refreshItems()
+            UIManager:show(self.book_toc)
+        end
     end
 
     return self.book_toc
+end
+
+function LibraryView:showBookTocDialog(bookinfo)
+    -- Simple display should not cause changes onReturnCallBack
+    return self:refreshBookTocWidget(bookinfo, nil, true)
 end
 
 return LibraryView
