@@ -50,13 +50,7 @@ function ChapterListing:init()
     self.width, self.height = Screen:getWidth(), Screen:getHeight()
 
     Menu.init(self)
-
-    self.paths = {{
-        callback = self.on_return_callback
-    }}
-
-    self.on_return_callback = nil
-
+    
     if Device:hasKeys({"Home"}) or Device:hasDPad() then
         self.key_events.Close = {{Device.input.group.Back}}
         self.key_events.RefreshChapters = {{"Home"}}
@@ -123,17 +117,23 @@ end
 
 function ChapterListing:onReturn()
     Menu.onClose(self)
-    if H.is_tbl(self.paths) then
-        local path = table.remove(self.paths)
-        if H.is_tbl(path) and H.is_func(path.callback) then
-            pcall(path.callback)
-        end
+    if H.is_func(self.on_return_callback) then
+        UIManager:nextTick(function()
+            self.on_return_callback()
+        end)
     end
 end
 
 function ChapterListing:onCloseWidget()
     Backend:closeDbManager()
     Menu.onCloseWidget(self)
+end
+
+function ChapterListing:updateReturnCallback(callback)
+    -- Skip changes when callback is nil
+    if H.is_func(callback) then
+        self.on_show_chapter_callback = callback
+    end
 end
 
 function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, visible)
@@ -171,7 +171,7 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
         title = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
             Backend:getSettings().stream_image_view == true) and "[流式]" or "")
     }
-    if visible then
+    if visible == true then
         UIManager:show(chapter_listing)
     end
     return chapter_listing
@@ -552,8 +552,8 @@ function ChapterListing:openMenu()
                     title_text = "请选择需要跳转的章节：",
                     info_text = "( 点击中间可直接输入数字 )",
                     callback = function(autoturn_spin)
-                        autoturn_spin.value = tonumber(autoturn_spin.value)
-                        self:onGotoPage(self:getPageNumber(autoturn_spin.value))
+                        local autoturn_spin_value = autoturn_spin and tonumber(autoturn_spin.value)
+                        self:onGotoPage(self:getPageNumber(autoturn_spin_value))
                     end
                 })
             else
