@@ -205,29 +205,7 @@ function LibraryView:openBrowserMenu(file)
     self:getInstance()
     self:getBrowserWidget()
     local dialog
-    local buttons = {{{
-        text = "清空书籍快捷方式",
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm("是否清除所有书籍快捷方式?", function(result)
-                if result then
-                    local browser_homedir = self:getBrowserHomeDir(true)
-                    if self:deleteFile(browser_homedir) then
-                        MessageBox:notice("已清除")
-                    end
-                end
-            end, {
-                ok_text = "清除",
-                cancel_text = "取消"
-            })
-        end
-    }}, {{
-        text = "修复书籍快捷方式",
-        callback = function()
-            UIManager:close(dialog)
-            self.book_browser:verifyBooksMetadata()
-        end
-    }}, {{
+    local buttons = { {{
         text = "更换书籍封面",
         callback = function()
             local ui = FileManager.instance or ReaderUI.instance
@@ -257,35 +235,61 @@ function LibraryView:openBrowserMenu(file)
                 MessageBox:notice("操作失败: 仅能在文件浏览器下操作")
             end
         end
-    }}, {{
+    }, {
         text = "更多设置",
         callback = function()
             UIManager:close(dialog)
-            self:openMenu()
+            UIManager:nextTick(function()
+                self:openMenu()
+            end)
         end
-    }}}
+    }}, {{
+        text = "清空书籍快捷方式",
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:confirm("是否清除所有书籍快捷方式?", function(result)
+                if result then
+                    local browser_homedir = self:getBrowserHomeDir(true)
+                    if self:deleteFile(browser_homedir) then
+                        MessageBox:notice("已清除")
+                    end
+                end
+            end, {
+                ok_text = "清除",
+                cancel_text = "取消"
+            })
+        end
+    }}, {{
+        text = "修复书籍快捷方式",
+        callback = function()
+            UIManager:close(dialog)
+            self.book_browser:verifyBooksMetadata()
+        end
+    }},}
 
     dialog = require("ui/widget/buttondialog"):new{
         title = "Legado 设置",
         title_align = "center",
         title_face = Font:getFace("x_smalltfont"),
         info_face = Font:getFace("tfont"),
-        buttons = buttons
+        buttons = buttons,
     }
 
     UIManager:show(dialog)
 end
 
-function LibraryView:openMenu()
+function LibraryView:openMenu(dimen)
     local dialog
     self:getInstance()
+    local unified_align = dimen and "left" or "center"
     local settings = Backend:getSettings()
-    local buttons = {{{
+    local buttons = {{},{{
         text = Icons.FA_GLOBE .. " Legado WEB地址",
         callback = function()
             UIManager:close(dialog)
             self:openInstalledReadSource()
-        end
+        end,
+        align = unified_align,
     }}, {{
         text = string.format("%s 流式漫画模式  %s", Icons.FA_BOOK,
             (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
@@ -307,9 +311,10 @@ function LibraryView:openMenu()
                 ok_text = "切换",
                 cancel_text = "取消"
             })
-        end
+        end,
+        align = unified_align,
     }}, {{
-        text = string.format("%s 自动上传阅读进度  %s", Icons.FA_FOLDER,
+        text = string.format("%s 自动上传阅读进度  %s", Icons.FA_CLOUD,
             (settings.sync_reading and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
@@ -323,7 +328,8 @@ function LibraryView:openMenu()
             end, function(err_msg)
                 MessageBox:error('设置失败:', err_msg)
             end)
-        end
+        end,
+        align = unified_align,
     }}, {{
         text = string.format("%s 自动生成快捷方式  %s", Icons.FA_FOLDER,
             (settings.disable_browser and Icons.UNICODE_STAR_OUTLINE or Icons.UNICODE_STAR)),
@@ -348,9 +354,10 @@ function LibraryView:openMenu()
                 ok_text = "切换",
                 cancel_text = "取消"
             })
-        end
+        end,
+        align = unified_align,
     }}, {{
-        text = string.format("%s Clear all caches", Icons.FA_TIMES),
+        text = string.format("%s Clear all caches", Icons.FA_TRASH),
         callback = function()
             UIManager:close(dialog)
             MessageBox:confirm(
@@ -377,7 +384,8 @@ function LibraryView:openMenu()
                     ok_text = "清空",
                     cancel_text = "取消"
                 })
-        end
+        end,
+        align = unified_align,
     }}, {{
         text = Icons.FA_QUESTION_CIRCLE .. ' ' .. "关于/更新",
         callback = function()
@@ -409,7 +417,8 @@ function LibraryView:openMenu()
             UIManager:nextTick(function()
                 Backend:checkOta(true)
             end)
-        end
+        end,
+        align = unified_align,
     }}}
 
     if not Device:isTouchDevice() then
@@ -418,7 +427,8 @@ function LibraryView:openMenu()
             callback = function()
                 UIManager:close(dialog)
                 self:onRefreshLibrary()
-            end
+            end,
+            align = unified_align,
         }})
     end
 
@@ -431,11 +441,15 @@ function LibraryView:openMenu()
     end
 
     dialog = require("ui/widget/buttondialog"):new{
-        title = string.format(Icons.FA_DATABASE .. " 剩余空间: %.1f G", self.disk_available or -1),
-        title_align = "center",
+        title = string.format(Icons.FA_DATABASE .. " Free: %.1f G", self.disk_available or -1),
+        title_align = unified_align,
         title_face = Font:getFace("x_smalltfont"),
         info_face = Font:getFace("tfont"),
-        buttons = buttons
+        buttons = buttons,
+        shrink_unneeded_width = dimen and true,
+        anchor = dimen and function()
+            return dimen
+        end or nil,
     }
 
     UIManager:show(dialog)
@@ -623,21 +637,40 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
-    function parent_ref:loadLastReadChapter(book_cache_id)
+    function parent_ref:_loadBookFromManager(file, undoFileOpen)
+
+        local loading_msg = MessageBox:info("前往最近阅读章节...", 3)
+
+        -- prioritize using custom matedata book_cache_id
+        local doc_settings = DocSettings:open(file)
+        local book_cache_id = doc_settings:readSetting("book_cache_id")
+
+        if not book_cache_id then
+            local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, file)
+            if ok and lnk_config then
+                book_cache_id = lnk_config:readSetting("book_cache_id")
+            end
+        end
+
+        -- unrecognized file
+        if not H.is_str(book_cache_id) then
+            UIManager:close(loading_msg)
+            return undoFileOpen and undoFileOpen(file)
+        end
+
         library_view_ref:getInstance()
         local library_view_instance = library_view_ref.instance
 
         if not library_view_instance then
             logger.warn("oadLastReadChapter LibraryView instance not loaded")
-            return
-        end
-        if not H.is_str(book_cache_id) then
-            MessageBox:notice("oadLastReadChapter parameter error")
+            UIManager:close(loading_msg)
+            MessageBox:error("加载书架失败")
             return
         end
 
         local bookinfo = Backend:getBookInfoCache(book_cache_id)
         if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
+            UIManager:close(loading_msg)
             -- no sync
             self:onShowLegadoLibraryView()
             MessageBox:notice("书籍不存在于书架,请刷新同步")
@@ -651,8 +684,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
 
         library_view_instance:refreshBookTocWidget(bookinfo, onReturnCallBack)
+        library_view_instance.selectetrued_item = {cache_id = book_cache_id}
 
-        return library_view_instance:openLastReadChapter(bookinfo)
+        library_view_instance:openLastReadChapter(bookinfo)
+        UIManager:close(loading_msg)
+        return true
     end
 
     function parent_ref:onShowLegadoToc(book_cache_id)
@@ -937,30 +973,13 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             open_regular_file(file)
             return
         end
-        -- prioritize using custom matedata book_cache_id
-        local doc_settings = DocSettings:open(file)
-        local book_cache_id = doc_settings:readSetting("book_cache_id")
-
-        if not book_cache_id then
-            local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, file)
-            if ok and lnk_config then
-                book_cache_id = lnk_config:readSetting("book_cache_id")
-            end
+        local ok, err = pcall(function() 
+            self:_loadBookFromManager(file, open_regular_file)
+        end)
+        if not ok then
+            logger.err("fail to open file:", err)
         end
-        if book_cache_id then
-            local loading_msg = MessageBox:info("前往最近阅读章节...", 3)
-            local ok, err = pcall(function()
-                return self:loadLastReadChapter(book_cache_id)
-            end)
-            if not ok then
-                logger.err("fFailed to go to the last read chapter:", err)
-                MessageBox:error(string.format("打开失败: %s", tostring(err)))
-            end
-            UIManager:close(loading_msg)
-            return true
-        else
-            open_regular_file(file)
-        end
+        return true
     end
 end
 
@@ -1191,9 +1210,6 @@ local function init_book_menu(parent)
         title_bar_left_icon = "appbar.menu",
         width = Device.screen:getWidth(),
         height = Device.screen:getHeight(),
-        onLeftButtonTap = function()
-            parent:openMenu()
-        end,
         close_callback = function()
             Backend:closeDbManager()
         end,
@@ -1207,6 +1223,13 @@ local function init_book_menu(parent)
         book_menu.key_events.FocusRight = {{"Right"}}
     end
 
+    function book_menu:onLeftButtonTap()
+        local dimen
+        if self.title_bar and self.title_bar.left_button and self.title_bar.left_button.image then
+            dimen = self.title_bar.left_button.image.dimen
+        end
+        parent:openMenu(dimen)
+    end
     function book_menu:onFocusRight()
         local focused_widget = Menu.getFocusItem(self)
         if focused_widget then

@@ -238,7 +238,7 @@ function ChapterListing:onMenuHold(item)
                 MessageBox:error('标记失败 ', err_msg)
             end)
         end
-    }}, {{
+    }, {
         text = table.concat({Icons.FA_DOWNLOAD, (isDownLoaded and ' 刷新' or ' 下载'), '章节'}),
         callback = function()
             UIManager:close(dialog)
@@ -263,13 +263,13 @@ function ChapterListing:onMenuHold(item)
             end)
         end
     }}, {{
-        text = table.concat({Icons.FA_THUMB_TACK, " 上传进度"}),
+        text = table.concat({Icons.FA_CLOUD, " 上传进度"}),
         callback = function()
             UIManager:close(dialog)
             self:syncProgressShow(chapter)
         end
-    }}, {{
-        text = table.concat({Icons.FA_INFO_CIRCLE, " 缓存章节"}),
+    }, {
+        text = table.concat({Icons.FA_BOOK, " 缓存章节"}),
         callback = function()
             UIManager:close(dialog)
             if not self.all_chapters_count then
@@ -468,10 +468,9 @@ function ChapterListing:syncProgressShow(chapter)
 end
 
 function ChapterListing:openMenu()
-
+    
     local dialog
-
-    local buttons = {{{
+    local buttons = {{},{{
         text = Icons.FA_REFRESH .. " 自动换源",
         callback = function()
             UIManager:close(dialog)
@@ -480,7 +479,8 @@ function ChapterListing:openMenu()
                     self:onReturn()
                 end)
             end)
-        end
+        end,
+        align = "left",
     }}, {{
         text = Icons.FA_EXCHANGE .. " 排序反转",
         callback = function()
@@ -496,7 +496,8 @@ function ChapterListing:openMenu()
             end, function(err_msg)
                 MessageBox:error('设置失败:', err_msg)
             end)
-        end
+        end,
+        align = "left",
     }}, {{
         text = table.concat({Icons.FA_THUMB_TACK, " 拉取网络进度"}),
         callback = function()
@@ -506,7 +507,8 @@ function ChapterListing:openMenu()
             end
             UIManager:close(dialog)
             self:syncProgressShow()
-        end
+        end,
+        align = "left",
     }}, {{
         text = Icons.FA_TRASH .. " 清空本书缓存",
         callback = function()
@@ -528,7 +530,8 @@ function ChapterListing:openMenu()
 
             end)
 
-        end
+        end,
+        align = "left",
     }}, {{
         text = Icons.FA_SHARE .. " 跳转到指定章节",
         callback = function()
@@ -560,7 +563,8 @@ function ChapterListing:openMenu()
                 self:onShowGotoDialog()
             end
 
-        end
+        end,
+        align = "left",
     }}}
 
     if not Device:isTouchDevice() then
@@ -569,18 +573,27 @@ function ChapterListing:openMenu()
             callback = function()
                 UIManager:close(dialog)
                 self:onRefreshChapters()
-            end
+            end,
+            align = "left",
         }})
     end
     local book_cache_id = self.bookinfo.cache_id
     local lastUpdated = Backend:getChapterLastUpdateTime(book_cache_id)
     lastUpdated = tonumber(lastUpdated)
+    local dimen
+    if self.title_bar and self.title_bar.left_button and self.title_bar.left_button.image then
+        dimen = self.title_bar.left_button.image.dimen
+    end
     dialog = ButtonDialog:new{
-        title = "chapters_cache_" .. os.date("%m-%d %H:%M:%S", lastUpdated),
-        title_align = "center",
-        title_face = Font:getFace("x_smalltfont"),
+        title = os.date("%m-%d %H:%M", lastUpdated),
+        title_align = "left",
+        -- title_face = Font:getFace("x_smalltfont"),
         info_face = Font:getFace("tfont"),
-        buttons = buttons
+        buttons = buttons,
+        shrink_unneeded_width = true,
+        anchor = dimen and function()
+            return dimen
+        end or nil,
     }
 
     UIManager:show(dialog)
