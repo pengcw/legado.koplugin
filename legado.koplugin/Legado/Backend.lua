@@ -346,7 +346,7 @@ function M:checkOta(is_compel)
     end
 end
 
-function M:show_notice(msg, timeout)
+function M:_show_notice(msg, timeout)
     local Notification = require("ui/widget/notification")
     Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
 end
@@ -2250,9 +2250,11 @@ end
 
 function M:saveBookProgressAsync(chapter)
     self:launchProcess(function()
-        local response = self:saveBookProgress(chapter)
-        if not H.is_tbl(response) or response.type ~= 'SUCCESS' then
-            logger.err("saveBookProgressAsync", (response and response.message) or '阅读进度上传失败')
+            return self:saveBookProgress(chapter)
+        end, function(status, response, r2)
+        if not (H.is_tbl(response) and response.type == 'SUCCESS') then
+            -- local message = type(response) == 'table' and response.message or "阅读进度自动上传失败"
+            self:_show_notice("自动进度上传失败")
         end
     end)
 end

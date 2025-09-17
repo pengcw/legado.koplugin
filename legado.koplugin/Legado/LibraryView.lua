@@ -422,8 +422,8 @@ function LibraryView:openMenu(dimen)
     }}}
 
     if not Device:isTouchDevice() then
-        table.insert(buttons, 4, {{
-            text = Icons.FA_EXCLAMATION_CIRCLE .. ' ' .. " 同步书架",
+        table.insert(buttons, #buttons, {{
+            text = Icons.FA_REFRESH .. ' ' .. " 同步书架",
             callback = function()
                 UIManager:close(dialog)
                 self:onRefreshLibrary()
@@ -1201,13 +1201,14 @@ local function init_book_menu(parent)
     end
     local book_menu = Menu:new{
         name = "library_view",
-        is_enable_shortcut = false,
-        is_popout = false,
+        -- is_enable_shortcut = false,
         title = "书架",
         with_context_menu = true,
         align_baselines = true,
-        covers_fullscreen = true,
+        covers_fullscreen = true, -- hint for UIManager:_repaint()
+        is_borderless = true,
         title_bar_left_icon = "appbar.menu",
+        title_bar_fm_style = true,
         width = Device.screen:getWidth(),
         height = Device.screen:getHeight(),
         close_callback = function()
@@ -1412,14 +1413,15 @@ local function init_book_menu(parent)
         else
             self:onPrimaryMenuChoice(entry, pos)
         end
+        return true
     end
 
     function book_menu:generateEmptyViewItemTable()
         return {{
-            text = string.format("No books found in library. Try%s swiping down to refresh.",
-                (Device:hasKeys({"Home"}) and ' Press the home button or ' or '')),
+            text = string.format("No books found. Try %s to refresh.",
+                (Device:hasKeys({"Home"}) and "press the home button" or "swiping down")),
             dim = true,
-            select_enabled = false
+            select_enabled = false,
         }}
     end
 

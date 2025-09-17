@@ -3,6 +3,7 @@ local Font = require("ui/font")
 local util = require("util")
 local logger = require("logger")
 local dbg = require("dbg")
+local Blitbuffer = require("ffi/blitbuffer")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 local NetworkMgr = require("ui/network/manager")
@@ -24,14 +25,17 @@ end
 
 local ChapterListing = Menu:extend{
     name = "chapter_listing",
-    is_enable_shortcut = false,
-    is_popout = false,
     title = "catalogue",
     align_baselines = true,
     is_borderless = true,
-    linesize = 0,
+    line_color = Blitbuffer.COLOR_WHITE,
+    -- can't be 0 → no key move indicator
+    -- linesize = 0,
+    covers_fullscreen = true,
     single_line = true,
     toc_items_per_page_default = 14,
+    title_bar_left_icon = "appbar.menu",
+    title_bar_fm_style = true,
 
     bookinfo = nil,
     chapter_sorting_mode = nil,
@@ -42,7 +46,6 @@ local ChapterListing = Menu:extend{
 }
 
 function ChapterListing:init()
-    self.title_bar_left_icon = "appbar.menu"
     self.onLeftButtonTap = function()
         self:openMenu()
     end
@@ -83,10 +86,10 @@ end
 
 function ChapterListing:generateEmptyViewItemTable()
     return {{
-        text = string.format("No chapters found in library. Try%s swiping down to refresh.",
-            (Device:hasKeys({"Home"}) and ' Press the home button or ' or '')),
+        text = string.format("Chapter list is empty. Try %s to refresh.",
+            (Device:hasKeys({"Home"}) and "press the home button" or "swiping down")),
         dim = true,
-        select_enabled = false
+        select_enabled = false,
     }}
 end
 
@@ -164,11 +167,11 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
         on_return_callback = onReturnCallBack,
         on_show_chapter_callback = showChapterCallBack,
 
-        subtitle = "目录",
+        title = "目录",
         with_dots = items_with_dots,
         items_per_page = items_per_page,
         items_font_size = items_font_size,
-        title = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
+        subtitle = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
             Backend:getSettings().stream_image_view == true) and "[流式]" or "")
     }
     if visible == true then
@@ -184,7 +187,10 @@ function ChapterListing:gotoLastReadChapter()
     end
 end
 
-function ChapterListing:onMenuChoice(item)
+function ChapterListing:onMenuSelect(item)
+    if item.select_enabled == false then
+        return true
+    end
     local book_cache_id = self.bookinfo.cache_id
     local chapters_index = item.chapters_index
     if item.chapters_index == nil then
@@ -208,6 +214,7 @@ function ChapterListing:onMenuChoice(item)
     else
         self:showReaderUI(chapter)
     end
+    return true
 end
 
 function ChapterListing:onMenuHold(item)
@@ -432,11 +439,11 @@ function ChapterListing:syncProgressShow(chapter)
         if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
             local response = Backend:saveBookProgress(chapter)
             if not (type(response) == 'table' and response.type == 'SUCCESS') then
-                local message = (type(response) == 'table' and response.message) or
+                local message = type(response) == 'table' and response.message or
                                     "进度上传失败，请稍后重试"
                 return {
                     type = 'ERROR',
-                    message = message
+                    message = message or ""
                 }
             end
         end
@@ -568,8 +575,8 @@ function ChapterListing:openMenu()
     }}}
 
     if not Device:isTouchDevice() then
-        table.insert(buttons, 3, {{
-            text = Icons.FA_EXCLAMATION_CIRCLE .. ' ' .. "刷新目录",
+        table.insert(buttons, #buttons, {{
+            text = Icons.FA_REFRESH .. ' ' .. "刷新目录",
             callback = function()
                 UIManager:close(dialog)
                 self:onRefreshChapters()
