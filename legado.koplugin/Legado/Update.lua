@@ -76,9 +76,8 @@ function M:ota(ok_callback)
                         if state == true and down_response and down_response.path then
                             install_ota(down_response.path)
                         else
-                            local err_msg = (H.is_tbl(down_response) and down_response.error) and down_response.error or
-                                                "下载失败，请重试"
-                            MessageBox:error(err_msg)
+                            local err_msg = (H.is_tbl(down_response) and down_response.error) or ""
+                            MessageBox:error("下载失败，请重试:" .. tostring(err_msg))
                         end
                     end)
 
@@ -159,8 +158,9 @@ function M:_downloadUpdate(release_info)
         url = url,
         method = "GET",
         file = file,
-        timeout = 20,
-        maxtime = 300
+        timeout = 30,
+        maxtime = 300,
+        redirect = true,
     }
 
     local ok, err = makeRequest(http_options)
