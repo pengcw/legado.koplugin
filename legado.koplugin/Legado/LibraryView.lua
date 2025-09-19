@@ -33,7 +33,7 @@ local LibraryView = {
     book_menu = nil,
     -- file browser mode
     book_browser = nil,
-    book_browser_homedir = nil
+    book_browser_homedir = nil,
 }
 
 function LibraryView:init()
@@ -548,12 +548,13 @@ function LibraryView:showReaderUI(chapter)
     if not (H.is_tbl(chapter) and H.is_str(chapter.cacheFilePath)) then
         return
     end
-    self.displayed_chapter = chapter
     local book_path = chapter.cacheFilePath
     if not util.fileExists(book_path) then
         return MessageBox:error(book_path, "不存在")
     end
-    if self.book_toc then
+    self.displayed_chapter = chapter
+
+    if self.book_toc and UIManager:isWidgetShown(self.book_toc) then
         UIManager:close(self.book_toc)
     end
     if ReaderUI.instance then
@@ -1215,13 +1216,20 @@ local function init_book_menu(parent)
             Backend:closeDbManager()
         end,
         show_search_item = nil,
-        parent_ref = parent
+        refresh_menu_key = nil,
+        parent_ref = parent,
     }
 
-    if Device:hasKeys({"Home"}) or Device:hasDPad() then
-        book_menu.key_events.Close = {{Device.input.group.Back}}
-        book_menu.key_events.RefreshLibrary = {{"Home"}}
-        book_menu.key_events.FocusRight = {{"Right"}}
+    if Device:hasKeys() then
+        book_menu.refresh_menu_key = "Home"
+        if Device:hasKeyboard() then
+            book_menu.refresh_menu_key = "F5"
+        end
+        book_menu.key_events.RefreshChapters = { { book_menu.refresh_menu_key } }
+    end
+    if Device:hasDPad() then
+        book_menu.key_events.FocusRight = {{ "Right" }}
+        book_menu.key_events.Right = nil
     end
 
     function book_menu:onLeftButtonTap()
@@ -1417,9 +1425,11 @@ local function init_book_menu(parent)
     end
 
     function book_menu:generateEmptyViewItemTable()
+        local hint = (self.refresh_menu_key and not Device:isTouchDevice())
+            and string.format("press the %s button", self.refresh_menu_key)
+            or "swiping down"
         return {{
-            text = string.format("No books found. Try %s to refresh.",
-                (Device:hasKeys({"Home"}) and "press the home button" or "swiping down")),
+            text = string.format("No books found. Try %s to refresh.", hint),
             dim = true,
             select_enabled = false,
         }}

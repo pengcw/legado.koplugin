@@ -42,22 +42,30 @@ local ChapterListing = Menu:extend{
     all_chapters_count = nil,
     on_return_callback = nil,
     on_show_chapter_callback = nil,
-    ui_refresh_time = nil
+    ui_refresh_time = nil,
+    refresh_menu_key = nil,
 }
 
 function ChapterListing:init()
+    self.width, self.height = Screen:getWidth(), Screen:getHeight()
     self.onLeftButtonTap = function()
         self:openMenu()
     end
 
-    self.width, self.height = Screen:getWidth(), Screen:getHeight()
-
     Menu.init(self)
     
-    if Device:hasKeys({"Home"}) or Device:hasDPad() then
-        self.key_events.Close = {{Device.input.group.Back}}
-        self.key_events.RefreshChapters = {{"Home"}}
-        self.key_events.Right = {{"Right"}}
+    
+    if Device:hasKeys() then
+        self.refresh_menu_key = "Home"
+        if Device:hasKeyboard() then
+            self.refresh_menu_key = "F5"
+        end
+        self.key_events.RefreshChapters = {{ self.refresh_menu_key }}
+    end
+
+    if Device:hasDPad() then
+        self.key_events.FocusRight = nil
+        self.key_events.Right = {{ "Right" }}
     end
 
     self.ui_refresh_time = os.time()
@@ -70,24 +78,26 @@ function ChapterListing:refreshItems(no_recalculate_dimen)
     local chapter_cache_data = Backend:getBookChapterCache(book_cache_id)
 
     if H.is_tbl(chapter_cache_data) and #chapter_cache_data > 0 then
-
         self.item_table = self:generateItemTableFromChapters(chapter_cache_data)
         self.multilines_show_more_text = false
         self.items_per_page = nil
-
+        self.single_line = true
     else
         self.item_table = self:generateEmptyViewItemTable()
         self.multilines_show_more_text = true
         self.items_per_page = 1
+        self.single_line = false
     end
     Menu.updateItems(self, nil, no_recalculate_dimen)
     self:gotoLastReadChapter()
 end
 
 function ChapterListing:generateEmptyViewItemTable()
+    local hint = (self.refresh_menu_key and not Device:isTouchDevice())
+    and string.format("press the %s button", self.refresh_menu_key)
+     or "swiping down"
     return {{
-        text = string.format("Chapter list is empty. Try %s to refresh.",
-            (Device:hasKeys({"Home"}) and "press the home button" or "swiping down")),
+        text = string.format("Chapter list is empty. Try %s to refresh.", hint),
         dim = true,
         select_enabled = false,
     }}
@@ -135,7 +145,7 @@ end
 function ChapterListing:updateReturnCallback(callback)
     -- Skip changes when callback is nil
     if H.is_func(callback) then
-        self.on_show_chapter_callback = callback
+        self.on_return_callback = callback
     end
 end
 
@@ -187,15 +197,13 @@ function ChapterListing:gotoLastReadChapter()
     end
 end
 
-function ChapterListing:onMenuSelect(item)
-    if item.select_enabled == false then
+function ChapterListing:onMenuChoice(item)
+    if item.chapters_index == nil then
         return true
     end
     local book_cache_id = self.bookinfo.cache_id
     local chapters_index = item.chapters_index
-    if item.chapters_index == nil then
-        return true
-    end
+
     local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
     if chapter.cacheExt == 'cbz' and Backend:getSettings().stream_image_view == true then
         ChapterListing.onReturnCallback = function()
@@ -208,17 +216,19 @@ function ChapterListing:onMenuSelect(item)
                     chapter = chapter,
                     on_return_callback = ChapterListing.onReturnCallback
                 })
+                UIManager:close(self)
             end)
         end)
         MessageBox:notice("流式漫画开启")
     else
+        if self.onShowingReader then self:onShowingReader() end
         self:showReaderUI(chapter)
     end
     return true
 end
 
 function ChapterListing:onMenuHold(item)
-
+    
     local book_cache_id = self.bookinfo.cache_id
     local chapters_index = item.chapters_index
     if item.chapters_index == nil then
@@ -478,7 +488,7 @@ function ChapterListing:openMenu()
     
     local dialog
     local buttons = {{},{{
-        text = Icons.FA_REFRESH .. " 自动换源",
+        text = Icons.FA_GLOBE .. " 切换书源",
         callback = function()
             UIManager:close(dialog)
             NetworkMgr:runWhenOnline(function()

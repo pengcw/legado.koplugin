@@ -144,15 +144,36 @@ local function pDownload_CreateCBZ(filePath, img_sources)
         end
     end
 
-    local ZipWriter = require("ffi/zipwriter")
+    local cbz
+    local cbz_lib
+    local no_compression
+    local mtime
 
-    local cbz = ZipWriter:new{}
-    if not cbz:open(cbz_path_tmp) then
-        error('CreateCBZ cbz:open err')
+    -- 20250525 PR # 2090: Archive.Writer replaces ZipWriter
+    local ok , ZipWriter = pcall(require, "ffi/zipwriter")
+    if ok and ZipWriter then
+        cbz_lib = "zipwriter"
+        no_compression = true
+
+        cbz = ZipWriter:new{}
+        if not cbz:open(cbz_path_tmp) then
+            error('CreateCBZ cbz:open err')
+        end
+        cbz:add("mimetype", "application/vnd.comicbook+zip", true)
+    else
+        cbz_lib = "archiver"
+        mtime = os.time()
+
+        local Archiver = require("ffi/archiver").Writer
+        cbz = Archiver:new{}
+        if not cbz:open(cbz_path_tmp, "epub") then
+            error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
+        end
+
+        cbz:setZipCompression("store")
+        cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", mtime)
+        cbz:setZipCompression("deflate")
     end
-    cbz:add("mimetype", "application/vnd.comicbook+zip", true)
-
-    local no_compression = true
 
     for i, img_src in ipairs(img_sources) do
 
@@ -181,15 +202,20 @@ local function pDownload_CreateCBZ(filePath, img_sources)
                 imgdata = imgdata_new.data
             end
 
-            cbz:add(img_name, imgdata, no_compression)
+            if cbz_lib == "zipwriter" then
+                cbz:add(img_name, imgdata, no_compression)
+            else
+                cbz:addFileFromMemory(img_name, imgdata, mtime)
+            end
 
         else
             dbg.v('Download_Image err', tostring(err))
         end
         ::continue::
     end
-
-    cbz:close()
+    if cbz and cbz.close then
+        cbz:close()
+    end
     dbg.v('CreateCBZ cbz:close')
 
     if util.fileExists(filePath) ~= true then
