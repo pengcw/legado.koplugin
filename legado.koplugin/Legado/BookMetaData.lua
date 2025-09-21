@@ -51,5 +51,11 @@ return {
                 page_overlap_style = true, -- 翻页重叠区域样式
                 panel_zoom_enabled = true, -- 启用面板缩放控件
                 kopt_forced_ocr = true, -- 强制OCR识别
-                kopt_writing_direction = true -- 文字方向
+                kopt_writing_direction = true, -- 文字方向
+                
+                -- 自定义样式
+                book_style_tweak = true,
+                book_style_tweak_enabled = true,
+                book_style_tweak_last_edit_pos = true,
+               
             }
