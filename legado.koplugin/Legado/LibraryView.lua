@@ -575,16 +575,15 @@ function LibraryView:openLastReadChapter(bookinfo)
     end
 
     local book_cache_id = bookinfo.cache_id
-    local last_read_chapter = Backend:getLastReadChapter(book_cache_id)
+    local last_read_chapter_index = Backend:getLastReadChapter(book_cache_id)
     -- default 0
-    if H.is_num(last_read_chapter) then
+    if H.is_num(last_read_chapter_index) then
 
-        local chapters_index = last_read_chapter - 1
-        if chapters_index < 0 then
-            chapters_index = 0
+        if last_read_chapter_index < 0 then
+            last_read_chapter_index = 0
         end
 
-        local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+        local chapter = Backend:getChapterInfoCache(book_cache_id, last_read_chapter_index)
         if H.is_tbl(chapter) and chapter.chapters_index then
             -- jump to the reading position
             chapter.call_event = "next"
