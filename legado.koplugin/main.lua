@@ -73,32 +73,24 @@ end
 
 local is_low_version
 function Legado:addToMainMenu(menu_items)
+    if not (self.ui and menu_items) then return end
     if not self.ui.document then -- FileManager menu only
         if is_low_version == nil then
             local ko_version = require("version"):getNormalizedCurrentVersion()
             is_low_version = (ko_version and ko_version < 202411000000)
         end
-        menu_items.Legado = {
-            text = is_low_version and "Legado 书目(低版环境)" or "Legado 书目",
+        menu_items.Legado_main = {
+            text_func = function()
+                return is_low_version and "Legado 书目(低版环境)" or "Legado 书目"
+            end,
             sorting_hint = "search",
             help_text = "连接 Legado 书库" .. (is_low_version and "，Koreader 版本低，建议升级" or ""),
             callback = function()
                 self:openLibraryView()
             end
         }
-    else
-
-        if not self.patches_ok and self.ui and self.ui.name == "readerUI" and LibraryView.instance and
-            LibraryView.instance.readerui_is_showing == true then
-            menu_items.go_back_to_legado = {
-                text = "返回 Legado...",
-                sorting_hint = "main",
-                help_text = "点击返回 Legado 书籍目录",
-                callback = function()
-                    self.ui:handleEvent(Event:new("ShowLegadoToc"))
-                end
-            }
-        end
+    elseif self.ui.document.file and self.ui.name == "ReaderUI" then
+        self:initializeFromReaderUI(self.ui.document, menu_items)
     end
 end
 
