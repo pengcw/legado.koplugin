@@ -278,6 +278,18 @@ function LibraryView:openBrowserMenu(file)
     UIManager:show(dialog)
 end
 
+local function switch_sync_reading(settings)
+    settings = H.is_tbl(settings) and settings or Backend:getSettings()
+    local ok_msg = settings.sync_reading and "关闭" or "开启"
+    settings.sync_reading = not settings.sync_reading or nil
+    Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+        MessageBox:notice(string.format("设置已%s", ok_msg))
+    end, function(err_msg)
+        MessageBox:error('设置失败:', err_msg)
+    end)
+    return settings
+end
+
 function LibraryView:openMenu(dimen)
     local dialog
     self:getInstance()
@@ -318,16 +330,7 @@ function LibraryView:openMenu(dimen)
             (settings.sync_reading and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
-            local ok_msg = "设置已开启"
-            if settings.sync_reading then
-                    ok_msg = "设置已关闭"
-            end
-            settings.sync_reading = not settings.sync_reading or nil
-            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-                MessageBox:notice(ok_msg)
-            end, function(err_msg)
-                MessageBox:error('设置失败:', err_msg)
-            end)
+            switch_sync_reading(settings)
         end,
         align = unified_align,
     }}, {{
@@ -610,6 +613,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
     local H = require("Legado/Helper")
 
     local library_view_ref = self
+    local ext_switch_sync_reading = switch_sync_reading
 
     local is_legado_path = function(file_path, instance)
         if instance and instance.document and instance.document.file then
@@ -980,6 +984,51 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             logger.err("fail to open file:", err)
         end
         return true
+    end
+
+    function parent_ref:initializeFromReaderUI(document, menu_items)
+        if not (document and menu_items and is_legado_path(document.file)) then 
+            return 
+        end
+        
+        if not self.patches_ok then
+            menu_items.go_back_to_legado = {
+                text = "返回 Legado...",
+                sorting_hint = "main",
+                help_text = "点击返回 Legado 书籍目录",
+                callback = function()
+                    self.ui:handleEvent(Event:new("ShowLegadoToc"))
+                end
+            }
+        end
+        
+        local settings = Backend:getSettings()
+
+        menu_items.Legado_reader_ui_menu = {
+            text = "Legado 书目",
+            sorting_hint = "search",
+            sub_item_table = {{
+                text = "自动上传阅读进度",
+                keep_menu_open = true,
+                help_text = "阅读时，自动上传阅读进度",
+                checked_func = function() return settings.sync_reading == true end,
+                callback = function() ext_switch_sync_reading(settings) end,
+            }, {
+                text = "立即上传阅读进度",
+                callback = function()
+                    library_view_ref:getInstance()
+                    local library_view_instance = library_view_ref.instance
+                    if not (library_view_instance and library_view_instance.book_toc) then return end
+                    local reading_chapter = library_view_instance.displayed_chapter
+                    if reading_chapter and reading_chapter.book_cache_id then
+                        library_view_ref.instance.book_toc:syncProgressShow(reading_chapter)
+                    else
+                        MessageBox:error("上传进度失败: 没有获取到当前章节")
+                    end
+                end,
+            }},
+        }
+        
     end
 end
 
