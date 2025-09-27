@@ -12,56 +12,64 @@ local T = ffiUtil.template
 local Icons = require("Legado/Icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
-local ChapterListing = require("Legado/ChapterListing")
 local H = require("Legado/Helper")
 
-local M = Menu:extend{
-    name = "book_search_results",
-    is_enable_shortcut = false,
-    title = "Search results",
+local M = {
+    results = {},
+    last_read_chapter = nil,
+    _last_search_input = nil,
 
-    fullscreen = true,
-    covers_fullscreen = true,
-    single_line = true,
-    results = nil,
     bookinfo = nil,
     search_text = nil,
-    last_read_chapter = nil,
-
+    -- "CHANGE_SOURCE"
+    -- "SEARCH"
+    -- "AUTO_CHANGE_SOURCE"
     call_mode = nil,
+    is_reader3 = nil,
+    is_legado_app = nil,
+    is_single_source_search = nil,
+
     last_index = nil,
-    -- callback to be called when pressing the back button
-    on_return_callback = nil,
-    results_menu_container = nil,
-    _last_search_input = nil
+    has_more_api_results = nil,
+
+    on_success_callback = nil,
+    results_menu = nil,
+
+    width = nil,
+    height = nil,
+    items_font_size = nil,
 }
 
 function M:init()
-    self.results = self.results or {}
+    local settings = Backend:getSettings()
+    self.is_reader3 = settings.server_type == 2
+    self.is_legado_app = settings.server_type == 1
 
     self.width = math.floor(Screen:getWidth() * 0.9)
     self.height = math.floor(Screen:getHeight() * 0.9)
-
-    Menu.init(self)
-
-    if Device:hasKeys({"Right"}) or Device:hasDPad() then
-        self.key_events.Close = {{Device.input.group.Back}}
-        self.key_events.FocusRight = {{"Right"}}
-    end
-
-    -- see `ChapterListing` for an explanation on this
-    -- FIXME we could refactor this into a single class
-    self.paths = {{
-        callback = self.on_return_callback
-    }}
-    self.on_return_callback = nil
-
-    self:refreshItems()
+    self.items_font_size = Menu.getItemFontSize(8)
 end
 
-function M:refreshItems(no_recalculate_dimen, append_data)
-    self.item_table = self:generateItemTableFromSearchResults(append_data)
-    Menu.updateItems(self, nil, no_recalculate_dimen)
+function M:getApiMoreRresults()
+    if not self.is_reader3 then return end
+    if self.call_mode == "SEARCH" then
+        self:handleMultiSourceSearch(self.search_text, true)  
+    elseif self.call_mode == "CHANGE_SOURCE" then
+        self:searchMoreBookSource()
+    end
+end
+
+function M:onMenuGotoPage(menu_self, new_page)
+    Menu.onGotoPage(menu_self, new_page)
+
+    local is_last_page = new_page == menu_self.page_num
+
+    if is_last_page and self.has_more_api_results and self.last_index ~= nil then
+        UIManager:nextTick(function()
+            self:getApiMoreRresults()
+        end)
+    end
+    return true
 end
 
 function M:menuCenterShow(menuObj)
@@ -74,22 +82,98 @@ function M:menuCenterShow(menuObj)
     return menu_container
 end
 
-function M:generateItemTableFromSearchResults(append_data)
+function M:refreshItems(no_recalculate_dimen, append_data)
+    if self.results_menu then
+        self.results_menu.item_table = self:generateItemTableFromResults(append_data)
+        Menu.updateItems(self.results_menu, nil, no_recalculate_dimen)
+    end
+end
+
+function M:modifySuccessCallback(is_close_menu)
+    if H.is_func(self.on_success_callback) then
+        UIManager:nextTick(function()
+            self.on_success_callback()
+        end)
+    end
+    return is_close_menu and self:onCloseMenu()
+end
+
+function M:onCloseMenu()
+    self.results = nil
+    self.bookinfo = nil
+    self.search_text = nil
+    self.call_mode = nil
+    self.last_index = nil
+    self.is_single_source_search = nil
+    if self.results_menu and self.results_menu._container then
+        UIManager:close(self.results_menu._container)
+        self.results_menu._container = nil
+    end
+end
+
+function M:createBookSourceMenu(option)
+    local title = option.title
+    local subtitle = option.subtitle
+
+    local results_menu
+    results_menu = Menu:new{
+        name = "book_search_results",
+        is_enable_shortcut = false,
+        fullscreen = true,
+        covers_fullscreen = true,
+        items_font_size = self.items_font_size,
+        width = self.width,
+        height = self.height,
+
+        title = title or "Search results",
+        subtitle = subtitle,
+        onMenuSelect = function(self_menu, item)
+            local source_index = item and item.source_index
+            if not H.is_num(source_index) then return true end
+            if source_index > 0 and H.is_tbl(self.results) then
+                local bookinfo = self.results[source_index]
+                self:showBookInfo(bookinfo)
+            elseif source_index == 0 then
+                self:getApiMoreRresults()
+            end
+            return true
+        end,
+        close_callback = function()
+            self:onCloseMenu()
+        end
+    }
+
+    if Device:hasDPad() then
+        results_menu.key_events.FocusRight = nil
+        results_menu.key_events.Right = {{ "Right" }}
+    end
+
+    -- only is_reader3
+    if self.is_reader3 then
+        results_menu.onGotoPage = function(menu_self, new_page)
+            return self:onMenuGotoPage(menu_self, new_page)
+        end
+    end
+    results_menu.onMenuHold = results_menu.onMenuSelect  
+    
+    self.results_menu = results_menu
+    self.results_menu._container = self:menuCenterShow(results_menu)
+    
+    if option.show_parent then
+        self.results_menu._container.show_parent = option.show_parent
+    end
+
+    self:refreshItems()
+
+    return results_menu
+end
+
+function M:generateItemTableFromResults(append_data)
 
     local item_table = {}
     self.results = self.results or {}
-    if not H.is_tbl(append_data) then
-        append_data = nil
-    end
 
-    if self.call_mode == 11 then
-        item_table[1] = {
-            source_index = 0,
-            text = Icons.FA_MAGNIFYING_GLASS .. " 点击搜索更多书源"
-        }
-    end
-
-    if H.is_tbl(append_data) and (self.call_mode == 12 or self.call_mode == 2) then
+    if H.is_tbl(append_data) then
         for _, v in ipairs(append_data) do
             table.insert(self.results, v)
         end
@@ -97,7 +181,7 @@ function M:generateItemTableFromSearchResults(append_data)
 
     for source_index, new_bookinfo in ipairs(self.results) do
         local item_table_txt
-        if self.call_mode == 1 then
+        if self.is_single_source_search then
             item_table_txt = string.format("%s (%s)", new_bookinfo.name, new_bookinfo.author or "")
         else
             item_table_txt = string.format("%s (%s)[%s]", new_bookinfo.name, new_bookinfo.author or "",
@@ -108,22 +192,35 @@ function M:generateItemTableFromSearchResults(append_data)
             text = item_table_txt
         })
     end
-
-    if self.call_mode == 12 or self.call_mode == 2 then
-        table.insert(item_table, {
-            source_index = 0,
-            text = string.format("%s 点击加载更多 l:%s", Icons.FA_DOWNLOAD, tostring(self.last_index))
-        })
+    
+    -- add command item; if not enough to fill one page, add a button
+    if self.has_more_api_results == true then
+        local results_menu_perpage = 15
+        if self.results_menu and self.results_menu.perpage then
+            results_menu_perpage = tonumber(self.results_menu.perpage) or 15
+        end
+        if not (#self.results > results_menu_perpage) then
+            table.insert(item_table, {
+                source_index = 0,
+                text = Icons.FA_ARROW_DOWN .. " 点击加载更多 ..."
+            })
+        end
     end
 
     return item_table
-
 end
 
-function M:fetchAndShow(bookinfo, onReturnCallback)
-    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
+function M:changeSourceDialog(bookinfo, onReturnCallback)
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl)) then
         return MessageBox:error('参数错误')
     end
+
+    self:init()
+
+    self.bookinfo = bookinfo
+    self.call_mode = "CHANGE_SOURCE"
+    self.on_success_callback = onReturnCallback
+
     local bookUrl = bookinfo.bookUrl
     local name = bookinfo.name
     local author = bookinfo.author
@@ -135,34 +232,33 @@ function M:fetchAndShow(bookinfo, onReturnCallback)
             })
     end, function(state, response)
         if state == true then
-            local results_data = {}
             Backend:HandleResponse(response, function(data)
-
                 if not H.is_tbl(data) then
                     return MessageBox:notice('返回书源错误')
                 end
                 if #data == 0 then
                     return MessageBox:error('没有可用源')
                 end
-                results_data = data
+
+                -- reader3 has searchMoreBookSource
+                if self.is_reader3 then
+                    self.has_more_api_results = true
+                    self.last_index = 0  
+                end
+                
+                self.results = data
+                self:createBookSourceMenu({
+                    title = "换源",
+                    subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
+                })
             end, function(err_msg)
                 MessageBox:notice(err_msg or '加载失败')
             end)
-
-            self.results_menu_container = self:menuCenterShow(M:new{
-                results = results_data,
-                bookinfo = bookinfo,
-                call_mode = Backend:getSettings().server_type == 2 and 11 or 31,
-                on_return_callback = onReturnCallback,
-                subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
-                title = "换源",
-                items_font_size = Menu.getItemFontSize(8)
-            })
         end
     end)
 end
 
-function M:checkChapterContent(bookUrl, chapterIndex)
+function M:_checkChapterContent(bookUrl, chapterIndex)
     if not (bookUrl and H.is_num(chapterIndex)) then
         return false
     end
@@ -188,22 +284,14 @@ local function source_list_shuffle(t)
     return t
 end
 
-function M:autoChangeSourceSocket(bookinfo, onReturnCallback)
-
-    if Backend:getSettings().server_type ~= 1 then
-        MessageBox:notice("仅支持阅读 App")
-        return
+function M:_autoChangeSourceSocket(bookinfo, onReturnCallback)
+    if not self.is_legado_app then
+        return MessageBox:notice("仅支持阅读 App")
     end
 
     if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
         return MessageBox:error('参数错误')
     end
-
-    self.bookinfo = bookinfo
-    self.call_mode = 30
-    self.paths = {{
-        callback = onReturnCallback
-    }}
 
     local old_bookUrl = self.bookinfo.bookUrl
     local old_originName = self.bookinfo.originName
@@ -217,8 +305,7 @@ function M:autoChangeSourceSocket(bookinfo, onReturnCallback)
         return Backend:getAvailableBookSource({
             bookUrl = old_bookUrl,
             name = bookinfo.name,
-            author = bookinfo.author
-
+            author = bookinfo.author,
         })
     end, function(state, response)
         if state == true then
@@ -293,8 +380,8 @@ function M:autoChangeSourceSocket(bookinfo, onReturnCallback)
                             end
 
                             -- 检查正文
-                            if self:checkChapterContent(bookUrl, self.last_read_chapter) and
-                                self:checkChapterContent(bookUrl, next_check_chapter) then
+                            if self:_checkChapterContent(bookUrl, self.last_read_chapter) and
+                                self:_checkChapterContent(bookUrl, next_check_chapter) then
                
                                 response_origin = new_bookinfo
                                 break
@@ -316,8 +403,7 @@ function M:autoChangeSourceSocket(bookinfo, onReturnCallback)
                 if state == true and H.is_tbl(response) and response.bookUrl and response.origin then
                         MessageBox:notice("换源成功")
                         Backend:refreshLibraryCache()
-                         return self:onCloseUI()
-             
+                        self:modifySuccessCallback(true)
                 else
                          return MessageBox:error(string.format(
                         "换源失败，检查书源%s个\n(可搜索添加同名同作者书籍方式手动换源，或者使用 app 换源后刷新)",
@@ -333,15 +419,14 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
         return MessageBox:error('参数错误')
     end
 
-    if Backend:getSettings().server_type == 1 then
-        return self:autoChangeSourceSocket(bookinfo, onReturnCallback)
-    end
+    self:init()
 
     self.bookinfo = bookinfo
-    self.call_mode = 30
-    self.paths = {{
-        callback = onReturnCallback
-    }}
+    self.call_mode = "AUTO_CHANGE_SOURCE"
+
+    if self.is_legado_app then
+        return self:_autoChangeSourceSocket(bookinfo, onReturnCallback)
+    end
 
     local old_bookUrl = self.bookinfo.bookUrl
     local old_originName = self.bookinfo.originName
@@ -361,7 +446,6 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
         if state == true then
             local results_data = {}
             Backend:HandleResponse(response, function(data)
-
                 if not H.is_tbl(data) then
                     return MessageBox:notice('返回书源错误')
                 end
@@ -425,8 +509,8 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
                         next_check_chapter = self.last_read_chapter - 1
                     end
 
-                    if self:checkChapterContent(bookUrl, self.last_read_chapter) and
-                        self:checkChapterContent(bookUrl, next_check_chapter) then
+                    if self:_checkChapterContent(bookUrl, self.last_read_chapter) and
+                        self:_checkChapterContent(bookUrl, next_check_chapter) then
                         response_origin = new_bookinfo
                         break
                     end
@@ -497,6 +581,10 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
 end
 
 function M:showBookInfo(bookinfo)
+    if not H.is_tbl(bookinfo) then
+        return MessageBox:error("参数错误")
+    end
+
     local msginfo = [[
 书名: <<%1>>
 作者: %2
@@ -516,9 +604,9 @@ function M:showBookInfo(bookinfo)
         no_ok_button = true,
         other_buttons_first = true,
         other_buttons = {{{
-            text = (self.call_mode < 10) and '添加' or '换源',
+            text = (self.call_mode == "SEARCH") and '添加' or '换源',
             callback = function()
-                if self.call_mode < 10 or self.call_mode == 31 then
+                if self.call_mode == "SEARCH" then
                     self:addBookToLibrary(bookinfo)
                 else
                     self:setBookSource(bookinfo)
@@ -532,13 +620,19 @@ local function validateInput(text)
     return type(text) == 'string' and text:gsub("%s+", "") ~= ""
 end
 
-function M:searchAndShow(onReturnCallback, def_input)
-    local inputText = ""
+function M:searchBookDialog(onReturnCallback, def_input)
+    local inputText
     local dialog
+
+    self:init()
 
     if self._last_search_input and not def_input then
         def_input = self._last_search_input
     end
+    
+    self.call_mode = "SEARCH"
+    self.on_success_callback = onReturnCallback
+
     dialog = MessageBox:input(
         "请键入要搜索的书籍或作者名称：\n(多源搜索可使用 '=书名' 语法精确匹配)", nil, {
             title = '添加书籍',
@@ -547,7 +641,7 @@ function M:searchAndShow(onReturnCallback, def_input)
             buttons = {{{
                 text = "单源搜索",
                 callback = function()
-                    if Backend:getSettings().server_type == 1 then
+                    if self.is_legado_app then
                         return MessageBox:notice('阅读 App 仅支持多源搜索')
                     end
                     inputText = dialog:getInputText()
@@ -558,7 +652,6 @@ function M:searchAndShow(onReturnCallback, def_input)
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
-                    self.on_return_callback = onReturnCallback
                     self:handleSingleSourceSearch(inputText)
                 end
             }, {
@@ -572,8 +665,7 @@ function M:searchAndShow(onReturnCallback, def_input)
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
-                    self.on_return_callback = onReturnCallback
-                    if Backend:getSettings().server_type == 1 then
+                    if self.is_legado_app then
                         self:searchBookSocket(inputText)
                     else
                         self:handleMultiSourceSearch(inputText)
@@ -591,10 +683,11 @@ end
 
 function M:handleSingleSourceSearch(searchText)
     self:selectBookSource(function(item, sourceMenu)
-        local bookSourceUrl = item.url
-        local bookSourceName = item.name
+        if not H.is_tbl(item) then return end
+        local book_source_url = item.url
+        local book_source_name = item.name
         MessageBox:loading(string.format("%s 查询中 ", item.text or ""), function()
-            return Backend:searchBook(searchText, bookSourceUrl)
+            return Backend:searchBook(searchText, book_source_url)
         end, function(state, response)
             if state == true then
                 Backend:HandleResponse(response, function(data)
@@ -605,16 +698,13 @@ function M:handleSingleSourceSearch(searchText)
                         return MessageBox:notice('未找到相关书籍')
                     end
 
-                    self.results_menu_container = self:menuCenterShow(M:new{
-                        results = data,
-                        call_mode = 1,
-                        search_text = searchText,
-                        title = string.format('单源搜索 [%s]', bookSourceName),
+                    self.results = data
+                    self.is_single_source_search = true
+                    self:createBookSourceMenu({
+                        title = string.format('单源搜索 [%s]', book_source_name),
                         subtitle = string.format("key: %s", searchText),
-                        items_font_size = Menu.getItemFontSize(8)
+                        show_parent = sourceMenu.show_parent,
                     })
-
-                    self.results_menu_container.show_parent = sourceMenu.show_parent
 
                 end, function(err_msg)
                     MessageBox:notice(err_msg or '搜索请求失败')
@@ -641,12 +731,10 @@ function M:searchBookSocket(search_text)
                     return MessageBox:notice('服务器返回为空')
                 end
 
-                self.results_menu_container = self:menuCenterShow(M:new{
-                    results = data,
-                    call_mode = 31,
+                self.results = data
+                self:createBookSourceMenu({
                     title = '多源搜索',
                     subtitle = string.format("key: %s", search_text),
-                    items_font_size = Menu.getItemFontSize(8)
                 })
             end, function(err_msg)
                 MessageBox:notice(err_msg or '搜索请求失败')
@@ -660,8 +748,8 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
         MessageBox:notice("参数错误")
         return
     end
-
-    self.last_index = self.last_index or -1
+    
+    self.last_index = self.last_index ~= nil and self.last_index or -1
 
     MessageBox:loading(string.sub(search_text, 1, 1) ~= '=' and string.format("正在搜索 [%s] ", search_text) or
                            string.format("精准搜索 [%s] ", string.sub(search_text, 2)), function()
@@ -677,22 +765,25 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
                 end
 
                 logger.dbg("当前data.lastIndex:", data.lastIndex)
-
-                self.last_index = data.lastIndex
+                if data.lastIndex and self.last_index ~= data.lastIndex then
+                    self.has_more_api_results = true
+                    self.last_index = data.lastIndex
+                else
+                    self.has_more_api_results = nil
+                end
 
                 if is_more_call ~= true then
-                    self.results_menu_container = self:menuCenterShow(M:new{
-                        results = data.list,
-                        call_mode = 2,
+                    self.results = data.list
+                    self:createBookSourceMenu({
                         title = '多源搜索',
                         subtitle = string.format("key: %s", search_text),
-                        items_font_size = Menu.getItemFontSize(8)
                     })
                 else
                     self:refreshItems(false, data.list)
                 end
 
             end, function(err_msg)
+                if err_msg == "没有更多了" then self.has_more_api_results = nil end
                 MessageBox:notice(err_msg or '搜索请求失败')
             end)
         end
@@ -700,7 +791,6 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
 end
 
 function M:selectBookSource(selectCallback)
-
     MessageBox:loading("获取源列表 ", function()
         return Backend:getBookSourcesList()
     end, function(state, response)
@@ -730,15 +820,14 @@ function M:selectBookSource(selectCallback)
                     subtitle = string.format("key: %s", self.search_text or ""),
                     item_table = source_list_menu_table,
                     items_per_page = 15,
-                    items_font_size = Menu.getItemFontSize(8),
-                    single_line = true,
+                    items_font_size = self.items_font_size,
                     covers_fullscreen = true,
                     fullscreen = true,
-                    width = math.floor(Screen:getWidth() * 0.9),
-                    height = math.floor(Screen:getHeight() * 0.9),
-                    onMenuSelect = function(self_menu, item)
-                        if selectCallback then
-                            selectCallback(item, self_menu)
+                    width = self.width,
+                    height = self.height,
+                    onMenuSelect = function(menu_self, item)
+                        if H.is_func(selectCallback) then
+                            selectCallback(item, menu_self)
                         end
                     end,
                     close_callback = function()
@@ -755,12 +844,17 @@ function M:selectBookSource(selectCallback)
 end
 
 function M:setBookSource(bookinfo)
-    if not self.bookinfo then
+    if not (self.bookinfo and bookinfo) then
         MessageBox:notice('参数错误')
         return
     end
+
+    if self.is_legado_app then
+        return self:addBookToLibrary(bookinfo)
+    end
+
     local old_bookUrl = self.bookinfo.bookUrl
-    if not (self.call_mode > 10 and H.is_str(old_bookUrl) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.origin)) then
+    if not (self.call_mode ~= "SEARCH" and H.is_str(old_bookUrl) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.origin)) then
         MessageBox:notice('参数错误')
         return
     end
@@ -775,7 +869,6 @@ function M:setBookSource(bookinfo)
         if state == true then
             Backend:HandleResponse(response, function(data)
                 MessageBox:notice('换源成功')
-                self:onCloseUI()
             end, function(err_msg)
                 MessageBox:error(err_msg or '操作失败')
             end)
@@ -784,9 +877,8 @@ function M:setBookSource(bookinfo)
 end
 
 function M:addBookToLibrary(bookinfo)
-    if self.call_mode > 10 and self.call_mode ~= 31 then
-        MessageBox:notice('参数错误')
-        return
+    if self.call_mode ~= "SEARCH" and not self.is_legado_app then
+        return MessageBox:notice('参数错误')
     end
     Backend:closeDbManager()
     MessageBox:loading("添加中 ", function()
@@ -795,7 +887,7 @@ function M:addBookToLibrary(bookinfo)
         if state == true then
             Backend:HandleResponse(response, function(data)
                 MessageBox:notice('添加成功')
-                self:onCloseUI()
+                self:modifySuccessCallback(true)
             end, function(err_msg)
                 MessageBox:error(err_msg or '操作失败')
             end)
@@ -821,79 +913,25 @@ function M:searchMoreBookSource()
                     return MessageBox:notice('返回书源错误')
                 end
                 if #data.list == 0 then
+                    self.has_more_api_results = nil
                     return MessageBox:error('没有可用源')
                 end
-                self.last_index = data.lastIndex
 
-                if self.call_mode == 11 then
-                    self.results = data.list
-                    self.call_mode = 12
-                    self:refreshItems()
-                elseif self.call_mode == 12 then
-                    self:refreshItems(false, data.list)
+                if data.lastIndex and self.last_index ~= data.lastIndex then
+                    self.has_more_api_results = true
+                    self.last_index = data.lastIndex
+                else
+                    self.has_more_api_results = nil
                 end
+                self:refreshItems(false, data.list)
+
             end, function(err_msg)
+                if err_msg == "没有更多了" then self.has_more_api_results = nil end
                 MessageBox:error(err_msg or '加载失败')
             end)
         end
     end)
 
-end
-
-function M:onMenuChoice(item)
-    local source_index = item.source_index
-    if H.is_num(source_index) and source_index > 0 then
-        local bookinfo = self.results[source_index]
-        self:showBookInfo(bookinfo)
-    else
-
-        if self.call_mode == 11 or self.call_mode == 12 then
-            self:searchMoreBookSource()
-        elseif self.call_mode == 1 or self.call_mode == 2 then
-            self:handleMultiSourceSearch(self.search_text, true)
-        end
-        return true
-        -- command item
-        -- self.call_mode == 11 -- 换源->搜索更多
-        -- == 12 -- 换源->搜索更多->加载更多 追加
-        -- == 2 -- 搜书->搜索更多->加载更多 追加
-        -- == 30 自动换源
-        -- == 31 app 添加
-    end
-
-end
-
-function M:onMenuHold(item)
-    self:onMenuChoice(item)
-end
-
-function M:onClose()
-    self.results = nil
-    self.bookinfo = nil
-    self.search_text = nil
-    self.call_mode = nil
-    self.last_index = nil
-    if self.results_menu_container then
-        UIManager:close(self.results_menu_container)
-        self.results_menu_container = nil
-    end
-    Menu.onClose(self)
-end
-
-function M:onCloseUI()
-    if self.results_menu_container then
-        UIManager:close(self.results_menu_container)
-        self.results_menu_container = nil
-    end
-    if self.call_mode ~= 30 then
-        Menu.onClose(self)
-    end
-    if self.paths then
-        local path = table.remove(self.paths)
-        if path and type(path.callback) == "function" then
-            path.callback()
-        end
-    end
 end
 
 return M

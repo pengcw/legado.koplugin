@@ -54,7 +54,6 @@ function ChapterListing:init()
 
     Menu.init(self)
     
-    
     if Device:hasKeys() then
         self.refresh_menu_key = "Home"
         if Device:hasKeyboard() then
@@ -347,9 +346,13 @@ end
 function ChapterListing:onSwipe(arg, ges_ev)
     local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
     if direction == "south" then
-        NetworkMgr:runWhenOnline(function()
-            self:onRefreshChapters()
-        end)
+        if NetworkMgr:isConnected() then
+            UIManager:nextTick(function()
+                self:onRefreshChapters()
+            end)
+        else
+            MessageBox:notice("刷新失败，请检查网络")
+        end
         return
     end
     Menu.onSwipe(self, arg, ges_ev)

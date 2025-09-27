@@ -111,10 +111,22 @@ local function custom_urlEncode(str)
     ]]
 end
 
+local function map_error_message(err_msg)
+    if not H.is_str(err_msg) then return "" end
+    local err_map = {
+        wantread            = "连接超时，请稍后重试",
+        ["connection refused"] = "拒绝连接，请检查服务是否可用",
+        ["no route to host"]   = "未连接网络或无法访问服务",
+        ["host not found"]     = "找不到服务地址",
+        timeout             = "请求超时，请检查网络",
+        closed              = "连接已关闭，请重试",
+    }
+    return err_map[err_msg] or ("未知错误: " .. err_msg)
+end
+
 local function convertToGrayscale(image_data)
     local Png = require("Legado/Png")
     return Png.processImage(Png.toGrayscale, image_data, 1)
-
 end
 
 local function pGetUrlContent(options)
@@ -469,17 +481,15 @@ function M:legadoSporeApi(requestFunc, callback, opts, logName)
     if not status or not H.is_tbl(res.body) then
 
         local err_msg = H.errorHandler(res)
-        if err_msg == "wantread" then
-            err_msg = '连接超时'
-        end
-        logger.err(logName, 'requestFunc err:', tostring(res))
-        return wrap_response(nil, 'requestFunc: ' .. err_msg)
+        logger.err(logName, "requestFunc err:", tostring(res))
+        err_msg = map_error_message(err_msg)
+        return wrap_response(nil, string.format("Web 服务: %s", err_msg))
     end
 
     if H.is_tbl(res.body) and res.body.data == "NEED_LOGIN" and res.body.isSuccess == false then
         self:resetReader3Token()
         self:_reader3Login()
-        return wrap_response(nil, 'NEED_LOGIN，刷新并继续')
+        return wrap_response(nil, '已重新认证，刷新并继续')
     end
 
     if H.is_tbl(res.body) and res.body.isSuccess == true and res.body.data then
@@ -741,7 +751,7 @@ function M:searchBookSource(bookUrl, lastIndex, searchSize)
     if not H.is_num(lastIndex) then
         lastIndex = -1
     end
-    if not H.is_num(lastIndex) then
+    if not H.is_num(searchSize) then
         searchSize = 5
     end
     return self:legadoSporeApi(function()
@@ -810,7 +820,8 @@ function M:searchBookSocket(search_text, filter, timeout)
     local ok, err = client:connect(ws_server_address)
     if not ok then
         logger.err('ws连接出错', err)
-        return wrap_response(nil, "连接出错：" .. tostring(err))
+        err = map_error_message(err)
+        return wrap_response(nil, "请求失败：" .. tostring(err))
     end
 
     local filterEven
@@ -913,13 +924,12 @@ function M:searchBook(search_text, bookSourceUrl, concurrentCount)
 end
 
 function M:searchBookMulti(search_text, lastIndex, searchSize, concurrentCount)
-
     if not H.is_str(search_text) or search_text == '' then
         return wrap_response(nil, "输入参数错误")
     end
 
-    lastIndex = lastIndex or -1
-    searchSize = searchSize or 20
+    lastIndex = H.is_num(lastIndex) and lastIndex or -1
+    searchSize = H.is_num(searchSize) and searchSize or 20
     concurrentCount = concurrentCount or 32
     return self:legadoSporeApi(function()
         -- data.list data.lastindex

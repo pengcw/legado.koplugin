@@ -326,7 +326,7 @@ function LibraryView:openMenu(dimen)
         end,
         align = unified_align,
     }}, {{
-        text = string.format("%s 自动上传阅读进度  %s", Icons.FA_CLOUD,
+        text = string.format("%s 自动上传进度  %s", Icons.FA_CLOUD,
             (settings.sync_reading and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
@@ -459,7 +459,7 @@ function LibraryView:openMenu(dimen)
 end
 
 function LibraryView:openSearchBooksDialog(def_search_input)
-    require("Legado/BookSourceResults"):searchAndShow(function()
+    require("Legado/BookSourceResults"):searchBookDialog(function()
         self:onRefreshLibrary()
     end, def_search_input)
 end
@@ -917,7 +917,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             def_search_input = doc_props.authors or doc_props.title
         end
 
-        require("Legado/BookSourceResults"):searchAndShow(function()
+        require("Legado/BookSourceResults"):searchBookDialog(function()
             self:openLibraryView()
         end, def_search_input)
 
@@ -1306,9 +1306,13 @@ local function init_book_menu(parent)
     function book_menu:onSwipe(arg, ges_ev)
         local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
         if direction == "south" then
-            NetworkMgr:runWhenOnline(function()
-                self:onRefreshLibrary()
-            end)
+            if NetworkMgr:isConnected() then
+                UIManager:nextTick(function()
+                    self:onRefreshLibrary()
+                end)
+            else
+                MessageBox:notice("刷新失败，请检查网络")
+            end
             return
         end
         Menu.onSwipe(self, arg, ges_ev)
@@ -1330,7 +1334,7 @@ local function init_book_menu(parent)
 
     function book_menu:onPrimaryMenuChoice(item)
         if not item.cache_id then
-            require("Legado/BookSourceResults"):searchAndShow(function()
+            require("Legado/BookSourceResults"):searchBookDialog(function()
                 self:onRefreshLibrary()
             end)
             return
@@ -1421,7 +1425,7 @@ local function init_book_menu(parent)
                 text = '换源',
                 callback = function()
                     NetworkMgr:runWhenOnline(function()
-                        require("Legado/BookSourceResults"):fetchAndShow(bookinfo, function()
+                        require("Legado/BookSourceResults"):changeSourceDialog(bookinfo, function()
                             self:onRefreshLibrary()
                         end)
                     end)
