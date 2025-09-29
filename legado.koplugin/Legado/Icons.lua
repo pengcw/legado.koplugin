@@ -57,5 +57,8 @@ return {
     UNICODE_HEART = "\u{2665}",
     UNICODE_WARNING = "\u{26A0}",
     UNICODE_INFO = "\u{2139}",
-    UNICODE_GEAR = "\u{2699}"
+    UNICODE_GEAR = "\u{2699}",
+
+    FA_PAINT_BRUSH = "\u{F1FC}",
+    FA_PLUS = "\u{F067}",
 }

@@ -730,7 +730,8 @@ function M:getAllChapters(bookCacheId)
     b.bookUrl,
     b.durChapterIndex,
     b.durChapterTime,
-    b.totalChapterNum 
+    b.totalChapterNum,
+    b.origin  
 FROM chapters AS c
 INNER JOIN books AS b
     ON c.bookCacheId = b.bookCacheId 
@@ -758,8 +759,8 @@ ORDER BY c.chapterIndex ASC;
                 bookUrl = row[7],
                 durChapterIndex = tonumber(row[8]),
                 durChapterTime = tonumber(row[9]),
-                totalChapterNum = tonumber(row[10])
-
+                totalChapterNum = tonumber(row[10]),
+                origin = row[11]
             }
         end
     end
@@ -868,7 +869,8 @@ function M:getChapterInfo(bookCacheId, chapterIndex)
     b.durChapterIndex,
     b.durChapterTime,
     b.totalChapterNum,
-    b.cacheExt
+    b.cacheExt,
+    b.origin 
 FROM chapters AS c
 INNER JOIN books AS b
     ON c.bookCacheId = b.bookCacheId 
@@ -898,7 +900,8 @@ WHERE
                 durChapterIndex = tonumber(row[8]),
                 durChapterTime = tonumber(row[9]),
                 totalChapterNum = tonumber(row[10]),
-                cacheExt = row[11]
+                cacheExt = row[11],
+                origin = row[12]
             }
         end
     end
@@ -1012,7 +1015,8 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
         c.chapterIndex, 
         c.title, 
         b.bookUrl,
-        b.name
+        b.name,
+        b.origin 
     FROM chapters AS c
     INNER JOIN books AS b
         ON c.bookCacheId = b.bookCacheId 
@@ -1040,7 +1044,8 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
                 title = row[2],
                 bookUrl = row[3],
                 chapters_index = chapterIndex,
-                name = row[4]
+                name = row[4],
+                origin = row[5],
             }
         end
     end
@@ -1078,7 +1083,8 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
         b.durChapterIndex,
         b.durChapterTime,
         b.totalChapterNum,
-        b.cacheExt
+        b.cacheExt,
+        b.origin 
     FROM chapters AS c
     INNER JOIN books AS b
         ON c.bookCacheId = b.bookCacheId 
@@ -1122,7 +1128,8 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
                 durChapterTime = tonumber(row[9]), -- type cdata?
                 totalChapterNum = tonumber(row[10]),
                 chapters_index = chapterIndex,
-                cacheExt = row[11]
+                cacheExt = row[11],
+                origin = row[12],
             }
         end
     end

@@ -290,6 +290,19 @@ M.errorHandler = function(err)
     return detail or err
 end
 
+M.map_error_message = function(err_msg)
+    if not M.is_str(err_msg) then return "" end
+    local err_map = {
+        wantread            = "连接超时，请稍后重试",
+        ["connection refused"] = "拒绝连接，请检查服务是否可用",
+        ["no route to host"]   = "未连接网络或无法访问服务",
+        ["host not found"]     = "找不到服务地址",
+        timeout             = "请求超时，请检查网络",
+        closed              = "连接已关闭，请重试",
+    }
+    return err_map[err_msg] or ("未知错误: " .. err_msg)
+end
+
 M.isFileOlderThan = function(filepath, seconds)
 
     local attributes = lfs.attributes(filepath)

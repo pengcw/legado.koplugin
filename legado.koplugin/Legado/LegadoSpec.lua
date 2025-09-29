@@ -1,9 +1,91 @@
-return {
+local legado_app = {
     base_url = "http://127.0.0.1:1122",
-    name = "LegadoAPI",
+    name = "legado_app",
     version = "0.2",
     methods = {
-        reader3Login = {
+        getChapterList = {
+            path = "/getChapterList",
+            method = "GET",
+            required_params = {"url"},
+            optional_params = {"v", "refresh","bookSource","bookSourceUrl"},
+            expected_status = {200}
+        },
+        getBookshelf = {
+            path = "/getBookshelf",
+            method = "GET",
+            required_params = {"v", "refresh"},
+            expected_status = {200}
+        },
+        getBookContent = {
+            path = "/getBookContent",
+            method = "GET",
+            required_params = {"url", "index"},
+            optional_params = {"v", "cache", "refresh"},
+            expected_status = {200}
+        },
+        saveBookProgress = {
+            path = "/saveBookProgress",
+            method = "POST",
+            required_params = {"name", "author", "durChapterPos", "durChapterIndex", "durChapterTime",
+                               "durChapterTitle", "index", "url"},
+            payload = {"name", "author", "durChapterPos", "durChapterIndex", "durChapterTime", "durChapterTitle",
+                       "index", "url"},
+            optional_params = {"v"},
+            expected_status = {200}
+        },
+        saveBook = {
+            path = "/saveBook",
+            method = "POST",
+            required_params = {"name", "author", "bookUrl", "origin", "originName", "originOrder"},
+            optional_params = {"v", "durChapterIndex", "durChapterPos", "durChapterTime", "durChapterTitle",
+                               "wordCount", "intro", "totalChapterNum", "kind", "type"},
+            payload = {"name", "author", "bookUrl", "origin", "originName", "originOrder", "durChapterIndex",
+                       "durChapterPos", "durChapterTime", "durChapterTitle", "wordCount", "intro", "totalChapterNum",
+                       "kind", "type"},
+            unattended_params = true,
+            expected_status = {200}
+        },
+        deleteBook = {
+            path = "/deleteBook",
+            method = "POST",
+            required_params = {"name", "author", "bookUrl", "origin", "originName", "originOrder"},
+            optional_params = {"v", "durChapterIndex", "durChapterPos", "durChapterTime", "durChapterTitle",
+                               "wordCount", "intro", "totalChapterNum", "kind", "type"},
+            payload = {"name", "author", "bookUrl", "origin", "originName", "originOrder", "durChapterIndex",
+                       "durChapterPos", "durChapterTime", "durChapterTitle", "wordCount", "intro", "totalChapterNum",
+                       "kind", "type"},
+            unattended_params = true,
+            expected_status = {200}
+        },
+        getTxtTocRules = {
+            path = "/getTxtTocRules",
+            method = "GET",
+            required_params = {"v"},
+            expected_status = {200}
+        },
+        getReplaceRules ={
+            path = "/getReplaceRules",
+            method = "GET",
+            required_params = {"v"},
+            expected_status = {200}
+        },
+        refreshToc = {
+            path = "/refreshToc",
+            method = "POST",
+            required_params = {"url"},
+            payload = {"url"},
+            optional_params = {"v"},
+            expected_status = {200}
+        },
+    }
+}
+
+local reader3 = {
+    base_url = "http://127.0.0.1:1122",
+    name = "reader3",
+    version = "0.2",
+    methods = {
+        login = {
             path = "/login",
             method = "POST",
             payload = {"username", "password", "code", "isLogin"},
@@ -144,18 +226,90 @@ return {
             required_params = {"v"},
             expected_status = {200}
         },
-        getCover = {
-            path = "/getCover",
-            method = "GET",
+    }
+}
+
+local qread = {
+    base_url = "http://127.0.0.1:1122",
+    name = "qread",
+    version = "0.2",
+    methods = {
+        login = {
+            path = "/login",
+            method = "POST",
+            -- model = web
+            required_params = {"username", "password", "model"}, 
             expected_status = {200}
         },
-        refreshToc = {
-            path = "/refreshToc",
+        getBookshelfPage = {
+            path = "/getBookshelfPage",
+            method = "POST",
+            -- oldmd5 2025-09-28 08:50:11.020Z
+            required_params = {"oldmd5"}, 
+            expected_status = {200}
+        },
+        getgroupNew = {
+            path = "/getgroupNew",
+            method = "POST",
+            required_params = {"md5"},
+            expected_status = {200}
+        },
+        getBookshelf = {
+            path = "/getBookshelfNew",
+            method = "POST",
+            required_params = {"md5", "page"},
+            expected_status = {200}
+        },
+        getChapterList = {
+            path = "/getChapterListNew",
+            method = "POST",
+            required_params = {"needRefresh", "useReplaceRule", "bookSourceUrl", "url"},
+            optional_params = {"bookname"},
+            expected_status = {200}
+        },
+        getBookContent = {
+            path = "/getBookContentNew",
+            method = "POST",
+            required_params = {"index", "url", "bookSourceUrl", "useReplaceRule"},
+            optional_params = {"bookname", "type"},
+            expected_status = {200}
+        },
+        saveBookProgress = {
+            path = "/saveBookProgress",
+            method = "POST",
+            required_params = {"index", "url", "title", "pos"},
+            expected_status = {200}
+        },
+        refreshBook = {
+            path = "/refreshBook",
+            method = "POST",
+            required_params = {"bookurl"},
+            expected_status = {200}
+        },
+        getBookSourcesPage = {
+            path = "/getBookshelfPage",
+            method = "POST",
+            -- is md5
+            required_params = {"oldmd5"}, 
+            expected_status = {200}
+        },
+        getBookSources = {
+            path = "/getBookSourcesNew",
+            method = "POST",
+            required_params = {"md5", "page"},
+            expected_status = {200}
+        },
+        getBookinfo = {
+            path = "/getBookinfo2",
             method = "POST",
             required_params = {"url"},
-            payload = {"url"},
-            optional_params = {"v"},
             expected_status = {200}
-        }
+        },
     }
+}
+
+return {
+    legado_app = legado_app,
+    reader3 = reader3,
+    qread = qread,
 }

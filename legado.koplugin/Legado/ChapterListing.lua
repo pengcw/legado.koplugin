@@ -363,7 +363,9 @@ function ChapterListing:onRefreshChapters()
         MessageBox:loading("正在刷新章节数据", function()
             return Backend:refreshChaptersCache({
                 cache_id = self.bookinfo.cache_id,
-                bookUrl = self.bookinfo.bookUrl
+                bookUrl = self.bookinfo.bookUrl,
+                origin = self.bookinfo.origin,
+                name = self.bookinfo.name,
             }, self.ui_refresh_time)
         end, function(state, response)
             if state == true then
@@ -495,7 +497,8 @@ function ChapterListing:openMenu()
         callback = function()
             UIManager:close(dialog)
             NetworkMgr:runWhenOnline(function()
-                require("Legado/BookSourceResults"):autoChangeSource(self.bookinfo, function()
+                -- autoChangeSource
+                require("Legado/BookSourceResults"):changeSourceDialog(self.bookinfo, function()
                     self:onReturn()
                 end)
             end)
