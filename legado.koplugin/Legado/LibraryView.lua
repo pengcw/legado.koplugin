@@ -223,7 +223,12 @@ function LibraryView:openMenu(dimen)
         callback = function()
             UIManager:close(dialog)
             require("Legado/WebConfigDialog"):openWebConfigManager(function()
-                    self:onRefreshLibrary()
+                if not self.book_menu then return true end
+                self.book_menu.item_table = self.book_menu:generateEmptyViewItemTable()
+                self.book_menu.multilines_show_more_text = true
+                self.book_menu.items_per_page = 1
+                self.book_menu:updateItems()
+                self.book_menu:onRefreshLibrary()
             end)
         end,
         align = unified_align,
