@@ -1941,7 +1941,8 @@ function M:switchWebConfig(conf_name)
         return wrap_response(nil, "配置不存在")
     end
     if settings.current_conf_name == conf_name then
-        return wrap_response(nil, "已经是当前激活配置")
+        -- 已经是当前激活配置
+        return wrap_response(true)
     end
     local config = web_configs[conf_name]
     settings.server_address = config.url
