@@ -124,83 +124,6 @@ function LibraryView:closeMenu()
     end
 end
 
-function LibraryView:openInstalledReadSource()
-
-    local setting_data = Backend:getSettings()
-    local history_lines = setting_data.servers_history or {}
-    local setting_url = tostring(setting_data.setting_url)
-    if not history_lines[1] then
-        history_lines = {}
-    end
-
-    local description = [[
-        (书架与接口地址关联，设置格式符合 RFC3986，认证信息如有特殊字符需要 URL 编码，服务器版本必须加 /reader3)  示例:
-        → 手机APP     http://127.0.0.1:1122
-        → 服务器版    http://127.0.0.1:1122/reader3
-        → 带认证服务  https://username:password@127.0.0.1:1122/reader3
-    ]]
-
-    local dialog
-    local reset_callback
-    local history_cur = 0
-    local history_lines_len = #history_lines
-    if history_lines_len > 0 then
-        -- only display the last 3 lines
-        local servers_history_str = table.concat(history_lines, '\n', math.max(1, #history_lines - 2))
-        description = description .. string.format("\n历史记录(%s)：\n%s", history_lines_len, servers_history_str)
-
-        reset_callback = function()
-            history_cur = history_cur + 1
-            if history_cur > #history_lines then
-                history_cur = 1
-            end
-            dialog.button_table:getButtonById("reset"):enable()
-            dialog:refreshButtons()
-            return history_lines[history_cur]
-        end
-    end
-
-    local save_callback = function(input_text)
-        if H.is_str(input_text) then
-            local new_setting_url = util.trim(input_text)
-            return Backend:HandleResponse(Backend:setEndpointUrl(new_setting_url), function(data)
-                if not self.book_menu then
-                    return true
-                end
-                self.book_menu.item_table = self.book_menu:generateEmptyViewItemTable()
-                self.book_menu.multilines_show_more_text = true
-                self.book_menu.items_per_page = 1
-                self.book_menu:updateItems()
-                self.book_menu:onRefreshLibrary()
-                return true
-            end, function(err_msg)
-                MessageBox:notice('设置失败：' .. tostring(err_msg))
-                return false
-            end)
-        end
-        MessageBox:notice('输入为空')
-        return false
-    end
-
-    dialog = MessageBox:input(nil, nil, {
-        title = "设置阅读 API 接口地址",
-        input = setting_url,
-        description = description,
-        use_available_height = true,
-        fullscreen = true,
-        condensed = true,
-        save_callback = save_callback,
-        allow_newline = false,
-        reset_button_text = '填入历史',
-        reset_callback = reset_callback
-    })
-
-    if H.is_func(reset_callback) then
-        dialog.button_table:getButtonById("reset"):enable()
-        dialog:refreshButtons()
-    end
-end
-
 function LibraryView:openBrowserMenu(file)
     self:getInstance()
     self:getBrowserWidget()
@@ -299,7 +222,9 @@ function LibraryView:openMenu(dimen)
         text = Icons.FA_GLOBE .. " Legado WEB地址",
         callback = function()
             UIManager:close(dialog)
-            self:openInstalledReadSource()
+            require("Legado/WebConfigDialog"):openWebConfigManager(function()
+                    self:onRefreshLibrary()
+            end)
         end,
         align = unified_align,
     }}, {{
@@ -677,7 +602,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             UIManager:close(loading_msg)
             -- no sync
             self:onShowLegadoLibraryView()
-            MessageBox:notice("书籍不存在于书架,请刷新同步")
+            MessageBox:notice("书籍不存在于当前激活书架或已被删除")
             return
         end
 
@@ -720,7 +645,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
         local bookinfo = Backend:getBookInfoCache(book_cache_id)
         if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
-            MessageBox:error('书籍不存在于当前 Legado 书库或已被删除, 请检查并同步书库')
+            MessageBox:error('书籍不存在于当前激活书架或已被删除')
             return
         end
 
@@ -1378,7 +1303,7 @@ local function init_book_menu(parent)
                         self:refreshItems()
                         self.parent_ref.ui_refresh_time = os.time()
                     end, function(err_msg)
-                        MessageBox:notice(response.message or '同步失败')
+                        MessageBox:notice(tostring(err_msg) or '同步失败')
                     end)
                 end
             end)

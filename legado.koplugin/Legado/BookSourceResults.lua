@@ -25,8 +25,6 @@ local M = {
     -- "SEARCH"
     -- "AUTO_CHANGE_SOURCE"
     call_mode = nil,
-    is_reader3 = nil,
-    is_legado_app = nil,
     is_single_source_search = nil,
 
     last_index = nil,
@@ -41,29 +39,23 @@ local M = {
 }
 
 function M:init()
-    local settings = Backend:getSettings()
-    self.is_reader3 = settings.server_type == 2
-    self.is_legado_app = settings.server_type == 1
-
     self.width = math.floor(Screen:getWidth() * 0.9)
     self.height = math.floor(Screen:getHeight() * 0.9)
     self.items_font_size = Menu.getItemFontSize(8)
 end
 
 function M:getApiMoreRresults()
-    if not self.is_reader3 then return end
+    if not self.has_more_api_results then return end
     if self.call_mode == "SEARCH" then
         self:handleMultiSourceSearch(self.search_text, true)  
     elseif self.call_mode == "CHANGE_SOURCE" then
-        self:searchMoreBookSource()
+        self:handleAvailableBookSource(self.bookinfo, true)
     end
 end
 
 function M:onMenuGotoPage(menu_self, new_page)
     Menu.onGotoPage(menu_self, new_page)
-
     local is_last_page = new_page == menu_self.page_num
-
     if is_last_page and self.has_more_api_results and self.last_index ~= nil then
         UIManager:nextTick(function()
             self:getApiMoreRresults()
@@ -147,13 +139,11 @@ function M:createBookSourceMenu(option)
         results_menu.key_events.FocusRight = nil
         results_menu.key_events.Right = {{ "Right" }}
     end
-
-    -- only is_reader3
-    if self.is_reader3 then
-        results_menu.onGotoPage = function(menu_self, new_page)
-            return self:onMenuGotoPage(menu_self, new_page)
-        end
+    
+    results_menu.onGotoPage = function(menu_self, new_page)
+        return self:onMenuGotoPage(menu_self, new_page)
     end
+
     results_menu.onMenuHold = results_menu.onMenuSelect  
     
     self.results_menu = results_menu
@@ -221,363 +211,7 @@ function M:changeSourceDialog(bookinfo, onReturnCallback)
     self.call_mode = "CHANGE_SOURCE"
     self.on_success_callback = onReturnCallback
 
-    local bookUrl = bookinfo.bookUrl
-    local name = bookinfo.name
-    local author = bookinfo.author
-    MessageBox:loading("加载可用书源 ", function()
-        return Backend:getAvailableBookSource({
-                bookUrl = bookUrl,
-                name = name,
-                author = author
-            })
-    end, function(state, response)
-        if state == true then
-            Backend:HandleResponse(response, function(data)
-                if not H.is_tbl(data) then
-                    return MessageBox:notice('返回书源错误')
-                end
-                if #data == 0 then
-                    return MessageBox:error('没有可用源')
-                end
-
-                -- reader3 has searchMoreBookSource
-                if self.is_reader3 then
-                    self.has_more_api_results = true
-                    self.last_index = 0  
-                end
-                
-                self.results = data
-                self:createBookSourceMenu({
-                    title = "换源",
-                    subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
-                })
-            end, function(err_msg)
-                MessageBox:notice(err_msg or '加载失败')
-            end)
-        end
-    end)
-end
-
-function M:_checkChapterContent(bookUrl, chapterIndex)
-    if not (bookUrl and H.is_num(chapterIndex)) then
-        return false
-    end
-    local response = Backend:HandleResponse(Backend:pGetChapterContent({
-        bookUrl = bookUrl,
-        chapters_index = chapterIndex
-    }), function(data)
-        if not H.is_tbl(data) or data.type == 'SUCCESS' and H.is_str(data.body) and #data.body > 80 then
-            return true
-        end
-    end, function(err_msg)
-        logger.err("checkChapterContent err:", err_msg)
-    end)
-    return response == true and true or false
-end
-
-local function source_list_shuffle(t)
-    local n = #t
-    for i = n, 2, -1 do
-        local j = math.random(i)
-        t[i], t[j] = t[j], t[i]
-    end
-    return t
-end
-
-function M:_autoChangeSourceSocket(bookinfo, onReturnCallback)
-    if not self.is_legado_app then
-        return MessageBox:notice("仅支持阅读 App")
-    end
-
-    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
-        return MessageBox:error('参数错误')
-    end
-
-    local old_bookUrl = self.bookinfo.bookUrl
-    local old_originName = self.bookinfo.originName
-    local old_origin = self.bookinfo.origin
-
-    local book_cache_id = self.bookinfo.cache_id
-    local total_source_count = 0
-    math.randomseed(os.time())
-
-    MessageBox:loading("加载可用书源 ", function()
-        return Backend:getAvailableBookSource({
-            bookUrl = old_bookUrl,
-            name = bookinfo.name,
-            author = bookinfo.author,
-        })
-    end, function(state, response)
-        if state == true then
-            local results_data = {}
-            Backend:HandleResponse(response, function(data)
-                if H.is_tbl(data) and #data > 0 then
-                    results_data = data
-                end
-            end, function(err_msg)
-                MessageBox:notice(err_msg or '加载失败')
-            end)
-
-            total_source_count = #results_data
-
-            if total_source_count == 0 then
-                return MessageBox:error('没有可用源')
-            end
-
-            local check_source = function(sourceList)
-                if not (H.is_tbl(sourceList) and #sourceList > 0 and sourceList[1].origin) then
-                    return
-                end
-
-                local response_origin
-                local all_chapters_count = 0
-
-                -- 乱序
-                sourceList = source_list_shuffle(sourceList)
-
-                for source_index, new_bookinfo in ipairs(sourceList) do
-
-                    local name = new_bookinfo.name
-                    local author = new_bookinfo.author
-                    local bookUrl = new_bookinfo.bookUrl
-                    local origin = new_bookinfo.origin
-                    local originName = new_bookinfo.originName
-                    all_chapters_count = 0
-
-                    -- 有的源bookUrl每次添加有参数会改变,如sign
-                    if old_origin and origin == old_origin then
-                        logger.dbg("自动换源忽略相同源：", originName)
-                        goto continue
-                    end
-                    new_bookinfo.cache_id = book_cache_id
-
-                    -- legado app 需要先添加到库
-                    Backend:addBookToLibrary(new_bookinfo)
-
-                    -- 返回目录
-                    Backend:HandleResponse(Backend:refreshChaptersList(new_bookinfo), function(data)
-                        if H.is_tbl(data) and H.is_tbl(data[1]) and data[1].bookUrl then
-                            all_chapters_count = #data
-                        end
-                    end, function(err_msg)
-                        logger.err("source err：", originName, err_msg)
-                    end)
-
-                    --  有章节目录
-                    if all_chapters_count > 0 then
-                        if not self.last_read_chapter then
-                            self.last_read_chapter = Backend:getLastReadChapter(book_cache_id)
-                            self.last_read_chapter = tonumber(self.last_read_chapter) or 2
-                        end
-
-                        --logger.info("autoChangeSource:", originName, old_bookUrl, bookUrl, self.last_read_chapter,all_chapters_count)
-
-                        -- 对比当前章节
-                        if all_chapters_count >= self.last_read_chapter then
-                            local next_check_chapter = self.last_read_chapter + 1
-                            if next_check_chapter > all_chapters_count then
-                                next_check_chapter = self.last_read_chapter - 1
-                            end
-
-                            -- 检查正文
-                            if self:_checkChapterContent(bookUrl, self.last_read_chapter) and
-                                self:_checkChapterContent(bookUrl, next_check_chapter) then
-               
-                                response_origin = new_bookinfo
-                                break
-                            end
-                        end
-                    end
-                    -- 清理
-                    Backend:deleteBook(new_bookinfo)
-                    ::continue::
-                end
-
-                return response_origin
-            end
-
-            MessageBox:loading(string.format("预选书源%s个，检查中 ", total_source_count), function()
-                return check_source(results_data)
-            end, function(state, response)
-                results_data = nil
-                if state == true and H.is_tbl(response) and response.bookUrl and response.origin then
-                        MessageBox:notice("换源成功")
-                        Backend:refreshLibraryCache()
-                        self:modifySuccessCallback(true)
-                else
-                         return MessageBox:error(string.format(
-                        "换源失败，检查书源%s个\n(可搜索添加同名同作者书籍方式手动换源，或者使用 app 换源后刷新)",
-                        total_source_count))
-                end
-            end)
-        end
-    end)
-end
-
-function M:autoChangeSource(bookinfo, onReturnCallback)
-    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
-        return MessageBox:error('参数错误')
-    end
-
-    self:init()
-
-    self.bookinfo = bookinfo
-    self.call_mode = "AUTO_CHANGE_SOURCE"
-
-    if self.is_legado_app then
-        return self:_autoChangeSourceSocket(bookinfo, onReturnCallback)
-    end
-
-    local old_bookUrl = self.bookinfo.bookUrl
-    local old_originName = self.bookinfo.originName
-    local old_origin = self.bookinfo.origin
-
-    local book_cache_id = self.bookinfo.cache_id
-    local total_source_count = 0
-    math.randomseed(os.time())
-
-    MessageBox:loading("加载可用书源 ", function()
-        return Backend:getAvailableBookSource({
-            bookUrl = old_bookUrl,
-            name = bookinfo.name,
-            author = bookinfo.author
-        })
-    end, function(state, response)
-        if state == true then
-            local results_data = {}
-            Backend:HandleResponse(response, function(data)
-                if not H.is_tbl(data) then
-                    return MessageBox:notice('返回书源错误')
-                end
-                if #data == 0 then
-                    return MessageBox:error('没有可用源')
-                end
-                results_data = data
-            end, function(err_msg)
-                MessageBox:notice(err_msg or '加载失败')
-            end)
-            total_source_count = #results_data
-
-            local check_source = function(sourceList)
-                if not (H.is_tbl(sourceList) and #sourceList > 0 and sourceList[1].origin) then
-                    return
-                end
-
-                local response_origin
-                local all_chapters_count = 0
-
-                sourceList = source_list_shuffle(sourceList)
-
-                for source_index, new_bookinfo in ipairs(sourceList) do
-
-                    local name = new_bookinfo.name
-                    local author = new_bookinfo.author
-                    local bookUrl = new_bookinfo.bookUrl
-                    local origin = new_bookinfo.origin
-                    local originName = new_bookinfo.originName
-                    all_chapters_count = 0
-
-                    if old_origin and origin == old_origin then
-                        logger.dbg("自动换源忽略相同源：", originName)
-                        goto continue
-                    end
-                    new_bookinfo.cache_id = book_cache_id
-
-                    Backend:HandleResponse(Backend:refreshChaptersList(new_bookinfo), function(data)
-                        if H.is_tbl(data) and H.is_tbl(data[1]) and data[1].bookUrl then
-                            all_chapters_count = #data
-                        end
-                    end, function(err_msg)
-                        logger.err("source err：", originName, err_msg)
-                    end)
-
-                    if all_chapters_count == 0 then
-                        goto continue
-                    end
-
-                    if not self.last_read_chapter then
-                        self.last_read_chapter = Backend:getLastReadChapter(book_cache_id)
-                        self.last_read_chapter = tonumber(self.last_read_chapter) or 2
-                    end
-
-                    if all_chapters_count < self.last_read_chapter then
-                        goto continue
-                    end
-
-                    local next_check_chapter = self.last_read_chapter + 1
-                    if next_check_chapter > all_chapters_count then
-                        next_check_chapter = self.last_read_chapter - 1
-                    end
-
-                    if self:_checkChapterContent(bookUrl, self.last_read_chapter) and
-                        self:_checkChapterContent(bookUrl, next_check_chapter) then
-                        response_origin = new_bookinfo
-                        break
-                    end
-
-                    ::continue::
-                end
-                return response_origin
-            end
-
-            MessageBox:loading(string.format("预选书源%s个，检查中 ", total_source_count), function()
-                return check_source(results_data)
-            end, function(state, response)
-                if state == true and H.is_tbl(response) and response.bookUrl and response.origin then
-                    self:setBookSource(response)
-                else
-                    results_data = nil
-
-                    MessageBox:loading(string.format("已扫描书源%s个，更多查询中 ", total_source_count),
-                        function()
-
-                            local response_origin
-                            if old_bookUrl then
-                                local lastIndex = -1
-                                local count = 1
-                                local sourceList
-
-                                while true do
-                                    --logger.dbg("autoChangeSource:", count, lastIndex)
-                                    Backend:HandleResponse(Backend:searchBookSource(old_bookUrl, lastIndex, 12),
-                                        function(data)
-                                            if H.is_tbl(data) and H.is_tbl(data.list) then
-                                                sourceList = data.list
-                                            end
-                                        end)
-                                    if not H.is_tbl(sourceList) or sourceList.lastIndex == nil then
-                                        logger.err("没有更多源了")
-                                        break
-                                    end
-
-                                    response_origin = check_source(sourceList)
-
-                                    -- 最多检测800个源,避免等待时间太长
-                                    if H.is_tbl(response_origin) or count > 800 then
-                                        break
-                                    end
-
-                                    lastIndex = sourceList.lastIndex
-                                    sourceList = 0
-                                    count = count + 1
-                                end
-
-                                total_source_count = total_source_count + count * 12
-                            end
-
-                            return type(response_origin) == 'table' and response_origin or total_source_count
-                        end, function(state, response)
-                            if state == true and H.is_tbl(response) and response.bookUrl and response.origin then
-                                    self:setBookSource(response)
-                            else
-                                    response = H.is_num(response) and response or 0
-                                    MessageBox:error(string.format("换源失败，检查书源%s个", response))
-                            end
-                        end)
-                end
-            end)
-        end
-    end)
+    return self:handleAvailableBookSource(bookinfo)
 end
 
 function M:showBookInfo(bookinfo)
@@ -609,7 +243,7 @@ function M:showBookInfo(bookinfo)
                 if self.call_mode == "SEARCH" then
                     self:addBookToLibrary(bookinfo)
                 else
-                    self:setBookSource(bookinfo)
+                    self:changeBookSource(bookinfo)
                 end
             end
         }}}
@@ -641,9 +275,6 @@ function M:searchBookDialog(onReturnCallback, def_input)
             buttons = {{{
                 text = "单源搜索",
                 callback = function()
-                    if self.is_legado_app then
-                        return MessageBox:notice('阅读 App 仅支持多源搜索')
-                    end
                     inputText = dialog:getInputText()
                     inputText = util.trim(inputText)
 
@@ -665,11 +296,7 @@ function M:searchBookDialog(onReturnCallback, def_input)
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
-                    if self.is_legado_app then
-                        self:searchBookSocket(inputText)
-                    else
-                        self:handleMultiSourceSearch(inputText)
-                    end
+                    self:handleMultiSourceSearch(inputText)
                 end
             }, {
                 text = "取消",
@@ -687,7 +314,10 @@ function M:handleSingleSourceSearch(searchText)
         local book_source_url = item.url
         local book_source_name = item.name
         MessageBox:loading(string.format("%s 查询中 ", item.text or ""), function()
-            return Backend:searchBook(searchText, book_source_url)
+            return Backend:searchBookSingle({
+                search_text = searchText, 
+                book_source_url = book_source_url,
+            })
         end, function(state, response)
             if state == true then
                 Backend:HandleResponse(response, function(data)
@@ -714,35 +344,6 @@ function M:handleSingleSourceSearch(searchText)
     end)
 end
 
-function M:searchBookSocket(search_text)
-
-    if not (H.is_str(search_text) and search_text ~= "") then
-        MessageBox:notice("参数错误")
-        return
-    end
-
-    MessageBox:loading(string.sub(search_text, 1, 1) ~= '=' and string.format("正在搜索 [%s] ", search_text) or
-                           string.format("精准搜索 [%s] ", string.sub(search_text, 2)), function()
-        return Backend:searchBookSocket(search_text)
-    end, function(state, response)
-        if state == true then
-            Backend:HandleResponse(response, function(data)
-                if not H.is_tbl(data) or not H.is_tbl(data[1]) then
-                    return MessageBox:notice('服务器返回为空')
-                end
-
-                self.results = data
-                self:createBookSourceMenu({
-                    title = '多源搜索',
-                    subtitle = string.format("key: %s", search_text),
-                })
-            end, function(err_msg)
-                MessageBox:notice(err_msg or '搜索请求失败')
-            end)
-        end
-    end)
-end
-
 function M:handleMultiSourceSearch(search_text, is_more_call)
     if not (H.is_str(search_text) and search_text ~= "") then
         MessageBox:notice("参数错误")
@@ -753,19 +354,24 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
 
     MessageBox:loading(string.sub(search_text, 1, 1) ~= '=' and string.format("正在搜索 [%s] ", search_text) or
                            string.format("精准搜索 [%s] ", string.sub(search_text, 2)), function()
-        return Backend:searchBookMulti(search_text, self.last_index)
+        return Backend:searchBookMulti({
+            search_text = search_text, 
+            last_index = self.last_index
+        })
     end, function(state, response)
+        logger.info("测试测试:", state, response)
         if state == true then
             Backend:HandleResponse(response, function(data)
                 if not H.is_tbl(data) or not H.is_tbl(data.list) then
                     return MessageBox:notice('服务器返回错误')
                 end
                 if #data.list == 0 then
+                    self.has_more_api_results = nil
                     return MessageBox:notice('未找到相关书籍')
                 end
 
                 logger.dbg("当前data.lastIndex:", data.lastIndex)
-                if data.lastIndex and self.last_index ~= data.lastIndex then
+                if H.is_num(data.lastIndex) and self.last_index ~= data.lastIndex then
                     self.has_more_api_results = true
                     self.last_index = data.lastIndex
                 else
@@ -785,6 +391,79 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
             end, function(err_msg)
                 if err_msg == "没有更多了" then self.has_more_api_results = nil end
                 MessageBox:notice(err_msg or '搜索请求失败')
+            end)
+        end
+    end)
+end
+
+function M:handleAvailableBookSource(bookinfo, is_more_call)
+
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl)) then
+        return MessageBox:error('参数错误')
+    end
+
+    self.last_index = self.last_index ~= nil and self.last_index or -1
+
+    local options = {
+        book_url = bookinfo.bookUrl,
+        name = bookinfo.name,
+        author = bookinfo.author,
+        last_index = is_more_call and self.last_index,
+        search_size = 8,
+    }
+    MessageBox:loading(
+        string.format("搜索[%s]可用书源 ", bookinfo.name), function()
+        return Backend:getAvailableBookSource(options)
+    end, function(state, response)
+        if state == true then
+            Backend:HandleResponse(response, function(data)
+                if not (H.is_tbl(data) and H.is_tbl(data.list)) then
+                    return MessageBox:notice('返回书源错误')
+                end
+                if #data.list == 0 then
+                    self.has_more_api_results = nil
+                    return MessageBox:error('没有找到可用源')
+                end
+
+                if H.is_num(data.lastIndex) and self.last_index ~= data.lastIndex then
+                    self.has_more_api_results = true
+                    self.last_index = data.lastIndex
+                else
+                    self.has_more_api_results = nil
+                end
+
+                if is_more_call ~= true then
+                    self.results = data.list
+                    self:createBookSourceMenu({
+                        title = "换源",
+                        subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
+                    })
+                else
+                    self:refreshItems(false, data.list)
+                end
+
+            end, function(err_msg)
+                if err_msg == "没有更多了" then self.has_more_api_results = nil end
+                MessageBox:error(err_msg or '加载失败')
+            end)
+        end
+    end)
+end
+
+function M:autoChangeSource(bookinfo, onReturnCallback)
+    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
+        return MessageBox:error('参数错误')
+    end
+
+    MessageBox:loading("正在换源 ", function()
+        return Backend:autoChangeBookSource(bookinfo)
+    end, function(state, response)
+        if state == true then
+            Backend:HandleResponse(response, function(data)
+                MessageBox:notice('更换成功')
+                self:modifySuccessCallback(true)
+            end, function(err_msg)
+                MessageBox:error(err_msg or '操作失败')
             end)
         end
     end)
@@ -837,20 +516,16 @@ function M:selectBookSource(selectCallback)
                 })
 
             end, function(err_msg)
-                MessageBox:notice('列表请求失败' .. tostring(err_msg))
+                MessageBox:notice('列表请求失败：' .. tostring(err_msg))
             end)
         end
     end)
 end
 
-function M:setBookSource(bookinfo)
+function M:changeBookSource(bookinfo)
     if not (self.bookinfo and bookinfo) then
         MessageBox:notice('参数错误')
         return
-    end
-
-    if self.is_legado_app then
-        return self:addBookToLibrary(bookinfo)
     end
 
     local old_bookUrl = self.bookinfo.bookUrl
@@ -860,7 +535,7 @@ function M:setBookSource(bookinfo)
     end
     Backend:closeDbManager()
     MessageBox:loading("更换中 ", function()
-        return Backend:setBookSource({
+        return Backend:changeBookSource({
             bookUrl = old_bookUrl,
             bookSourceUrl = bookinfo.origin,
             newUrl = bookinfo.bookUrl
@@ -877,7 +552,7 @@ function M:setBookSource(bookinfo)
 end
 
 function M:addBookToLibrary(bookinfo)
-    if self.call_mode ~= "SEARCH" and not self.is_legado_app then
+    if self.call_mode ~= "SEARCH" then
         return MessageBox:notice('参数错误')
     end
     Backend:closeDbManager()
@@ -893,45 +568,6 @@ function M:addBookToLibrary(bookinfo)
             end)
         end
     end)
-end
-
-function M:searchMoreBookSource()
-    local old_bookUrl = self.bookinfo.bookUrl
-    if not H.is_str(old_bookUrl) then
-        MessageBox:notice("参数错误")
-        return
-    end
-
-    self.last_index = self.last_index or -1
-
-    MessageBox:loading("加载更多书源 ", function()
-        return Backend:searchBookSource(old_bookUrl, self.last_index, 8)
-    end, function(state, response)
-        if state == true then
-            Backend:HandleResponse(response, function(data)
-                if not H.is_tbl(data) or not H.is_tbl(data.list) then
-                    return MessageBox:notice('返回书源错误')
-                end
-                if #data.list == 0 then
-                    self.has_more_api_results = nil
-                    return MessageBox:error('没有可用源')
-                end
-
-                if data.lastIndex and self.last_index ~= data.lastIndex then
-                    self.has_more_api_results = true
-                    self.last_index = data.lastIndex
-                else
-                    self.has_more_api_results = nil
-                end
-                self:refreshItems(false, data.list)
-
-            end, function(err_msg)
-                if err_msg == "没有更多了" then self.has_more_api_results = nil end
-                MessageBox:error(err_msg or '加载失败')
-            end)
-        end
-    end)
-
 end
 
 return M

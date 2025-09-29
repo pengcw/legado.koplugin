@@ -70,60 +70,6 @@ local function get_url_extension(url)
     return ext and ext:lower() or "", filename
 end
 
--- socket.url.escape util.urlEncode + / ? = @会被编码
--- 处理 reader3 服务器版含书名路径有空格等问题
-local function custom_urlEncode(str)
-
-    if str == nil then
-        return ""
-    end
-    local segment_chars = {
-        ['-'] = true,
-        ['.'] = true,
-        ['_'] = true,
-        ['~'] = true,
-        [','] = true,
-        ['!'] = true,
-        ['*'] = true,
-        ['\''] = true,
-        ['('] = true,
-        [')'] = true,
-        ['/'] = true,
-        ['?'] = true,
-        ['&'] = true,
-        ['='] = true,
-        [':'] = true,
-        ['@'] = true
-    }
-
-    return string.gsub(str, "([^A-Za-z0-9_])", function(c)
-        if segment_chars[c] then
-            return c
-        else
-            return string.format("%%%02X", string.byte(c))
-        end
-    end)
-    --[[
-    -- socket_url.build_path(socket_url.parse_path(str))
-    return str:gsub("([^%w%-%.%_%~%!%$%&%'%(%)%*%+%,%;%=%:%@%/%?])", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end)
-    ]]
-end
-
-local function map_error_message(err_msg)
-    if not H.is_str(err_msg) then return "" end
-    local err_map = {
-        wantread            = "连接超时，请稍后重试",
-        ["connection refused"] = "拒绝连接，请检查服务是否可用",
-        ["no route to host"]   = "未连接网络或无法访问服务",
-        ["host not found"]     = "找不到服务地址",
-        timeout             = "请求超时，请检查网络",
-        closed              = "连接已关闭，请重试",
-    }
-    return err_map[err_msg] or ("未知错误: " .. err_msg)
-end
-
 local function convertToGrayscale(image_data)
     local Png = require("Legado/Png")
     return Png.processImage(Png.toGrayscale, image_data, 1)
@@ -256,62 +202,35 @@ function M:HandleResponse(response, on_success, on_error)
     return on_error and on_error("Unknown response type: " .. tostring(rtype))
 end
 
-function M:loadSpore()
-    local Spore = require("Spore")
-    local legadoSpec = require("Legado/LegadoSpec")
-    self.apiClient = Spore.new_from_lua(legadoSpec, {
-        base_url = self.settings_data.data.server_address .. '/'
-        -- base_url = 'http://eu.httpbin.org/'
-    })
-    package.loaded["Spore.Middleware.ForceJSON"] = {}
-    require("Spore.Middleware.ForceJSON").call = function(args, req)
-        -- req.env.HTTP_USER_AGENT = ""
-        req.headers = req.headers or {}
-        req.headers["user-agent"] =
-            "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
-        return function(res)
-            res.headers = res.headers or {}
-            res.headers["content-type"] = 'application/json'
-            return res
-        end
+function M:_isQingread() return self.settings_data.data.server_type == 3 end
+function M:_isReader3() return self.settings_data.data.server_type == 2 end
+function M:_isLegadoApp() return self.settings_data.data.server_type == 1 end
+
+function M:loadApiProvider()
+    local client
+    if self:_isLegadoApp() then
+        client = require("Legado/web_android_app")
+    elseif self:_isReader3() then
+        client = require("Legado/web_reader3")
+    elseif self:_isQingread() then
+        client = require("Legado/web_qread")
     end
-    package.loaded["Spore.Middleware.Legado3Auth"] = {}
-    require("Spore.Middleware.Legado3Auth").call = function(args, req)
-        local spore = req.env.spore
-
-        if self:_isReader3() and self.settings_data.data.reader3_un ~= '' then
-
-            local loginSuccess, token = self:_reader3Login()
-            if loginSuccess == true and type(token) == 'string' and token ~= '' then
-
-                local accessToken = string.format("accessToken=%s", token)
-                if type(req.env.QUERY_STRING) == 'string' and #req.env.QUERY_STRING > 0 then
-                    req.env.QUERY_STRING = req.env.QUERY_STRING .. '&' .. accessToken
-                else
-                    req.env.QUERY_STRING = accessToken
-                end
-            else
-                logger.warn('Legado3Auth', '登录失败', token or 'nil')
-            end
-        end
-
-        return function(res)
-            if type(res.body) == 'table' and res.body.data == "NEED_LOGIN" and res.body.isSuccess == false then
-                self:resetReader3Token()
-            end
-            return res
-        end
-    end
+    self.apiClient = client:new{
+        settings = self:getSettings()
+    }
 end
 
 function M:initialize()
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
-
+    -- 兼容历史版本 <1.0.9
+    if self.settings_data.data.setting_url then
+        self.settings_data.data.setting_url = nil
+        self.settings_data.data.servers_history = nil
+    end
     -- 兼容历史版本 <1.038
-    if not self.settings_data.data.setting_url and not self.settings_data.data.reader3_un and
-        H.is_str(self.settings_data.data.legado_server) then
-        self.settings_data.data.setting_url = self.settings_data.data.legado_server
+    if self.settings_data.data.legado_server then
+        self.settings_data.data.legado_server = nil
     end
     -- <1.049
     if not self.settings_data.data.server_address and H.is_str(self.settings_data.data.legado_server) then
@@ -331,10 +250,8 @@ function M:initialize()
             server_address = 'http://127.0.0.1:1122',
             server_address_md5 = 'f528764d624db129b32c21fbca0cb8d6',
             server_type = 1,
-            setting_url = 'http://127.0.0.1:1122',
             reader3_un = '',
             reader3_pwd = '',
-            servers_history = {},
             stream_image_view = nil,
             disable_browser = nil,
             sync_reading = nil,
@@ -343,13 +260,12 @@ function M:initialize()
         self.settings_data:flush()
     end
 
-    self:loadSpore()
+    self:loadApiProvider()
 
     local BookInfoDB = require("Legado/BookInfoDB")
     self.dbManager = BookInfoDB:new({
         dbPath = H.getTempDirectory() .. "/bookinfo.db"
     })
-
 end
 
 function M:installPatches()
@@ -394,592 +310,27 @@ end
 function M:backgroundCacheConfig()
     return self:getLuaConfig(H.getTempDirectory() .. '/cache.lua')
 end
-function M:resetReader3Token()
-    self:backgroundCacheConfig():delSetting('r3k'):flush()
-end
-
-function M:_isReader3() return self.settings_data.data.server_type == 2 end
-function M:_isLegadoApp() return self.settings_data.data.server_type == 1 end
-function M:_reader3Login()
-    local cache_config = self:backgroundCacheConfig()
-    if H.is_str(cache_config.data.r3k) then
-        return true, cache_config.data.r3k
-    end
-
-    local socketutil = require("socketutil")
-    local server_address = self.settings_data.data['server_address']
-    local reader3_un = self.settings_data.data.reader3_un
-    local reader3_pwd = self.settings_data.data.reader3_pwd
-
-    if not H.is_str(reader3_un) or not H.is_str(reader3_pwd) or reader3_pwd == '' or reader3_un == '' then
-        return false, '认证信息设置不全'
-    end
-
-    self.apiClient:reset_middlewares()
-    self.apiClient:enable("Format.JSON")
-    self.apiClient:enable("ForceJSON")
-    socketutil:set_timeout(8, 10)
-
-    local status, res = pcall(function()
-        return self.apiClient:reader3Login({
-            username = reader3_un,
-            password = reader3_pwd,
-            code = "",
-            isLogin = true,
-            v = os.time()
-        })
-    end)
-    socketutil:reset_timeout()
-
-    if not status then
-        return false, H.errorHandler(res) or '获取用户信息出错'
-    end
-
-    if not H.is_tbl(res.body) or not H.is_tbl(res.body.data) then
-        return false,
-            (res.body and res.body.errorMsg) and res.body.errorMsg or "服务器返回了无效的数据结构"
-    end
-
-    if not H.is_str(res.body.data.accessToken) then
-        return false, '获取 Token 失败'
-    end
-
-    logger.dbg('get legado3token:', res.body.data.accessToken)
-
-    cache_config:saveSetting("r3k", res.body.data.accessToken):flush()
-
-    return true, res.body.data.accessToken
-end
-
-function M:legadoSporeApi(requestFunc, callback, opts, logName)
-    local socketutil = require("socketutil")
-
-    local server_address = self.settings_data.data['server_address']
-    logName = logName or 'legadoSporeApi'
-    opts = opts or {}
-
-    local isServerOnly = opts.isServerOnly
-    local timeouts = opts.timeouts
-    if not H.is_tbl(timeouts) or not H.is_num(timeouts[1]) or not H.is_num(timeouts[2]) then
-        timeouts = {8, 12}
-    end
-
-    if isServerOnly == true and not self:_isReader3() then
-        return wrap_response(nil, "仅支持服务器版本\r\n其它请在 app 操作后刷新")
-    end
-
-    self.apiClient:reset_middlewares()
-    self.apiClient:enable("Legado3Auth")
-    self.apiClient:enable("Format.JSON")
-    self.apiClient:enable("ForceJSON")
-
-    -- 单次轮询 timeout,总 timeout
-    socketutil:set_timeout(timeouts[1], timeouts[2])
-    local status, res = pcall(requestFunc)
-    socketutil:reset_timeout()
-
-    if not status or not H.is_tbl(res.body) then
-
-        local err_msg = H.errorHandler(res)
-        logger.err(logName, "requestFunc err:", tostring(res))
-        err_msg = map_error_message(err_msg)
-        return wrap_response(nil, string.format("Web 服务: %s", err_msg))
-    end
-
-    if H.is_tbl(res.body) and res.body.data == "NEED_LOGIN" and res.body.isSuccess == false then
-        self:resetReader3Token()
-        self:_reader3Login()
-        return wrap_response(nil, '已重新认证，刷新并继续')
-    end
-
-    if H.is_tbl(res.body) and res.body.isSuccess == true and res.body.data then
-        if H.is_func(callback) then
-            return callback(res.body)
-        else
-            return wrap_response(res.body.data)
-        end
-    else
-        return wrap_response(nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错')
-    end
-end
-
-function M:refreshChaptersList(bookinfo)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl)) then
-        return wrap_response(nil, "获取目录参数错误")
-    end
-    local bookUrl = bookinfo.bookUrl
-    return self:legadoSporeApi(function()
-        return self.apiClient:getChapterList({
-            url = bookUrl,
-            bookSource = bookinfo.origin,
-            bookSourceUrl = bookinfo.origin,
-            refresh = 0,
-            v = os.time()
-        })
-    end, nil, {
-        timeouts = {6, 10}
-    }, 'refreshChaptersList')
-
-end
-
-function M:refreshChaptersCache(bookinfo, last_refresh_time)
-
-    if last_refresh_time and os.time() - last_refresh_time < 2 then
-        dbg.v('ui_refresh_time prevent refreshChaptersCache')
-        return wrap_response(nil, '处理中')
-    end
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.cache_id)) then
-        return wrap_response(nil, "获取目录参数错误")
-    end
-    local book_cache_id = bookinfo.cache_id
-    local bookUrl = bookinfo.bookUrl
-    return self:legadoSporeApi(function()
-        return self.apiClient:getChapterList({
-            url = bookUrl,
-            v = os.time()
-        })
-    end, function(response)
-
-        local status, err = pcall(function()
-            return self.dbManager:upsertChapters(book_cache_id, response.data)
-        end)
-
-        if not status then
-            dbg.log('refreshChaptersCache数据写入', tostring(err))
-            return wrap_response(nil, '数据写入出错，请重试')
-        end
-        return wrap_response(true)
-    end, {
-        timeouts = {10, 12}
-    }, 'refreshChaptersCache')
-end
 
 function M:refreshLibraryCache(last_refresh_time)
-
     if last_refresh_time and os.time() - last_refresh_time < 2 then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(nil, '处理中')
     end
-
-    return self:legadoSporeApi(function()
-        -- data=bookinfos
-        return self.apiClient:getBookshelf({
-            refresh = 0,
-            v = os.time()
-        })
-    end, function(response)
+    local ret, err_msg = self.apiClient:getBookshelf(function(response)
         local bookShelfId = self:getServerPathCode()
         local status, err = pcall(function()
             return self.dbManager:upsertBooks(bookShelfId, response.data)
         end)
-
         if not status then
             dbg.log('refreshLibraryCache数据写入', H.errorHandler(err))
-            return wrap_response(nil, '写入数据出错，请重试')
+            return nil, '写入数据出错，请重试'
         end
-
-        return wrap_response(true)
-    end, {
-        timeouts = {8, 12}
-    }, 'refreshLibraryCache')
-end
-
-function M:pGetChapterContent(chapter)
-    local bookUrl = chapter.bookUrl
-    local chapters_index = chapter.chapters_index
-    local down_chapters_index = chapter.chapters_index
-
-    if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
-        return wrap_response(nil, 'GetChapterContent参数错误')
-    end
-
-    return self:legadoSporeApi(function()
-        -- data=string
-        return self.apiClient:getBookContent({
-
-            url = bookUrl,
-            index = down_chapters_index,
-            v = os.time()
-        })
-    end, nil, {
-        timeouts = {18, 25}
-    }, 'GetChapterContent')
-end
-
-function M:saveBookProgress(chapter)
-
-    if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
-        return wrap_response(nil, '参数错误')
-    end
-    local chapters_index = chapter.chapters_index
-
-    return self:legadoSporeApi(function()
-        return self.apiClient:saveBookProgress({
-            name = chapter.name,
-            author = chapter.author or '',
-            durChapterPos = 0,
-            durChapterIndex = chapters_index,
-            durChapterTime = time.to_ms(time.now()),
-            durChapterTitle = chapter.title or '',
-            index = chapters_index,
-            url = chapter.bookUrl,
-            v = os.time()
-        })
-    end, nil, {
-        timeouts = {3, 5}
-    }, 'saveBookProgress')
-
-end
-
-function M:getAvailableBookSource(bookinfo)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl)) then
-        return wrap_response(nil, '获取可用书源参数错误')
-    end
-
-    local bookUrl = bookinfo.bookUrl
-    local name = bookinfo.name
-    local author = bookinfo.author
-    if self:_isLegadoApp() then
-        return self:searchBookSocket(name, {
-            name = name,
-            author = author
-        })
-    end
-    return self:legadoSporeApi(function()
-        -- data=bookinfos
-        return self.apiClient:getAvailableBookSource({
-            refresh = 0,
-            url = bookUrl,
-            v = os.time()
-        })
-    end, nil, {
-        timeouts = {30, 50},
-        isServerOnly = true
-    }, 'getAvailableBookSource')
-
-end
-
-function M:getBookSourcesList()
-    return self:legadoSporeApi(function()
-        return self.apiClient:getBookSources({
-            simple = 1,
-            v = os.time()
-        })
-    end, nil, {
-        timeouts = {15, 20},
-        isServerOnly = true
-    }, 'getBookSourcesList')
-end
-
-function M:setBookSource(newBookSource)
-    -- origin = bookSourceUrl
-    -- return bookinfo
-    if not H.is_tbl(newBookSource) or not H.is_str(newBookSource.bookUrl) or not H.is_str(newBookSource.newUrl) or
-        not H.is_str(newBookSource.bookSourceUrl) then
-        return wrap_response(nil, '更换书源参数错误')
-    end
-
-    return self:legadoSporeApi(function()
-        -- data=bookinfo
-        return self.apiClient:setBookSource({
-            bookUrl = newBookSource.bookUrl,
-            bookSourceUrl = newBookSource.bookSourceUrl,
-            newUrl = newBookSource.newUrl,
-            v = os.time()
-        })
-    end, function(response)
-        if H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
-            local bookShelfId = self:getServerPathCode()
-            local response = {response.data}
-            local status, err = pcall(function()
-                return self.dbManager:upsertBooks(bookShelfId, response, true)
-            end)
-
-            if not status then
-                dbg.log('setBookSource数据写入', tostring(err))
-                return wrap_response(nil, '数据写入出错，请重试')
-            end
-            return wrap_response(true)
-        else
-            return wrap_response(nil, '接口返回数据格式错误')
-        end
-    end, {
-        timeouts = {25, 30},
-        isServerOnly = true
-    }, 'setBookSource')
-
-end
-
-function M:refreshBookContent(chapter)
-
-    local bookUrl = chapter.bookUrl
-    local chapters_index = chapter.chapters_index
-    local down_chapters_index = chapter.chapters_index
-
-    if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
-        return wrap_response(nil, '刷新章节出错')
-    end
-
-    if self:_isLegadoApp() then
-        -- 刷新书籍, 仅legado app，不支持单章刷新
-        self:legadoSporeApi(function()
-            return self.apiClient:refreshToc({
-                url = bookUrl,
-                v = os.time()
-            })
-        end, nil, {
-            timeouts = {10, 20}
-        }, 'refreshToc')
-    elseif self:_isReader3() then
-        self:legadoSporeApi(function()
-            return self.apiClient:getBookContent({
-                url = bookUrl,
-                index = down_chapters_index,
-                refresh = 1,
-                v = os.time()
-            })
-        end, nil, {
-            timeouts = {10, 20}
-        }, 'GetChapterContent')
-    end
-end
-
-function M:searchBookSource(bookUrl, lastIndex, searchSize)
-    if not H.is_str(bookUrl) then
-        return wrap_response(nil, '获取更多书源参数错误')
-    end
-    if not H.is_num(lastIndex) then
-        lastIndex = -1
-    end
-    if not H.is_num(searchSize) then
-        searchSize = 5
-    end
-    return self:legadoSporeApi(function()
-        -- data.list data.lastindex
-        return self.apiClient:searchBookSource({
-            url = bookUrl,
-            bookSourceGroup = '',
-            lastIndex = lastIndex,
-            searchSize = searchSize,
-            v = os.time()
-        })
-
-    end, nil, {
-        timeouts = {70, 80},
-        isServerOnly = true
-    }, 'searchBook')
-
-end
-
-function M:searchBookSocket(search_text, filter, timeout)
-    if not (H.is_str(search_text) and search_text ~= '') then
-        return wrap_response(nil, "输入参数错误")
-    end
-
-    if not self:_isLegadoApp() then
-        return wrap_response(nil, "仅支持阅读 APP")
-    end
-
-    timeout = timeout or 60
-
-    local is_precise = false
-    if string.sub(search_text, 1, 1) == '=' then
-        search_text = string.sub(search_text, 2)
-        is_precise = true
-    end
-
-    local JSON = require("json")
-    local websocket = require('Legado/websocket')
-
-    local key_json = JSON.encode({
-        key = search_text
-    })
-
-    local client = websocket.client.sync({
-        timeout = 3
-    })
-
-    local parsed = socket_url.parse(self.settings_data.data.server_address)
-    local ws_scheme
-    if parsed.scheme == 'http' then
-        ws_scheme = 'ws'
-        if not parsed.port then
-            parsed.port = 80
-        end
-    else
-        ws_scheme = 'wss'
-        if not parsed.port then
-            parsed.port = 443
-        end
-    end
-
-    parsed.port = parsed.port + 1
-
-    local ws_server_address = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/searchBook")
-
-    local ok, err = client:connect(ws_server_address)
-    if not ok then
-        logger.err('ws连接出错', err)
-        err = map_error_message(err)
-        return wrap_response(nil, "请求失败：" .. tostring(err))
-    end
-
-    local filterEven
-    if H.is_tbl(filter) and filter.name then
-        filterEven = function(line)
-            if H.is_tbl(line) and (filter.name == nil or line.name == filter.name) and
-                (filter.author == nil or line.author == filter.author) and
-                (filter.origin == nil or line.origin == filter.origin) then
-                return line
-            end
-        end
-    elseif is_precise == true then
-        filterEven = function(line)
-            if H.is_tbl(line) and line.name and (line.name == search_text or line.author == search_text) then
-                return line
-            end
-        end
-    else
-        filterEven = function(line)
-            if H.is_tbl(line) then
-                return line
-            end
-        end
-    end
-
-    client:send(key_json)
-    ok, err = pcall(function()
-        local response = {}
-        local start_time = os.time()
-        local deduplication = {}
-
-        while true do
-            local response_body = client:receive()
-            if not response_body then
-                break
-            end
-
-            if os.time() - start_time > timeout then
-                logger.err("ws receive 超时")
-                break
-            end
-
-            local _, parsed_body = pcall(JSON.decode, response_body)
-            if type(parsed_body) ~= 'table' or #parsed_body == 0 then
-                -- pong
-                goto continue
-            end
-
-            local start_idx = #response + 1
-            for i, v in ipairs(parsed_body) do
-
-                local deduplication_key = table.concat({v.name, v.author or "", v.originOrder or 1})
-                if not deduplication[deduplication_key] and filterEven(v) then
-                    response[start_idx] = v
-                    start_idx = start_idx + 1
-                    deduplication[deduplication_key] = true
-                end
-            end
-
-            ::continue::
-        end
-        deduplication = nil
-        collectgarbage()
-        collectgarbage()
-        return response
+        return true
     end)
-
-    pcall(function()
-        client:close()
-    end)
-
-    if not ok then
-        logger.err('ws返回数据出错：', err)
-        return wrap_response(nil, 'ws返回数据出错：' .. H.errorHandler(err))
-    end
-
-    return wrap_response(err)
+    return wrap_response(ret, err_msg)
 end
-
-function M:searchBook(search_text, bookSourceUrl, concurrentCount)
-    if not (H.is_str(search_text) and search_text ~= '' and H.is_str(bookSourceUrl)) then
-        return wrap_response(nil, "输入参数错误")
-    end
-    concurrentCount = concurrentCount or 32
-    return self:legadoSporeApi(function()
-        -- data = bookinfolist
-        return self.apiClient:searchBook({
-            key = search_text,
-            bookSourceGroup = '',
-            concurrentCount = concurrentCount,
-            bookSourceUrl = bookSourceUrl,
-            lastIndex = -1,
-            page = 1,
-            v = os.time()
-        })
-    end, nil, {
-        timeouts = {20, 30},
-        isServerOnly = true
-    }, 'searchBook')
-end
-
-function M:searchBookMulti(search_text, lastIndex, searchSize, concurrentCount)
-    if not H.is_str(search_text) or search_text == '' then
-        return wrap_response(nil, "输入参数错误")
-    end
-
-    lastIndex = H.is_num(lastIndex) and lastIndex or -1
-    searchSize = H.is_num(searchSize) and searchSize or 20
-    concurrentCount = concurrentCount or 32
-    return self:legadoSporeApi(function()
-        -- data.list data.lastindex
-        return self.apiClient:searchBookMulti({
-            key = search_text,
-            bookSourceGroup = '',
-            concurrentCount = concurrentCount,
-            lastIndex = lastIndex,
-            searchSize = searchSize,
-            v = os.time()
-        })
-    end, nil, {
-        timeouts = {60, 80},
-        isServerOnly = true
-    }, 'searchBook')
-end
-
 function M:addBookToLibrary(bookinfo)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl) and
-        H.is_str(bookinfo.originName)) then
-        return wrap_response(nil, "输入参数错误")
-    end
-
-    local nowTime = time.now()
-    bookinfo.time = time.to_ms(nowTime)
-
-    return self:legadoSporeApi(function()
-        -- data=bookinfo
-        return self.apiClient:saveBook({
-
-            v = os.time(),
-            name = bookinfo.name,
-            author = bookinfo.author,
-            bookUrl = bookinfo.bookUrl,
-            origin = bookinfo.origin,
-            originName = bookinfo.originName,
-            originOrder = bookinfo.originOrder or 0,
-            durChapterIndex = bookinfo.durChapterIndex or 0,
-            durChapterPos = bookinfo.durChapterPos or 0,
-            durChapterTime = bookinfo.durChapterTime or 0,
-            durChapterTitle = bookinfo.durChapterTitle or '',
-            wordCount = bookinfo.wordCount or '',
-            intro = bookinfo.intro or '',
-            totalChapterNum = bookinfo.totalChapterNum or 0,
-            kind = bookinfo.kind or '',
-            type = bookinfo.type or 0
-        })
-
-    end, function(response)
-        -- isServerOnly = true
+    return wrap_response(self.apiClient:saveBook(bookinfo, function(response)
         if H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
             local bookShelfId = self:getServerPathCode()
             local db_save = {response.data}
@@ -989,50 +340,100 @@ function M:addBookToLibrary(bookinfo)
 
             if not status then
                 dbg.log('addBookToLibrary数据写入', tostring(err))
-                return wrap_response(nil, '数据写入出错，请重试')
+                return nil, '数据写入出错，请重试'
             end
         end
-        return wrap_response(true)
-    end, {
-        timeouts = {10, 12}
-    }, 'addBookToLibrary')
+        return true
+    end))
+end
+function M:deleteBook(bookinfo)
+    return wrap_response(self.apiClient:deleteBook(bookinfo))
+end
+function M:getChaptersList(bookinfo)
+    return wrap_response(self.apiClient:getChapterList(bookinfo))
+end
+function M:refreshChaptersCache(bookinfo, last_refresh_time)
+    if last_refresh_time and os.time() - last_refresh_time < 2 then
+        dbg.v('ui_refresh_time prevent refreshChaptersCache')
+        return wrap_response(nil, '处理中')
+    end
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.cache_id)) then
+        return wrap_response(nil, "获取目录参数错误")
+    end
+    local book_cache_id = bookinfo.cache_id
+    local bookUrl = bookinfo.bookUrl
 
+    return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
+        local status, err = pcall(function()
+            return self.dbManager:upsertChapters(book_cache_id, response.data)
+        end)
+        if not status then
+            dbg.log('refreshChaptersCache数据写入', tostring(err))
+            return nil, '数据写入出错，请重试'
+        end
+        return true
+    end))
+end
+function M:pGetChapterContent(chapter)
+    return wrap_response(self.apiClient:getBookContent(chapter))
+end
+function M:refreshBookContent(chapter)
+    return wrap_response(self.apiClient:refreshBookContent(chapter))
+end
+function M:saveBookProgress(chapter)
+    return wrap_response(self.apiClient:saveBookProgress(chapter))
+end
+function M:getProxyCoverUrl(coverUrl)
+    return self.apiClient:getProxyCoverUrl(coverUrl)
+end
+function M:getProxyEpubUrl(bookUrl, htmlUrl)
+    return self.apiClient:getProxyEpubUrl(bookUrl, htmlUrl)
+end
+function M:getProxyImageUrl(bookUrl, img_src)
+    return self.apiClient:getProxyImageUrl(bookUrl, img_src)
 end
 
-function M:deleteBook(bookinfo)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl)) then
-        return wrap_response(nil, "输入参数错误")
-    end
-
-    return self:legadoSporeApi(function()
-        -- {"isSuccess":true,"errorMsg":"","data":"删除书籍成功"}
-        return self.apiClient:deleteBook({
-
-            v = os.time(),
-            name = bookinfo.name,
-            author = bookinfo.author,
-            bookUrl = bookinfo.bookUrl,
-            origin = bookinfo.origin,
-            originName = bookinfo.originName,
-            originOrder = bookinfo.originOrder or 0,
-            durChapterIndex = bookinfo.durChapterIndex or 0,
-            durChapterPos = bookinfo.durChapterPos or 0,
-            durChapterTime = bookinfo.durChapterTime or 0,
-            durChapterTitle = bookinfo.durChapterTitle or '',
-            wordCount = bookinfo.wordCount or '',
-            intro = bookinfo.intro or '',
-            totalChapterNum = bookinfo.totalChapterNum or 0,
-            kind = bookinfo.kind or '',
-            type = bookinfo.type or 0
-        })
-    end, nil, {
-        timeouts = {6, 8}
-    }, 'deleteBook')
+function M:getBookSourcesList(callback)
+    return wrap_response(self.apiClient:getBookSourcesList(callback))
+end
+--- return list lastIndex
+function M:getAvailableBookSource(options, callback)
+    return wrap_response(self.apiClient:getAvailableBookSource(options, callback))
+end
+function M:autoChangeBookSource(bookinfo, callback)
+    return wrap_response(self.apiClient:autoChangeBookSource(bookinfo, callback))
+end
+function M:searchBookSingle(options, callback)
+    return wrap_response(self.apiClient:searchBookSingle(options, callback))
+end
+--- return list lastIndex
+function M:searchBookMulti(options, callback)
+    return wrap_response(self.apiClient:searchBookMulti(options, callback))
+end
+function M:autoChangeBookSource(bookinfo, callback)
+    return wrap_response(self.apiClient:autoChangeBookSource(bookinfo, callback))
+end
+function M:changeBookSource(newBookSource)
+    return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
+        if H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
+            local bookShelfId = self:getServerPathCode()
+            local response = {response.data}
+            local status, err = pcall(function()
+                return self.dbManager:upsertBooks(bookShelfId, response, true)
+            end)
+            if not status then
+                dbg.log('changeBookSource数据写入', tostring(err))
+                return nil, '数据写入出错，请重试'
+            end
+            return true
+        else
+            return nil, '接口返回数据格式错误'
+        end
+    end))
 end
 
 local ffi = require("ffi")
 local libutf8proc
-
 local function utf8_chars(str, reverse)
     if libutf8proc == nil then
         -- 兼容旧版
@@ -1779,8 +1180,8 @@ function M:_pDownloadChapter(chapter, message_dialog, is_recursive)
     local response = self:pGetChapterContent(chapter)
 
     if is_recursive ~= true and H.is_tbl(response) and response.type == 'ERROR' and
-        string.find(tostring(response.message), 'NEED_LOGIN', 1, true) then
-        self:resetReader3Token()
+        self.apiClient:isNeedLogin(response.message) == true then
+        self.apiClient:resetReader3Token()
         return self:_pDownloadChapter(chapter, message_dialog, true)
     end
 
@@ -1889,54 +1290,6 @@ function M:findNextChapter(current_chapter, is_downloaded)
 
 end
 
-function M:getProxyCoverUrl(coverUrl)
-    if not H.is_str(coverUrl) then
-        return coverUrl
-    end
-    local server_address = self.settings_data.data['server_address']
-    if self:_isReader3() then
-        local api_root_url = server_address:gsub("/reader3$", "")
-        return socket_url.absolute(api_root_url, coverUrl)
-    else
-        return table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
-    end
-end
-
-function M:getProxyEpubUrl(bookUrl, htmlUrl)
-    if not H.is_str(htmlUrl) then
-        return htmlUrl
-    end
-    local server_address = self.settings_data.data['server_address']
-    if server_address:match("/reader3$") and htmlUrl:match("%.x?html$") then
-        local api_root_url = server_address:gsub("/reader3$", "")
-        -- 可能有空格 "data": "/book-assets/guest/紫川_老猪/紫川 作者：老猪.epub/index/OEBPS/Text/chapter_0.html"
-        htmlUrl = custom_urlEncode(htmlUrl)
-        -- logger.info("custom_urlEncode:",htmlUrl)
-        -- logger.info("util.urlEncode",util.urlEncode(htmlUrl))
-        -- logger.info("url.escape",socket_url.escape(htmlUrl))
-        return socket_url.absolute(api_root_url, htmlUrl)
-
-    else
-        return htmlUrl
-    end
-end
-
-function M:getProxyImageUrl(bookUrl, img_src)
-    local res_img_src = img_src
-    local width = Device.screen:getWidth() or 800
-    local server_address = self.settings_data.data.server_address
-    if self:_isLegadoApp() then
-        res_img_src = table.concat({server_address, '/image?url=', util.urlEncode(bookUrl), '&path=',
-                                    util.urlEncode(img_src), '&width=', width})
-    elseif self:_isReader3() then
-        local api_root_url = server_address:gsub("/reader3$", "")
-        -- <img src='__API_ROOT__/book-assets/guest/剑来_/剑来.cbz/index/1.png' />
-        res_img_src = custom_urlEncode(img_src):gsub("^__API_ROOT__", "")
-        res_img_src = socket_url.absolute(api_root_url, res_img_src)
-    end
-    return res_img_src
-end
-
 function M:getPorxyPicUrls(bookUrl, content)
     local picUrls = get_img_src(content)
     if not H.is_tbl(picUrls) or #picUrls < 1 then
@@ -1967,6 +1320,7 @@ end
 function M:getChapterImgList(chapter)
     local chapters_index = chapter.chapters_index
     local bookUrl = chapter.bookUrl
+    local origin = chapter.origin
     local down_chapters_index = chapters_index
 
     if not H.is_str(bookUrl) and not H.is_str(chapter.book_cache_id) then
@@ -1975,7 +1329,8 @@ function M:getChapterImgList(chapter)
 
     return self:HandleResponse(self:pGetChapterContent({
         bookUrl = bookUrl,
-        chapters_index = down_chapters_index
+        chapters_index = down_chapters_index,
+        orgin = origin,
     }), function(data)
         if H.is_str(data) then
             local img_sources = self:getPorxyPicUrls(bookUrl, data)
@@ -2106,7 +1461,8 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
 
                     if index < chapter_down_tasks_count then
                         -- use event loop to avoid stack overflow
-                        UIManager:nextTick(function()
+                        -- 1s delay
+                        UIManager:scheduleIn(0.8, function()
                             index = index + 1
                             local next_chapter = chapter_down_tasks[index]
                             process_task(next_chapter, index)
@@ -2231,7 +1587,6 @@ function M:cleanAllBookCaches()
     local books_cache_dir = H.getTempDirectory()
     ffiUtil.purgeDir(books_cache_dir)
     H.getTempDirectory()
-    self.settings_data.data.servers_history = {}
     self:saveSettings()
     return wrap_response(true)
 end
@@ -2527,94 +1882,201 @@ function M:getServerPathCode()
     return tostring(self.settings_data.data['server_address_md5'])
 end
 
+local function check_web_conf(url, server_type, user, pwd)
+    if not (H.is_num(server_type) and (server_type == 1  or server_type == 2 or server_type == 3)) then
+        return nil, '服务器类型必须是1、2或3'
+    end
+    if server_type == 3 then
+        if not (H.is_str(user) and user ~= '') then
+            return nil, '轻阅读必须认证凭证'
+        end
+        if not (H.is_str(pwd) or pwd ~= '') then
+            return nil, '轻阅读必须认证凭证'
+        end
+    elseif server_type == 2 then
+        if H.is_str(user) and user ~= "" and (pwd == "" or not H.is_str(pwd)) then
+            return nil, "请清空用户名或补全用户凭证"
+        end
+    end
+
+    if not (H.is_str(url) and url ~= '') then
+        return nil, '地址为空，保存失败'
+    end
+
+    local parsed = socket_url.parse(url)
+    if not parsed then
+        return nil, '地址不合规则，请检查'
+    end
+    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
+        return nil, '不支持的协议，请检查'
+    end
+    if not parsed.host or parsed.host == "" then
+        return nil, "没有主机名"
+    end
+    if parsed.port then
+        local port_num = tonumber(parsed.port)
+        if not port_num or port_num < 1 or port_num > 65535 then
+            return nil, "端口号不正确"
+        end
+    end
+
+    local clean_url = socket_url.build(parsed)
+    -- 根据服务器类型调整URL
+    if  server_type == 2 and not string.find(string.lower(parsed.path or ""), "/reader3$") then
+        clean_url = socket_url.absolute(clean_url, "/reader3")
+    elseif server_type == 3 and not string.find(string.lower(parsed.path or ""), "/api/5$") then
+        clean_url = socket_url.absolute(clean_url, "/api/5")
+    end
+
+    return { url = clean_url, type = server_type, user = user, pwd = pwd }
+end
+
+function M:switchWebConfig(conf_name)
+    if not (H.is_str(conf_name) and conf_name ~= "") then
+        return wrap_response(nil, "参数错误")
+    end
+    local settings = self:getSettings()
+    local web_configs = settings.web_configs
+    if not (H.is_tbl(web_configs) and H.is_tbl(web_configs[conf_name])) then
+        return wrap_response(nil, "配置不存在")
+    end
+    if settings.current_conf_name == conf_name then
+        return wrap_response(nil, "已经是当前激活配置")
+    end
+    local config = web_configs[conf_name]
+    settings.server_address = config.url
+    settings.server_type = config.type
+    settings.reader3_un = config.user
+    settings.reader3_pwd = config.pwd
+    settings.current_conf_name = conf_name
+    return self:saveSettings(settings)
+end
+
+function M:deleteWebConfig(conf_name)
+    if not (H.is_str(conf_name) and conf_name ~= "") then
+        return wrap_response(nil, "参数错误")
+    end
+    local settings = self:getSettings()
+    local web_configs = settings.web_configs
+    if not (H.is_tbl(web_configs) and web_configs[conf_name]) then
+        return wrap_response(nil, "配置不存在")
+    end
+    if settings.current_conf_name == conf_name then
+        return wrap_response(nil, "当前激活配置, 不可删除")
+    end
+
+    self.settings_data.data.web_configs[conf_name] = nil
+    self:saveSettings()
+    return wrap_response(true)
+end
+
+function M:updateWebConfig(conf_name, web_config)
+    if not (H.is_tbl(web_config) and conf_name ~= "") then
+        return wrap_response(nil, "参数错误，保存失败")
+    end
+
+    local is_new = (conf_name == nil)
+    if not is_new and conf_name ~= web_config.edit_name then
+        return wrap_response(nil, "不支持修改配置名称")
+    end
+
+    -- 如果修改的是当前激活项, 需要切换
+    local current_conf_name = self.settings_data.data.current_conf_name
+    local is_need_switch = not is_new and current_conf_name == conf_name
+
+    if is_new then
+        conf_name = web_config.edit_name
+    end
+    if not (H.is_str(conf_name) and conf_name ~= "") then
+        return wrap_response(nil, "配置名称不能为空")
+    end
+
+    local url = web_config.url
+    local server_type = web_config.type
+    local user = web_config.user
+    local pwd = web_config.pwd
+    local desc = web_config.desc
+    
+    local ok, err_msg = check_web_conf(url, server_type, user, pwd)
+    if ok then
+        if H.is_tbl(ok) and ok.url then
+            web_config.url = ok.url
+        end
+        if not self.settings_data.data.web_configs then
+            self.settings_data.data.web_configs = {}
+        end
+
+        local cf = self.settings_data.data.web_configs[current_conf_name]
+        if H.is_tbl(cf) then
+            if web_config.url == cf.url and server_type == cf.type and user == cf.user and 
+                pwd == cf.pwd and desc == cf.desc then
+                return wrap_response(nil, "配置没有改变")
+            end
+        end
+
+        web_config.edit_name = nil
+        self.settings_data.data.web_configs[conf_name] = web_config
+        if is_need_switch then
+            return self:switchWebConfig(conf_name)
+        else
+            self:saveSettings()
+            return wrap_response(true)
+        end
+    else
+        return wrap_response(nil, tostring(err_msg))
+    end
+end
+
 function M:getSettings()
     return self.settings_data.data
 end
 
 function M:saveSettings(settings)
-    if H.is_tbl(settings) and H.is_str(self.settings_data.data.server_address) then
-        if not H.is_str(settings.server_address) or not H.is_str(settings.chapter_sorting_mode) then
-            return wrap_response(nil, '参数校检错误，保存失败')
-        end
-        self.settings_data.data = settings
-    end
-    self.settings_data:flush()
-    self.settings_data = LuaSettings:open(H.getUserSettingsPath())
-    return wrap_response(true)
-end
-
-function M:setEndpointUrl(new_setting_url)
-
-    if not H.is_str(new_setting_url) or new_setting_url == '' then
-        return wrap_response(nil, '参数校检错误，保存失败')
-    end
-
-    local parsed = socket_url.parse(new_setting_url)
-    if not parsed then
-        return wrap_response(nil, '地址不合规则，请检查')
-    end
-
-    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
-        return wrap_response(nil, '不支持的协议，请检查')
-    end
-
-    if not parsed.host or parsed.host == "" then
-        return wrap_response(nil, "没有主机名")
-    end
-
-    if parsed.port then
-        local port_num = tonumber(parsed.port)
-        if not port_num or port_num < 1 or port_num > 65535 then
-            return wrap_response(nil, "端口号不正确")
-        end
-    end
-
-    local settings = self.settings_data.data
-    if parsed.user and parsed.user ~= "" then
-        self.settings_data.data.reader3_un = util.urlDecode(parsed.user)
-        self.settings_data.data.reader3_pwd = util.urlDecode(parsed.password)
-    end
-
-    local clean_url = socket_url.build(parsed)
-    local old_setting_url = self.settings_data.data.setting_url
-    -- dbg.log("server_address:", clean_url)
-    self.settings_data.data.server_address = clean_url
-    self.settings_data.data.setting_url = new_setting_url
-    self.settings_data.data.server_address_md5 = md5(parsed.host)
-    if not H.is_tbl(self.settings_data.data.servers_history) or not self.settings_data.data.servers_history[1] then
-        self.settings_data.data.servers_history = {}
-    end
-
-    local function updateHistoryItem(history_table, item, max_size)
-        local removed_old = false
-        for i = #history_table, 1, -1 do
-            if history_table[i] == item then
-                table.remove(history_table, i)
-                removed_old = true
-                break
-            end
-        end
-        table.insert(history_table, item)
-        if max_size and max_size > 0 then
-            while #history_table > max_size do
-                table.remove(history_table, 1)
-            end
-        end
+    if not settings then
+        self.settings_data:flush()
+        self.settings_data = LuaSettings:open(H.getUserSettingsPath())
+        return wrap_response(true)
     end
     
-    --添加历史记录
-    updateHistoryItem(self.settings_data.data.servers_history, old_setting_url, 10)
-
-    if string.find(string.lower(parsed.path or ""), "/reader3$") then
-        self.settings_data.data.server_type = 2
-    else
-        self.settings_data.data.server_type = 1
+    if not (H.is_tbl(settings) and H.is_str(settings.server_address) and
+           H.is_num(settings.server_type) and H.is_str(settings.chapter_sorting_mode)) then
+            return wrap_response(nil, '参数校检错误，保存失败')
     end
-    self:saveSettings()
 
-    self:loadSpore()
+    -- 一致性检查
+    if H.is_tbl(settings.web_confings) and H.is_str(settings.current_conf_name) then
+        local current_config = settings.web_confings[settings.current_conf_name]
+        if not (H.is_tbl(current_config) and current_config.user == settings.reader3_un and current_config.pwd == settings.reader3_pwd and
+           current_config.type == settings.server_type ) then
+                return wrap_response(nil, 'web_config 数据不一致，保存失败')
+        end
+    end
 
-    return wrap_response(self.settings_data.data)
+    local new_setting_url = settings.server_address
+    local user, pwd = settings.reader3_un, settings.reader3_pwd
+    local server_type = settings.server_type
+    local ok, err_msg = check_web_conf(new_setting_url, server_type, user, pwd)
+    if not ok then
+        return wrap_response(nil, tostring(err_msg))
+    end
+
+    local clean_url = new_setting_url
+    if H.is_tbl(ok) and H.is_str(ok.url) then
+        clean_url = ok.url
+    end
+    
+    -- -- Changes detected, recalculate MD5
+    if self.settings_data.data.server_address ~= clean_url then
+        settings.server_address_md5 = md5(socket_url.parse(clean_url).host)
+    end
+
+    self.settings_data.data = settings
+    self.settings_data.data.server_address = clean_url
+    self.settings_data:flush()
+    self.settings_data = LuaSettings:open(H.getUserSettingsPath())
+
+    self:loadApiProvider()
+    return wrap_response(true)
 end
 
 -- Multi-process execution: the job function call chain should not write to the database
