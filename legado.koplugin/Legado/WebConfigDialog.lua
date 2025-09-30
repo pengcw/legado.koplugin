@@ -226,7 +226,7 @@ function M:handleConfigSave(dialog, current_conf_name, old_config, server_type, 
     if H.is_str(current_conf_name) and current_conf_name ~= config_name then
         return MessageBox:notice("不支持修改配置名称")
     end
-    Backend:HandleResponse(Backend:updateWebConfig(current_conf_name, {
+    Backend:HandleResponse(Backend:saveWebConfig(current_conf_name, {
         edit_name = config_name,
         url = url,
         desc = description,

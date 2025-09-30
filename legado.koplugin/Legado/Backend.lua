@@ -26,13 +26,15 @@ local M = {
 }
 
 local function wrap_response(data, err_message)
-    return data ~= nil and {
-        type = 'SUCCESS',
-        body = data
-    } or {
-        type = 'ERROR',
-        message = err_message or "Unknown error"
+    local response = { 
+        type = data ~= nil and 'SUCCESS' or 'ERROR' 
     }
+    if data ~= nil then
+        response.body = data
+    else
+        response.message = H.is_str(err_message) and err_message or "Unknown error"
+    end
+    return response
 end
 
 local function get_img_src(html)
@@ -189,17 +191,19 @@ local function pDownload_CreateCBZ(filePath, img_sources)
 end
 
 function M:HandleResponse(response, on_success, on_error)
-    if not response then
-        return on_error and on_error("Response is nil")
+    on_success = H.is_func(on_success) and on_success or function() end
+    on_error   = H.is_func(on_error)   and on_error   or function() end
+    if not H.is_tbl(response) then
+        return on_error("Response is nil")
     end
-
     local rtype = response.type
     if rtype == "SUCCESS" then
-        return on_success and on_success(response.body)
+        return on_success(response.body)
     elseif rtype == "ERROR" then
-        return on_error and on_error(response.message or "")
+        local msg = H.is_str(response.message) and response.message or "Unknown error"
+        return on_error(msg)
     end
-    return on_error and on_error("Unknown response type: " .. tostring(rtype))
+    return on_error("Unknown response type: " .. tostring(rtype))
 end
 
 function M:_isQingread() return self.settings_data.data.server_type == 3 end
@@ -331,7 +335,8 @@ function M:refreshLibraryCache(last_refresh_time)
 end
 function M:addBookToLibrary(bookinfo)
     return wrap_response(self.apiClient:saveBook(bookinfo, function(response)
-        if H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
+        -- isReader3Only = true
+        if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
             local bookShelfId = self:getServerPathCode()
             local db_save = {response.data}
             local status, err = pcall(function()
@@ -415,7 +420,7 @@ function M:autoChangeBookSource(bookinfo, callback)
 end
 function M:changeBookSource(newBookSource)
     return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
-        if H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
+        if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
             local bookShelfId = self:getServerPathCode()
             local response = {response.data}
             local status, err = pcall(function()
@@ -810,7 +815,7 @@ processLink = function(book_cache_id, resources_src, base_url, is_porxy, callbac
         book_chapter_resources(book_cache_id, resources_filename)
     -- logger.info(resources_relpath, resources_filepath, resources_catalogue)
 
-    -- 已有缓存
+    -- cache already exists
     if ext ~= "" and resources_filepath and util.fileExists(resources_filepath) then
         return resources_relpath
     end
@@ -1645,7 +1650,7 @@ function M:saveBookProgressAsync(chapter)
         end, function(status, response, r2)
         if not (H.is_tbl(response) and response.type == 'SUCCESS') then
             -- local message = type(response) == 'table' and response.message or "阅读进度自动上传失败"
-            self:_show_notice("自动进度上传失败")
+            self:_show_notice("自动上传进度失败")
         end
     end)
 end
@@ -1941,8 +1946,7 @@ function M:switchWebConfig(conf_name)
         return wrap_response(nil, "配置不存在")
     end
     if settings.current_conf_name == conf_name then
-        -- 已经是当前激活配置
-        return wrap_response(true)
+        return wrap_response(nil, "已经是当前激活配置")
     end
     local config = web_configs[conf_name]
     settings.server_address = config.url
@@ -1955,6 +1959,7 @@ end
 
 function M:deleteWebConfig(conf_name)
     if not (H.is_str(conf_name) and conf_name ~= "") then
+        logger.err("deleteWebConfig [Error] Parameter is empty")
         return wrap_response(nil, "参数错误")
     end
     local settings = self:getSettings()
@@ -1971,14 +1976,15 @@ function M:deleteWebConfig(conf_name)
     return wrap_response(true)
 end
 
-function M:updateWebConfig(conf_name, web_config)
+function M:saveWebConfig(conf_name, web_config)
     if not (H.is_tbl(web_config) and conf_name ~= "") then
-        return wrap_response(nil, "参数错误，保存失败")
+        logger.err("saveWebConfig [Error] Invalid parameters")
+        return wrap_response(nil, "请检查参数是否正确")
     end
 
     local is_new = (conf_name == nil)
     if not is_new and conf_name ~= web_config.edit_name then
-        return wrap_response(nil, "不支持修改配置名称")
+        return wrap_response(nil, "配置名称暂不支持修改")
     end
 
     -- 如果修改的是当前激活项, 需要切换
@@ -1989,7 +1995,10 @@ function M:updateWebConfig(conf_name, web_config)
         conf_name = web_config.edit_name
     end
     if not (H.is_str(conf_name) and conf_name ~= "") then
-        return wrap_response(nil, "配置名称不能为空")
+        return wrap_response(nil, "配置名称不可为空")
+    end
+    if #conf_name > 80 then
+        return wrap_response(nil, "配置名称过长")
     end
 
     local url = web_config.url
@@ -2006,8 +2015,8 @@ function M:updateWebConfig(conf_name, web_config)
         if not self.settings_data.data.web_configs then
             self.settings_data.data.web_configs = {}
         end
-
-        local cf = self.settings_data.data.web_configs[current_conf_name]
+        
+        local cf = self.settings_data.data.web_configs[conf_name]
         if H.is_tbl(cf) then
             if web_config.url == cf.url and server_type == cf.type and user == cf.user and 
                 pwd == cf.pwd and desc == cf.desc then

@@ -308,7 +308,7 @@ function ChapterListing:onMenuHold(item)
                         self:ChapterDownManager(tonumber(chapters_index), 'next', autoturn_spin.value)
                     end)
                     if not status and err then
-                        dbg.log('向后下载出错：', H.errorHandler(err))
+                        dbg.log('向后下载出错：', err)
                     end
                 end,
                 extra_callback = function()
