@@ -322,7 +322,7 @@ function M:handleSingleSourceSearch(searchText)
             if state == true then
                 Backend:HandleResponse(response, function(data)
                     if not H.is_tbl(data) then
-                        return MessageBox:notice('服务器返回错误')
+                        return MessageBox:notice('服务器返回数据错误')
                     end
                     if #data == 0 or not H.is_tbl(data[1]) then
                         return MessageBox:notice('未找到相关书籍')
@@ -359,11 +359,10 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
             last_index = self.last_index
         })
     end, function(state, response)
-        logger.info("测试测试:", state, response)
         if state == true then
             Backend:HandleResponse(response, function(data)
                 if not H.is_tbl(data) or not H.is_tbl(data.list) then
-                    return MessageBox:notice('服务器返回错误')
+                    return MessageBox:notice('服务器返回数据错误')
                 end
                 if #data.list == 0 then
                     self.has_more_api_results = nil
@@ -476,7 +475,7 @@ function M:selectBookSource(selectCallback)
         if state == true then
             Backend:HandleResponse(response, function(data)
                 if not H.is_tbl(data) then
-                    return MessageBox:notice('返回数据错误')
+                    return MessageBox:notice('返回源数据错误')
                 end
                 if #data == 0 then
                     return MessageBox:error('没有可用源')

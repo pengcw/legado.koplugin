@@ -68,19 +68,21 @@ function M:handleResponse(requestFunc, callback, opts, logName)
 
   -- 单次轮询 timeout,总 timeout
   socketutil:set_timeout(timeouts[1], timeouts[2])
-  local status, res = pcall(requestFunc)
+  local status, res = H.safe_pcall(requestFunc)
   socketutil:reset_timeout()
 
   if not (status and H.is_tbl(res) and H.is_tbl(res.body)) then
-
-      local err_msg = H.errorHandler(res)
+      
       logger.err(logName, "requestFunc err:", tostring(res))
-      err_msg = H.map_error_message(err_msg)
+      local err_msg = H.map_error_message(res)
       return nil, string.format("Web 服务: %s", err_msg)
   end
 
   if H.is_tbl(res.body) and res.body.isSuccess == true and res.body.data then
-        return H.is_func(callback) and callback(res.body) or res.body.data
+        if H.is_func(callback)  then
+            return callback(res.body) 
+        end
+        return res.body.data
   else
       return nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错'
   end
@@ -127,7 +129,7 @@ function M:saveBook(bookinfo, callback)
           kind = bookinfo.kind or '',
           type = bookinfo.type or 0
       })
-  end, callback, {
+  end, nil, {
       timeouts = {10, 12}
   }, 'saveBook')
 
@@ -379,7 +381,7 @@ function M:_searchBookSocket(search_text, filter, timeout)
   end
 
   client:send(key_json)
-  ok, err = pcall(function()
+  ok, err = H.safe_pcall(function()
       local response = {}
       local start_time = os.time()
       local deduplication = {}
@@ -426,7 +428,7 @@ function M:_searchBookSocket(search_text, filter, timeout)
 
   if not ok then
       logger.err('ws返回数据出错：', err)
-      return nil, 'ws返回数据出错：' .. H.errorHandler(err)
+      return nil, 'ws返回数据出错：' .. tostring(err)
   end
 
   return err

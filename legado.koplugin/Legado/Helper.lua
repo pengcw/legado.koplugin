@@ -3,6 +3,7 @@ local util = require("util")
 local Device = require("device")
 local ffiUtil = require("ffi/util")
 local DataStorage = require("datastorage")
+local logger = require("logger")
 
 local M = {
     plugin_path = nil,
@@ -280,22 +281,31 @@ M.replaceAllInvalidChars = function(str)
     end
 end
 
-M.errorHandler = function(err)
-    err = tostring(err)
-    -- remove stacktrace
-    local detail = err:match("%.lua:%d+:%s*(.*)")
-    if not detail then
-        detail = err:match(".*%.lua:%d+:%s*(.*)")
+M.safe_pcall = function(f, ...)
+    if type(f) ~= "function" then
+        return false, "safe_pcall: first argument must be a function"
     end
-    return detail or err
+    local function err_handler(err)
+        local err_msg = tostring(err or "unknown error")
+        local trace = debug.traceback(err, 2)
+        if logger and type(logger.err) == "function" then
+            logger.err("safe_call: ", trace)
+        end
+        return string.match(err_msg, ":%d+: (.*)$") or err_msg
+    end
+    return xpcall(f, err_handler, ...)
 end
 
+M.errorHandler = function(err)
+    return tostring(err)
+end
 M.map_error_message = function(err_msg)
     if not M.is_str(err_msg) then return "" end
     local err_map = {
         wantread            = "连接超时，请稍后重试",
         ["connection refused"] = "拒绝连接，请检查服务是否可用",
         ["no route to host"]   = "未连接网络或无法访问服务",
+        ["Network is unreachable"] = "WIFI 未开启或网络不可达",
         ["host not found"]     = "找不到服务地址",
         timeout             = "请求超时，请检查网络",
         closed              = "连接已关闭，请重试",

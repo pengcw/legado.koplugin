@@ -112,7 +112,7 @@ function M:_reader3Login()
     self.client:enable("ForceJSON")
     socketutil:set_timeout(8, 10)
 
-    local status, res = pcall(function()
+    local status, res = H.safe_pcall(function()
         return self.client:login({
             username = reader3_un,
             password = reader3_pwd,
@@ -124,7 +124,7 @@ function M:_reader3Login()
     socketutil:reset_timeout()
 
     if not status then
-        return false, H.errorHandler(res) or '获取用户信息出错'
+        return false,  res and tostring(res) or '获取用户信息出错'
     end
 
     if not H.is_tbl(res.body) or not H.is_tbl(res.body.data) then
@@ -161,14 +161,13 @@ function M:handleResponse(requestFunc, callback, opts, logName)
     self.client:enable("ForceJSON")
   
     socketutil:set_timeout(timeouts[1], timeouts[2])
-    local status, res = pcall(requestFunc)
+    local status, res = H.safe_pcall(requestFunc)
     socketutil:reset_timeout()
   
     if not (status and H.is_tbl(res) and H.is_tbl(res.body)) then
   
-        local err_msg = H.errorHandler(res)
         logger.err(logName, "requestFunc err:", tostring(res))
-        err_msg = H.map_error_message(err_msg)
+        local err_msg = H.map_error_message(res)
         return nil, string.format("Web 服务: %s", err_msg)
     end
   
@@ -179,7 +178,10 @@ function M:handleResponse(requestFunc, callback, opts, logName)
     end
 
     if H.is_tbl(res.body) and res.body.isSuccess == true and res.body.data then
-          return H.is_func(callback) and callback(res.body) or res.body.data
+          if H.is_func(callback)  then
+              return callback(res.body) 
+           end
+          return res.body.data
     else
         return nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错'
     end
@@ -528,7 +530,7 @@ function M:searchBookSingle(options, callback)
         })
     end, callback, {
         timeouts = {20, 30},
-    }, 'searchBook')
+    }, 'searchBookSingle')
 end
 
 function M:searchBookMulti(options, callback)
