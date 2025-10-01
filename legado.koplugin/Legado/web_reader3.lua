@@ -1,6 +1,5 @@
 local time = require("ui/time")
 local logger = require("logger")
-local Screen = require("device").screen
 local util = require("util")
 local socket_url = require("socket.url")
 local H = require("Legado/Helper")
@@ -397,7 +396,6 @@ end
 
 function M:getProxyImageUrl(bookUrl, img_src)
     local res_img_src = img_src
-    local width = Screen:getWidth() or 800
     local server_address = self.settings.server_address
     
     local api_root_url = server_address:gsub("/reader3$", "")

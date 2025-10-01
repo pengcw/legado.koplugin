@@ -52,8 +52,6 @@ local function get_image_format_head8(image_data)
         return "bmp"
     elseif header:sub(1, 4) == "\x52\x49\x46\x46" then
         return "webp"
-    else
-        return "bin"
     end
 end
 
@@ -69,6 +67,7 @@ local function pGetUrlContent(options, is_create)
     local timeout = options.timeout or 10
     local maxtime = options.maxtime or options.timeout + 20
     local file_fp = options.file
+    local is_pic = options.is_pic
 
     local parsed = socket_url.parse(url)
     if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
@@ -123,7 +122,7 @@ local function pGetUrlContent(options, is_create)
     local contentType = headers["content-type"]
     if contentType then
         extension = get_extension_from_mimetype(contentType)
-        if not extension and contentType:match("^image/") then
+        if not extension and (contentType:match("^image/") or is_pic) then
             extension = get_image_format_head8(content)
         end
     end

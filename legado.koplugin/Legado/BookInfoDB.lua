@@ -228,7 +228,7 @@ function M:closeDB()
         return self.db:close()
     end)
     if not success then
-        dbg.log("closing database: " .. H.errorHandler(err))
+        dbg.log("closing database: " .. tostring(err))
     end
     self.db = nil
     self.isConnected = nil
