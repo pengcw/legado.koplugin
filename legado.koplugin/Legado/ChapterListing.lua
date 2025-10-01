@@ -42,7 +42,7 @@ local ChapterListing = Menu:extend{
     all_chapters_count = nil,
     on_return_callback = nil,
     on_show_chapter_callback = nil,
-    ui_refresh_time = nil,
+    _ui_refresh_time = nil,
     refresh_menu_key = nil,
 }
 
@@ -67,7 +67,7 @@ function ChapterListing:init()
         self.key_events.Right = {{ "Right" }}
     end
 
-    self.ui_refresh_time = os.time()
+    self._ui_refresh_time = os.time()
     self:refreshItems()
 end
 
@@ -263,10 +263,8 @@ function ChapterListing:onMenuHold(item)
                 cacheFilePath = cacheFilePath,
                 book_cache_id = chapter.book_cache_id,
                 isDownLoaded = isDownLoaded,
-
                 bookUrl = chapter.bookUrl,
-
-                title = chapter
+                title = chapter.title
             }), function(data)
                 self:refreshItems(true)
                 if isDownLoaded == true then
@@ -366,14 +364,14 @@ function ChapterListing:onRefreshChapters()
                 bookUrl = self.bookinfo.bookUrl,
                 origin = self.bookinfo.origin,
                 name = self.bookinfo.name,
-            }, self.ui_refresh_time)
+            }, self._ui_refresh_time)
         end, function(state, response)
             if state == true then
                 Backend:HandleResponse(response, function(data)
                     MessageBox:notice('同步成功')
                     self:refreshItems()
                     self.all_chapters_count = nil
-                    self.ui_refresh_time = os.time()
+                    self._ui_refresh_time = os.time()
                 end, function(err_msg)
                     MessageBox:notice(err_msg or '同步失败')
                     if err_msg ~= '处理中' then
@@ -480,7 +478,7 @@ function ChapterListing:syncProgressShow(chapter)
                     self:refreshItems(true)
                     MessageBox:notice('同步完成')
                     self:switchItemTable(nil, self.item_table, tonumber(bookinfo.durChapterIndex))
-                    self.ui_refresh_time = os.time()
+                    self._ui_refresh_time = os.time()
                 end
             end, function(err_msg)
                 MessageBox:error('同步失败：' .. tostring(err_msg))

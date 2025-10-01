@@ -141,7 +141,8 @@ local function pDownload_CreateCBZ(filePath, img_sources)
         local status, err = pGetUrlContent({
                 url = img_src,
                 timeout = 15,
-                maxtime = 60
+                maxtime = 60,
+                is_pic = true,
         })
 
         if status and H.is_tbl(err) and err['data'] then
@@ -151,8 +152,11 @@ local function pDownload_CreateCBZ(filePath, img_sources)
             if not img_extension or img_extension == "" then
                 img_extension = get_url_extension(img_src)
             end
-
-            local img_name = string.format("%d.%s", i, img_extension or "")
+            -- qread may fail to get ext
+            if not img_extension or img_extension == "" then
+                img_extension = "png"
+            end
+            local img_name = string.format("%d.%s", i, img_extension)
             if is_convertToGrayscale == true and img_extension == 'png' then
                 local success, imgdata_new = convertToGrayscale(imgdata)
                 if success ~= true then
@@ -326,7 +330,7 @@ function M:refreshLibraryCache(last_refresh_time)
             return self.dbManager:upsertBooks(bookShelfId, response.data)
         end)
         if not status then
-            dbg.log('refreshLibraryCache数据写入', H.errorHandler(err))
+            dbg.log('refreshLibraryCache数据写入', err)
             return nil, '写入数据出错，请重试'
         end
         return true
@@ -947,10 +951,11 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                 local status, err = pGetUrlContent({
                         url = res_url,
                         timeout = 15,
-                        maxtime = 60
+                        maxtime = 60,
+                        is_pic = true,
                 })
                 if not status then
-                    error('请求错误，' .. H.errorHandler(err))
+                    error('请求错误，' .. tostring(err))
                 end
                 if not (H.is_tbl(err) and err["data"]) then
                     error('下载失败，数据为空')
@@ -960,15 +965,16 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                 if (not ext or ext == "") and not not err.ext then
                     ext = err['ext']
                 end
-
-                filePath = string.format("%s.%s", filePath, ext or "")
+                -- qread may fail to get ext
+                if not ext or ext == "" then ext = "png" end
+                filePath = string.format("%s.%s", filePath, ext)
                 return chapter_writeToFile(chapter, filePath, err['data'])
             else
                 filePath = filePath .. '.cbz'
-                local status, err = pcall(pDownload_CreateCBZ, filePath, img_sources)
+                local status, err = H.safe_pcall(pDownload_CreateCBZ, filePath, img_sources)
 
                 if not status then
-                    error('CreateCBZ err:' .. H.errorHandler(err))
+                    error('CreateCBZ err: ' .. tostring(err))
                 end
 
                 if chapter.is_pre_loading == true then
@@ -996,7 +1002,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                         maxtime = 60
                 })
         if not status then
-            error('请求错误，' .. H.errorHandler(err))
+            error('请求错误，' .. tostring(err))
         end
         if not (H.is_tbl(err) and err["data"]) then
             error('下载失败，数据为空')
@@ -1313,12 +1319,13 @@ function M:pDownload_Image(img_src, timeout)
     local status, err = pGetUrlContent({
                     url = img_src,
                     timeout = timeout or 15,
-                    maxtime = 60
+                    maxtime = 60,
+                    is_pic = true,
                 })
     if status and H.is_tbl(err) and err['data'] then
         return wrap_response(err)
     else
-        return wrap_response(nil, H.errorHandler(err))
+        return wrap_response(nil, tostring(err))
     end
 end
 
@@ -1615,7 +1622,7 @@ function M:ChangeChapterCache(chapter)
         if task_started == true then
             return wrap_response(true)
         else
-            return wrap_response(nil, '下载任务添加失败：' .. H.errorHandler(err))
+            return wrap_response(nil, '下载任务添加失败：' .. tostring(err))
         end
     else
 
@@ -1626,12 +1633,10 @@ function M:ChangeChapterCache(chapter)
             util.removeFile(cacheFilePath)
         end
 
-        self.dbManager:transaction(function()
-            self.dbManager:dynamicUpdateChapters(chapter, {
-                content = '_NULL',
-                cacheFilePath = '_NULL'
-            })
-        end)()
+        self.dbManager:dynamicUpdateChapters(chapter, {
+            content = '_NULL',
+            cacheFilePath = '_NULL'
+        })
 
         self:refreshBookContentAsync(chapter)
         return wrap_response(true)
@@ -1728,6 +1733,7 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
                         url = img_src,
                         timeout = 15,
                         maxtime = 60,
+                        is_pic = true,
                 })
     if status and err and err['data'] then
         local cover_img_data = err['data']
@@ -1797,10 +1803,7 @@ function M:after_reader_chapter_show(chapter)
             }
         end
 
-        self.dbManager:transaction(function()
-            self.dbManager:dynamicUpdateChapters(chapter, update_state)
-        end)()
-
+        self.dbManager:dynamicUpdateChapters(chapter, update_state)
     end)
 
     if not status then
@@ -1867,12 +1870,12 @@ function M:downloadChapter(chapter, message_dialog)
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 
-    local status, err = pcall(function()
+    local status, err = H.safe_pcall(function()
         return self:_pDownloadChapter(chapter, message_dialog)
     end)
     if not status then
         logger.err('下载章节失败：', err)
-        return wrap_response(nil, "下载章节失败：" .. H.errorHandler(err))
+        return wrap_response(nil, "下载章节失败：" .. tostring(err))
     end
     return wrap_response(err)
 

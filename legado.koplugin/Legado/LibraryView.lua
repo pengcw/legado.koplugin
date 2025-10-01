@@ -23,12 +23,12 @@ local H = require("Legado/Helper")
 local LibraryView = {
     disk_available = nil,
     -- record the current reading items
-    selected_item = nil,
+    _selected_book = nil,
     book_toc = nil,
-    ui_refresh_time = os.time(),
-    displayed_chapter = nil,
-    readerui_is_showing = nil,
-    chapter_call_event = nil,
+    _ui_refresh_time = os.time(),
+    _displayed_chapter = nil,
+    _readerui_is_showing = nil,
+    _chapter_direction = nil,
     -- menu mode
     book_menu = nil,
     -- file browser mode
@@ -83,7 +83,7 @@ end
 
 function LibraryView:fetchAndShow()
     local is_first = not LibraryView.instance
-    local library_view = LibraryView.instance or self:getInstance()
+    local library_obj = LibraryView.instance or self:getInstance()
     local use_browser = not self:isDisableBrowserMode() and is_first and self:browserViewHasLnk()
     local widget = use_browser and self:getBrowserWidget() or self:getMenuWidget()
     if widget then
@@ -405,7 +405,7 @@ function LibraryView:openLegadoFolder(path, focused_file, selected_files, done_c
     UIManager:nextTick(function()
         if ReaderUI and ReaderUI.instance then
             ReaderUI.instance:onClose()
-            self.readerui_is_showing = false
+            self:readerUiVisible(false)
         end
         if FileManager.instance then
             FileManager.instance:reinit(path, focused_file, selected_files)
@@ -453,13 +453,14 @@ function LibraryView:loadAndRenderChapter(chapter)
     end
 end
 
-function LibraryView:ReaderUIEventCallback(chapter_call_event)
-    if not (H.is_str(chapter_call_event) and H.is_tbl(self.displayed_chapter)) then
+function LibraryView:ReaderUIEventCallback(chapter_direction)
+    local chapter = self:readingChapter()
+    if not (H.is_str(chapter_direction) and H.is_tbl(chapter)) then
         return
     end
-    local chapter = self.displayed_chapter
-    self.chapter_call_event = chapter_call_event
-    chapter.call_event = chapter_call_event
+
+    self:chapterDirection(chapter_direction)
+    chapter.call_event = chapter_direction
 
     local nextChapter = Backend:findNextChapter({
         chapters_index = chapter.chapters_index,
@@ -472,13 +473,13 @@ function LibraryView:ReaderUIEventCallback(chapter_call_event)
         nextChapter.call_event = chapter.call_event
         self:loadAndRenderChapter(nextChapter)
     else
-        local bookinfo = (self.book_toc and H.is_tbl(self.book_toc.bookinfo)) 
-            and self.book_toc.bookinfo 
-            or Backend:getBookInfoCache(chapter.book_cache_id)
-
-        self:afterCloseReaderUi(function()
-            self:showBookTocDialog(bookinfo)
-        end)
+        local book_cache_id = self:getReadingBookId()
+        if book_cache_id then
+            local bookinfo = Backend:getBookInfoCache(chapter.book_cache_id)
+            self:afterCloseReaderUi(function()
+                self:showBookTocDialog(bookinfo)
+            end)
+        end
     end
 end
 
@@ -490,10 +491,11 @@ function LibraryView:showReaderUI(chapter)
     if not util.fileExists(book_path) then
         return MessageBox:error(book_path, "不存在")
     end
-    self.displayed_chapter = chapter
+    self:readingChapter(chapter)
 
-    if self.book_toc and UIManager:isWidgetShown(self.book_toc) then
-        UIManager:close(self.book_toc)
+    local toc_obj = self:getBookTocWidget()
+    if toc_obj and UIManager:isWidgetShown(toc_obj) then
+        UIManager:close(toc_obj)
     end
     if ReaderUI.instance then
         ReaderUI.instance:switchDocument(book_path, true)
@@ -547,7 +549,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
     local Backend = require("Legado/Backend")
     local H = require("Legado/Helper")
 
-    local library_view_ref = self
+    local library_ref = self
     local ext_switch_sync_reading = switch_sync_reading
 
     local is_legado_path = function(file_path, instance)
@@ -561,11 +563,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             file_path = instance.document.file
         end
         return type(file_path) == 'string' and file_path:find("/Legado\u{200B}书目/", 1, true) or false
-    end
-    local get_chapter_event = function()
-        if library_view_ref.instance then
-            return library_view_ref.instance.chapter_call_event
-        end
     end
 
     function parent_ref:onShowLegadoLibraryView()
@@ -597,10 +594,9 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             return undoFileOpen and undoFileOpen(file)
         end
 
-        library_view_ref:getInstance()
-        local library_view_instance = library_view_ref.instance
+        local library_obj = library_ref:getInstance()
 
-        if not library_view_instance then
+        if not library_obj then
             logger.warn("oadLastReadChapter LibraryView instance not loaded")
             UIManager:close(loading_msg)
             MessageBox:error("加载书架失败")
@@ -617,36 +613,28 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
 
         local onReturnCallBack = function()
-            -- local dir = library_view_instance:getBrowserHomeDir()
+            -- local dir = library_obj:getBrowserHomeDir()
             -- Sometimes LibraryView instance may not start
-            -- library_view_ref:openLegadoFolder(dir)
+            -- library_ref:openLegadoFolder(dir)
         end
 
-        library_view_instance:refreshBookTocWidget(bookinfo, onReturnCallBack)
-        library_view_instance.selectetrued_item = {cache_id = book_cache_id}
+        library_obj:refreshBookTocWidget(bookinfo, onReturnCallBack)
+        library_obj:currentSelectedBook({cache_id = book_cache_id})
 
-        library_view_instance:openLastReadChapter(bookinfo)
+        library_obj:openLastReadChapter(bookinfo)
         UIManager:close(loading_msg)
         return true
     end
 
     function parent_ref:onShowLegadoToc(book_cache_id)
-        library_view_ref:getInstance()
-        local library_view_instance = library_view_ref.instance
+        local library_obj = library_ref:getInstance()
 
-        if not library_view_instance then
+        if not library_obj then
             logger.warn("ShowLegadoToc LibraryView instance not loaded")
             return true
         end
         if not book_cache_id then
-            if library_view_instance.displayed_chapter then
-                book_cache_id = library_view_instance.displayed_chapter.book_cache_id
-            elseif library_view_instance.book_toc and 
-                    library_view_instance.book_toc.bookinfo then
-                book_cache_id = library_view_instance.book_toc.bookinfo.cache_id
-            elseif library_view_instance.selected_item then
-                book_cache_id = library_view_instance.selected_item.cache_id
-            end
+            book_cache_id = library_obj:getReadingBookId()
         end
         if not book_cache_id then
             logger.warn("ShowLegadoToc book_cache_id not obtained")
@@ -659,14 +647,14 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             return
         end
 
-        library_view_instance:showBookTocDialog(bookinfo)
+        library_obj:showBookTocDialog(bookinfo)
         return true
     end
 
-    local calculate_goto_page = function(chapter_call_event, page_count)
-        if chapter_call_event == "next" then
+    local calculate_goto_page = function(chapter_direction, page_count)
+        if chapter_direction == "next" then
             return 1
-        elseif page_count and chapter_call_event == "pre" then
+        elseif page_count and chapter_direction == "prev" then
             return page_count
         end
     end
@@ -717,7 +705,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             -- Does it affect the future ？
             --[=[
                     if document_is_new then  
-                        local bookinfo = library_view_ref.instance.book_toc.bookinfo
+                        local bookinfo = library_ref.instance.book_toc.bookinfo
                         doc_settings.data.doc_props = doc_settings.data.doc_props or {}
                         doc_settings.data.doc_props.title = bookinfo.name or "N/A"
                         doc_settings.data.doc_props.authors = bookinfo.author or "N/A"
@@ -726,10 +714,11 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
             -- current_page == nil
             -- self.ui.document:getPageCount() unreliable, sometimes equal to 0
-            local chapter_call_event = get_chapter_event()
+            local library_obj = library_ref:getInstance()
+            local chapter_direction = library_obj:chapterDirection()
             local page_count = doc_settings:readSetting("doc_pages") or 99999
             -- koreader some cases is goto last_page
-            local page_number = calculate_goto_page(chapter_call_event, page_count)
+            local page_number = calculate_goto_page(chapter_direction, page_count)
             if H.is_num(page_number) then
                 doc_settings.data.last_page = page_number
             end
@@ -782,26 +771,21 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             return
         end
 
+        local library_obj = library_ref:getInstance()
         if not is_legado_path(nil, self.ui) then
-            if library_view_ref.instance then
-                library_view_ref.instance.readerui_is_showing = false
-            end
+            if library_obj then library_obj:readerUiVisible(false) end
             return
         elseif self.ui.link and self.ui.document then
-
-            if library_view_ref.instance then
-                library_view_ref.instance.readerui_is_showing = true
-            end
-
-            local chapter_call_event = get_chapter_event()
-            if not chapter_call_event then
+            if library_obj then library_obj:readerUiVisible(true) end
+            local chapter_direction = library_obj:chapterDirection()
+            if not chapter_direction then
                 return
             end
 
             local document_is_new =
                 (self.ui.document.is_new == true) or doc_settings:readSetting("legado_doc_is_new") == true
             doc_settings:delSetting("legado_doc_is_new")
-            if document_is_new and chapter_call_event == "next" then
+            if document_is_new and chapter_direction == "next" then
                 return
             end
 
@@ -830,15 +814,14 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     self.ui:handleEvent(Event:new("GotoPage", page_number))
                 end
             end
-            make_pages_continuous(chapter_call_event)
+            make_pages_continuous(chapter_direction)
         end
     end
 
     function parent_ref:onCloseDocument()
         if is_legado_path(nil, self.ui) then
-            if library_view_ref.instance then
-                library_view_ref.instance.readerui_is_showing = false
-            end
+            local library_obj = library_ref:getInstance()
+            if library_obj then library_obj:readerUiVisible(false) end
             if not self.patches_ok then
                 require("readhistory"):removeItemByPath(self.document.file)
             end
@@ -861,10 +844,10 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
     function parent_ref:onEndOfBook()
         if is_legado_path(nil, self.ui) then
-            library_view_ref:getInstance()
-            if library_view_ref.instance then
-                local chapter_call_event = "next"
-                library_view_ref.instance:ReaderUIEventCallback(chapter_call_event)
+            local library_obj = library_ref:getInstance()
+            if library_obj then
+                local chapter_direction = "next"
+                library_obj:ReaderUIEventCallback(chapter_direction)
             else
                 self:openLibraryView()
             end
@@ -874,10 +857,10 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
     function parent_ref:onStartOfBook()
         if is_legado_path(nil, self.ui) then
-            library_view_ref:getInstance()
-            if library_view_ref.instance then
-                local chapter_call_event = "pre"
-                library_view_ref.instance:ReaderUIEventCallback(chapter_call_event)
+            local library_obj = library_ref:getInstance()
+            if library_obj then
+                local chapter_direction = "prev"
+                library_obj:ReaderUIEventCallback(chapter_direction)
             else
                 self:openLibraryView()
             end
@@ -887,9 +870,9 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
     function parent_ref:onShowLegadoBrowserOption(file)
         -- logger.info("Received ShowLegadoBrowserOption event", file)
-        library_view_ref:getInstance()
-        if FileManager.instance and library_view_ref.instance then
-            library_view_ref.instance:openBrowserMenu(file)
+        local library_obj = library_ref:getInstance()
+        if FileManager.instance and library_obj then
+            library_obj:openBrowserMenu(file)
         end
     end
 
@@ -936,13 +919,31 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 end
             }
         end
-        
+
         local settings = Backend:getSettings()
 
         menu_items.Legado_reader_ui_menu = {
             text = "Legado 书目",
             sorting_hint = "search",
             sub_item_table = {{
+                text = "强制刷新本章",
+                separator = true,
+                callback = function()
+                    local library_obj = library_ref:getInstance()
+                    local reading_chapter = library_obj:readingChapter()
+                    if reading_chapter then
+                        reading_chapter.isDownLoaded = true
+                        Backend:HandleResponse(Backend:ChangeChapterCache(reading_chapter), function(data)
+                            library_obj:loadAndRenderChapter(reading_chapter)
+                            MessageBox:notice("刷新成功")
+                        end, function(err_msg)
+                            MessageBox:error('操作失败:', tostring(err_msg))
+                        end)
+                    else
+                        MessageBox:error("操作失败: 没有获取到当前章节")
+                    end
+                end,
+            }, {
                 text = "自动上传阅读进度",
                 keep_menu_open = true,
                 help_text = "阅读时，自动上传阅读进度",
@@ -951,19 +952,19 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             }, {
                 text = "立即上传阅读进度",
                 callback = function()
-                    library_view_ref:getInstance()
-                    local library_view_instance = library_view_ref.instance
-                    if not (library_view_instance and library_view_instance.book_toc) then return end
-                    local reading_chapter = library_view_instance.displayed_chapter
-                    if reading_chapter and reading_chapter.book_cache_id then
-                        library_view_ref.instance.book_toc:syncProgressShow(reading_chapter)
+                    local library_obj = library_ref:getInstance()
+                    local reading_chapter = library_obj:readingChapter()
+                    if reading_chapter then
+                        local toc_obj = library_obj:getBookTocWidget()
+                        if toc_obj then
+                            toc_obj:syncProgressShow(reading_chapter)
+                        end
                     else
                         MessageBox:error("上传进度失败: 没有获取到当前章节")
                     end
                 end,
             }},
-        }
-        
+        }   
     end
 end
 
@@ -1276,7 +1277,7 @@ local function init_book_menu(parent)
         end
         
         local bookinfo = Backend:getBookInfoCache(item.cache_id)
-        self.parent_ref.selected_item = item
+        self.parent_ref:currentSelectedBook(item)
 
         if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
             return MessageBox:error("书籍信息查询出错")
@@ -1304,14 +1305,14 @@ local function init_book_menu(parent)
     function book_menu:onRefreshLibrary()
             Backend:closeDbManager()
             MessageBox:loading("Refreshing Library", function()
-                return Backend:refreshLibraryCache(parent.ui_refresh_time)
+                return Backend:refreshLibraryCache(parent._ui_refresh_time)
             end, function(state, response)
                 if state == true then
                     Backend:HandleResponse(response, function(data)
                         MessageBox:notice('同步成功')
                         self.show_search_item = true
                         self:refreshItems()
-                        self.parent_ref.ui_refresh_time = os.time()
+                        self.parent_ref._ui_refresh_time = os.time()
                     end, function(err_msg)
                         MessageBox:notice(tostring(err_msg) or '同步失败')
                     end)
@@ -1519,6 +1520,9 @@ end
 function LibraryView:getInstance()
     if not LibraryView.instance then
         self:init()
+        if not LibraryView.instance then
+            logger.err("LibraryView init not loaded")
+        end
     end
     return self
 end
@@ -1531,6 +1535,10 @@ function LibraryView:getMenuWidget()
     return init_book_menu(self)
 end
 
+function LibraryView:getBookTocWidget()
+    return self.book_toc
+end
+
 function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible)
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
         logger.err("refreshBookTocWidget parameter error")
@@ -1539,9 +1547,9 @@ function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible)
 
     local book_cache_id = bookinfo.cache_id
 
-    local toc_instance = self.book_toc
-    if not (H.is_tbl(toc_instance) and H.is_tbl(toc_instance.bookinfo) and 
-            toc_instance.bookinfo.cache_id == book_cache_id) then
+    local toc_obj = self.book_toc
+    if not (H.is_tbl(toc_obj) and H.is_tbl(toc_obj.bookinfo) and 
+            toc_obj.bookinfo.cache_id == book_cache_id) then
             logger.dbg("add new book_toc widget")
 
             self.book_toc = ChapterListing:fetchAndShow({
@@ -1575,6 +1583,56 @@ end
 function LibraryView:showBookTocDialog(bookinfo)
     -- Simple display should not cause changes onReturnCallBack
     return self:refreshBookTocWidget(bookinfo, nil, true)
+end
+
+function LibraryView:chapterDirection(direction)
+    self._chapter_direction = self._chapter_direction or "next"
+    if direction == "prev" or direction == "next" then
+        self._chapter_direction = direction
+    end
+    return self._chapter_direction
+end
+
+function LibraryView:getReadingBookId()
+    local book_cache_id
+    local current_reading_chapter = self:readingChapter()
+    local toc_obj = self:getBookTocWidget()
+    local current_selected_book = self:currentSelectedBook()
+
+    if current_reading_chapter and current_reading_chapter.book_cache_id then
+        book_cache_id = current_reading_chapter.book_cache_id
+    elseif toc_obj and H.is_tbl(toc_obj.bookinfo) and toc_obj.bookinfo.cache_id then
+        book_cache_id = toc_obj.bookinfo.cache_id
+    elseif current_selected_book then
+        book_cache_id = current_selected_book.cache_id
+    end
+    return book_cache_id
+end
+
+function LibraryView:readingChapter(chapter)
+    if H.is_tbl(chapter) and chapter.book_cache_id then
+        self._displayed_chapter = chapter
+        return self._displayed_chapter
+    else
+        local current = self._displayed_chapter
+        if H.is_tbl(current) and current.book_cache_id then
+            return current
+        end
+    end
+end
+
+function LibraryView:readerUiVisible(is_showing)
+    if H.is_boolean(is_showing) then
+        self._readerui_is_showing = is_showing
+    end
+    return self._readerui_is_showing
+end
+
+function LibraryView:currentSelectedBook(book)
+    if H.is_tbl(book) and book.cache_id then
+        self._selected_book = book
+    end
+    return self._selected_book
 end
 
 return LibraryView

@@ -534,10 +534,16 @@ function M:saveBookProgress(chapter, callback)
 
 function M:getProxyCoverUrl(coverUrl)
     if not H.is_str(coverUrl) then return coverUrl end
-    return coverUrl
+    local res_cover_src = coverUrl
+    local server_address = self.settings.server_address
+    local res_cover_src = table.concat({server_address, '/proxypng?url=', util.urlEncode(res_cover_src)})
+    return res_cover_src
 end
 function M:getProxyImageUrl(bookUrl, img_src)
-    return img_src
+    local res_img_src = img_src
+    local server_address = self.settings.server_address
+    local res_img_src = table.concat({server_address, '/proxypng?url=', util.urlEncode(res_img_src)})
+    return res_img_src
 end
 function M:getProxyEpubUrl(bookUrl, htmlUrl)
     return htmlUrl
