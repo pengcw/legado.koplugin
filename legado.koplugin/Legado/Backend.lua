@@ -1205,6 +1205,11 @@ function M:getCacheChapterFilePath(chapter, not_write_db)
             return chapter
         else
             dbg.v('Files are deleted, clear database record flag', cache_file_path)
+            -- 清理可能的临时文件
+            local tmp_file = cache_file_path .. ".tmp"
+            if util.fileExists(tmp_file) then
+                pcall(function() util.removeFile(tmp_file) end)
+            end
             if not not_write_db then
                 pcall(function()
                     self.dbManager:updateCacheFilePath(chapter, false)
@@ -1351,7 +1356,7 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
         error_msg = error_msg or "未知错误"
         logger.dbg("Legado.preLoadingChapters - ", error_msg)
         if has_result_progress_callback then
-            has_result_progress_callback(false, error_msg)
+            result_progress_callback(false, error_msg)
         else
             return false, error_msg
         end
@@ -1377,7 +1382,12 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
     end
 
     if not H.is_tbl(chapter_down_tasks) or #chapter_down_tasks < 1 then
-        return return_error_handle('No chapter to be downloaded')
+        -- 所有章节已缓存，视为成功
+        logger.dbg("Legado.preLoadingChapters - All chapters already cached")
+        if has_result_progress_callback then
+            result_progress_callback(true, "所有章节已缓存")
+        end
+        return true, "所有章节已缓存"
     end
 
     -- task mark

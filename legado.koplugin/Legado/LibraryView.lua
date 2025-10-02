@@ -301,6 +301,13 @@ function LibraryView:openMenu(dimen)
         end,
         align = unified_align,
     }}, {{
+        text = string.format("%s EPUB 导出设置", Icons.FA_COG),
+        callback = function()
+            UIManager:close(dialog)
+            self:showEpubExportSettings()
+        end,
+        align = unified_align,
+    }}, {{
         text = string.format("%s Clear all caches", Icons.FA_TRASH),
         callback = function()
             UIManager:close(dialog)
@@ -1413,6 +1420,11 @@ local function init_book_menu(parent)
                     end)
                 end
             }}, {{
+                text = '导出 EPUB',
+                callback = function()
+                    self.parent_ref:exportBookToEpub(bookinfo)
+                end
+            }}, {{
                 text = '删除',
                 callback = function()
                     MessageBox:confirm(string.format(
@@ -1679,6 +1691,444 @@ function LibraryView:currentSelectedBook(book)
         self._selected_book = book
     end
     return self._selected_book
+end
+
+function LibraryView:exportBookToEpub(bookinfo)
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+        MessageBox:error("书籍信息错误")
+        return
+    end
+
+    -- 获取章节列表
+    local chapter_count = Backend:getChapterCount(bookinfo.cache_id)
+    if not chapter_count or chapter_count == 0 then
+        MessageBox:error("该书没有章节")
+        return
+    end
+
+    -- 确认导出
+    MessageBox:confirm(string.format(
+        "是否导出 <<%s>> 为 EPUB 文件？\n\n作者：%s\n章节数：%d\n\n导出需要下载所有章节，可能需要一些时间",
+        bookinfo.name or "未命名",
+        bookinfo.author or "未知作者",
+        chapter_count
+    ), function(result)
+        if not result then
+            return
+        end
+
+        -- 开始导出流程
+        self:startEpubExport(bookinfo, chapter_count)
+    end, {
+        ok_text = "导出",
+        cancel_text = "取消"
+    })
+end
+
+function LibraryView:startEpubExport(bookinfo, chapter_count)
+    local book_cache_id = bookinfo.cache_id
+
+    -- 步骤1: 先缓存所有章节
+    local dialog_title = string.format("缓存书籍共%s章", chapter_count)
+    local loading_msg = chapter_count > 10 and
+        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max = chapter_count}) or
+        MessageBox:showloadingMessage(dialog_title, {progress_max = chapter_count})
+
+    if not (loading_msg and loading_msg.reportProgress and loading_msg.close) then
+        return MessageBox:error("进度显示控件生成失败")
+    end
+
+    local cache_cancelled = false
+    local cache_complete = false
+
+    -- 缓存进度回调
+    local cache_progress_callback = function(progress, err_msg)
+        if progress == false or progress == true then
+            loading_msg:close()
+            cache_complete = true
+
+            if progress == true and not cache_cancelled then
+                -- 缓存完成，开始生成EPUB
+                UIManager:nextTick(function()
+                    self:generateEpubFile(bookinfo, chapter_count)
+                end)
+            elseif err_msg then
+                MessageBox:error('缓存章节出错：', tostring(err_msg))
+            elseif cache_cancelled then
+                MessageBox:notice('已取消导出')
+            end
+        end
+        if H.is_num(progress) then
+            loading_msg:reportProgress(progress)
+        end
+    end
+
+    -- 开始缓存章节
+    local begin_chapter = Backend:getChapterInfoCache(book_cache_id, 0)
+    if not begin_chapter then
+        loading_msg:close()
+        return MessageBox:error('获取章节信息失败')
+    end
+
+    begin_chapter.call_event = 'next'
+    Backend:preLoadingChapters(begin_chapter, chapter_count, cache_progress_callback)
+
+    -- 添加取消按钮（如果支持进度条）
+    if loading_msg.cancel then
+        loading_msg:setCancelCallback(function()
+            cache_cancelled = true
+            if not cache_complete then
+                loading_msg:close()
+                MessageBox:notice('已取消缓存')
+            end
+        end)
+    end
+end
+
+function LibraryView:generateEpubFile(bookinfo, chapter_count)
+    local book_cache_id = bookinfo.cache_id
+
+    -- 显示生成进度
+    local export_msg = MessageBox:progressBar("正在生成 EPUB 文件", {
+        title = "导出进度",
+        max = chapter_count + 2  -- 章节数 + 封面 + 打包
+    })
+
+    if not export_msg then
+        export_msg = MessageBox:showloadingMessage("正在生成 EPUB 文件")
+    end
+
+    UIManager:nextTick(function()
+        local success, result = pcall(function()
+            local current_progress = 0
+
+            -- 准备章节数据
+            local chapters = {}
+            for i = 0, chapter_count - 1 do
+                local chapter = Backend:getChapterInfoCache(book_cache_id, i)
+                if chapter then
+                    local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+
+                    -- 读取章节内容
+                    local content = ""
+                    if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
+                        local file_ext = cache_chapter.cacheFilePath:match("%.([^.]+)$")
+                        if file_ext == "txt" then
+                            local f = io.open(cache_chapter.cacheFilePath, "r")
+                            if f then
+                                content = f:read("*all")
+                                f:close()
+                                -- 将文本段落转换为HTML段落
+                                content = content:gsub("([^\n]+)", "<p>%1</p>")
+                            end
+                        elseif file_ext == "html" or file_ext == "xhtml" then
+                            local f = io.open(cache_chapter.cacheFilePath, "r")
+                            if f then
+                                local html_content = f:read("*all")
+                                f:close()
+
+                                -- 提取 body 中的内容，避免重复的 HTML 结构
+                                local body_content = html_content:match("<body[^>]*>(.-)</body>")
+                                if body_content then
+                                    -- 移除可能重复的标题
+                                    content = body_content:gsub("<h2[^>]*>.-</h2>", "", 1)
+                                else
+                                    -- 如果没有 body 标签，尝试提取 div 内容
+                                    local div_content = html_content:match("<div[^>]*>(.-)</div>")
+                                    content = div_content or html_content
+                                end
+                            end
+                        end
+                    end
+
+                    table.insert(chapters, {
+                        title = chapter.title or string.format("第%d章", i + 1),
+                        content = content
+                    })
+
+                    current_progress = current_progress + 1
+                    if export_msg.reportProgress then
+                        export_msg:reportProgress(current_progress)
+                    end
+                end
+            end
+
+            -- 准备输出路径
+            local export_settings = self:getEpubExportSettings()
+            local safe_filename = util.getSafeFilename(bookinfo.name or "book")
+            local output_dir = export_settings.output_path or H.getHomeDir()
+            local output_path = H.joinPath(output_dir, safe_filename .. ".epub")
+
+            -- 如果文件已存在，先删除
+            if util.fileExists(output_path) then
+                pcall(function()
+                    util.removeFile(output_path)
+                end)
+            end
+
+            -- 下载封面（如果有）
+            local cover_path = nil
+
+            -- 优先使用快捷方式的自定义封面
+            local DocSettings = require("docsettings")
+            local home_dir = H.getHomeDir()
+            local book_lnk_name = string.format("%s-%s\u{200B}.html",
+                bookinfo.name or "未命名图书",
+                bookinfo.author or "未知作者")
+            book_lnk_name = util.getSafeFilename(book_lnk_name)
+
+            if book_lnk_name then
+                local book_lnk_path = H.joinPath(home_dir, book_lnk_name)
+                if util.fileExists(book_lnk_path) then
+                    local custom_cover = DocSettings:findCustomCoverFile(book_lnk_path)
+                    if custom_cover and util.fileExists(custom_cover) then
+                        cover_path = custom_cover
+                    end
+                end
+            end
+
+            -- 如果没有自定义封面，下载默认封面
+            if not cover_path and bookinfo.coverUrl then
+                cover_path, _ = Backend:download_cover_img(book_cache_id, bookinfo.coverUrl)
+            end
+
+            -- 准备自定义 CSS
+            local custom_css = nil
+            if export_settings.use_custom_css and export_settings.custom_css_path then
+                if util.fileExists(export_settings.custom_css_path) then
+                    local f = io.open(export_settings.custom_css_path, "r")
+                    if f then
+                        custom_css = f:read("*all")
+                        f:close()
+                    end
+                end
+            end
+
+            current_progress = current_progress + 1
+            if export_msg.reportProgress then
+                export_msg:reportProgress(current_progress)
+            end
+
+            -- 创建导出器
+            local EpubExporter = require("Legado/EpubExporter")
+            local exporter = EpubExporter:new():init({
+                title = bookinfo.name or "未命名图书",
+                author = bookinfo.author or "未知作者",
+                cover_path = cover_path,
+                custom_css = custom_css,
+                chapters = chapters,
+                output_path = output_path,
+                book_cache_id = book_cache_id
+            })
+
+            -- 构建EPUB
+            local build_result = exporter:build()
+
+            current_progress = current_progress + 1
+            if export_msg.reportProgress then
+                export_msg:reportProgress(current_progress)
+            end
+
+            return build_result
+        end)
+
+        if export_msg.close then
+            export_msg:close()
+        end
+
+        if success and result then
+            if result.success then
+                local filename = result.path and result.path:match("([^/\\]+)$") or "未知"
+                local output_dir = result.path and result.path:match("(.+)[/\\]") or H.getHomeDir()
+                MessageBox:confirm(
+                    string.format("EPUB 导出成功！\n\n文件：%s\n位置：%s", filename, output_dir),
+                    function(open_file)
+                        if open_file and result.path then
+                            -- 打开文件
+                            UIManager:close(self.book_menu)
+                            UIManager:scheduleIn(0.1, function()
+                                require("apps/reader/readerui"):showReader(result.path)
+                            end)
+                        end
+                    end,
+                    {
+                        ok_text = "打开",
+                        cancel_text = "完成"
+                    }
+                )
+            else
+                MessageBox:confirm(
+                    "EPUB 导出失败：" .. (result.error or "未知错误"),
+                    function(retry)
+                        if retry then
+                            -- 重试导出
+                            self:exportBookToEpub(bookinfo)
+                        end
+                    end,
+                    {
+                        ok_text = "重试",
+                        cancel_text = "完成"
+                    }
+                )
+            end
+        else
+            MessageBox:confirm(
+                "EPUB 导出失败：" .. tostring(result),
+                function(retry)
+                    if retry then
+                        -- 重试导出
+                        self:exportBookToEpub(bookinfo)
+                    end
+                end,
+                {
+                    ok_text = "重试",
+                    cancel_text = "完成"
+                }
+            )
+        end
+    end)
+end
+
+-- 获取导出设置
+function LibraryView:getEpubExportSettings()
+    local settings = Backend:getSettings()
+    return {
+        output_path = settings.epub_output_path,
+        custom_css_path = settings.epub_custom_css_path,
+        use_custom_css = settings.epub_use_custom_css
+    }
+end
+
+-- 保存导出设置
+function LibraryView:saveEpubExportSettings(export_settings)
+    local settings = Backend:getSettings()
+    settings.epub_output_path = export_settings.output_path
+    settings.epub_custom_css_path = export_settings.custom_css_path
+    settings.epub_use_custom_css = export_settings.use_custom_css
+    return Backend:saveSettings(settings)
+end
+
+-- 显示导出设置菜单
+function LibraryView:showEpubExportSettings()
+    local export_settings = self:getEpubExportSettings()
+    local dialog
+
+    local function getOutputPathText()
+        if export_settings.output_path then
+            return export_settings.output_path
+        else
+            return H.getHomeDir()
+        end
+    end
+
+    local function getCSSStatusText()
+        if export_settings.use_custom_css and export_settings.custom_css_path then
+            return Icons.UNICODE_STAR
+        else
+            return Icons.UNICODE_STAR_OUTLINE
+        end
+    end
+
+    local buttons = {{{
+        text = string.format("%s 自定义输出路径", Icons.FA_FOLDER),
+        callback = function()
+            UIManager:close(dialog)
+            local PathChooser = require("ui/widget/pathchooser")
+            local path_chooser = PathChooser:new{
+                title = "选择 EPUB 输出目录",
+                path = getOutputPathText(),
+                select_directory = true,
+                onConfirm = function(output_dir)
+                    export_settings.output_path = output_dir
+                    Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
+                        MessageBox:notice("输出路径已设置为：" .. output_dir)
+                    end, function(err)
+                        MessageBox:error("设置失败：" .. tostring(err))
+                    end)
+                end
+            }
+            UIManager:show(path_chooser)
+        end,
+    }}, {{
+        text = string.format("%s 自定义 CSS 样式  %s", Icons.FA_PAINT_BRUSH, getCSSStatusText()),
+        callback = function()
+            UIManager:close(dialog)
+            local css_dialog
+            local css_buttons = {{{
+                text = "选择 CSS 文件",
+                callback = function()
+                    UIManager:close(css_dialog)
+                    local PathChooser = require("ui/widget/pathchooser")
+                    local path_chooser = PathChooser:new{
+                        title = "选择 CSS 文件",
+                        path = H.getHomeDir(),
+                        select_directory = false,
+                        select_file = true,
+                        file_filter = function(filename)
+                            return filename:match("%.css$")
+                        end,
+                        onConfirm = function(css_file)
+                            export_settings.custom_css_path = css_file
+                            export_settings.use_custom_css = true
+                            Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
+                                MessageBox:notice("CSS 文件已设置：" .. css_file)
+                            end, function(err)
+                                MessageBox:error("设置失败：" .. tostring(err))
+                            end)
+                        end
+                    }
+                    UIManager:show(path_chooser)
+                end,
+            }}, {{
+                text = "移除自定义 CSS",
+                enabled = export_settings.custom_css_path ~= nil,
+                callback = function()
+                    UIManager:close(css_dialog)
+                    export_settings.custom_css_path = nil
+                    export_settings.use_custom_css = false
+                    Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
+                        MessageBox:notice("已移除自定义 CSS，将使用默认样式")
+                    end, function(err)
+                        MessageBox:error("设置失败：" .. tostring(err))
+                    end)
+                end,
+            }}}
+
+            css_dialog = require("ui/widget/buttondialog"):new{
+                title = "CSS 样式设置",
+                title_align = "center",
+                buttons = css_buttons,
+            }
+            UIManager:show(css_dialog)
+        end,
+    }}, {{
+        text = "重置为默认设置",
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:confirm("确定要重置所有导出设置为默认值吗？", function(result)
+                if result then
+                    export_settings.output_path = nil
+                    export_settings.custom_css_path = nil
+                    export_settings.use_custom_css = false
+                    Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
+                        MessageBox:notice("已重置为默认设置")
+                    end, function(err)
+                        MessageBox:error("设置失败：" .. tostring(err))
+                    end)
+                end
+            end, {
+                ok_text = "重置",
+                cancel_text = "取消"
+            })
+        end,
+    }}}
+
+    dialog = require("ui/widget/buttondialog"):new{
+        title = "EPUB 导出设置",
+        title_align = "center",
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
 end
 
 return LibraryView
