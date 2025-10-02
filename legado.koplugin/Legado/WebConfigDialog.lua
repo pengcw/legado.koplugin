@@ -238,7 +238,7 @@ function M:handleConfigSave(dialog, current_conf_name, old_config, server_type, 
         MessageBox:notice(is_edit and "配置更新成功" or "配置创建成功")
         self:openWebConfigManager()
     end, function(err_msg)
-        MessageBox:error((is_edit and '更新失败：' or '创建失败：') .. tostring(err_msg))
+        MessageBox:error((is_edit and '更新失败：' or '创建失败：'), tostring(err_msg))
     end)
 end
 

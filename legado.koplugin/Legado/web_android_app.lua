@@ -2,90 +2,170 @@ local time = require("ui/time")
 local logger = require("logger")
 local Screen = require("device").screen
 local util = require("util")
+local LuaSettings = require("luasettings")
 local socket_url = require("socket.url")
+local Spore = require("Spore")
 local H = require("Legado/Helper")
 
 local M = {
-  name = "legado_app",
-  client = nil,
-  settings = nil,
+    name = "legado_app",
+    client = nil,
+    settings = nil,
+    _need_login = false,
 }
 
+function M:extend(subclass_prototype)
+    local o = subclass_prototype or {}
+    setmetatable(o, self)
+    self.__index = self
+    return o
+end
+
 function M:new(o)
-    o = o or {}
-    setmetatable(o, {
-        __index = function(_, k)
-            local v = self[k]
-            if v ~= nil then return v end
-            return function() return nil, "后端暂不支持此功能" end
-        end
-    })
-    if o.init then
-        o:init()
-    end
+    o = self:extend(o)
+    if o.init then o:init() end
     return o
 end
 
 function M:init()
-  local Spore = require("Spore")
-  local legadoSpec = require("Legado/LegadoSpec").legado_app
-  package.loaded["Legado/LegadoSpec"] = nil
+    local LegadoSpec, err_msg= H.require("Legado/LegadoSpec")
+    if not LegadoSpec then
+        logger.err("LegadoSpec loading failed")
+        return 
+    end
+    local legado_spec = LegadoSpec[self.name]
+    -- base_url = 'http://eu.httpbin.org/'
+    self.client = Spore.new_from_lua(legado_spec, { base_url = self.settings.server_address .. '/' })
 
-  self.client = Spore.new_from_lua(legadoSpec, {
-      base_url = self.settings.server_address .. '/'
-      -- base_url = 'http://eu.httpbin.org/'
-  })
-  -- fix koreader ver 2024.05
-  package.loaded["Spore.Middleware.ForceJSON"] = {}
-  require("Spore.Middleware.ForceJSON").call = function(args, req)
-      -- req.env.HTTP_USER_AGENT = ""
-      req.headers = req.headers or {}
-      req.headers["user-agent"] =
-          "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
-      return function(res)
-          res.headers = res.headers or {}
-          res.headers["content-type"] = 'application/json'
-          return res
-      end
-  end
+    self._need_login = H.is_func(self.client.login) and (self.settings.reader3_un or "") ~= ""
+ 
+    -- fix koreader ver 2024.05
+    package.loaded["Spore.Middleware.ForceJSON"] = {}
+    require("Spore.Middleware.ForceJSON").call = function(args, req)
+        -- req.env.HTTP_USER_AGENT = ""
+        req.headers = req.headers or {}
+        req.headers["user-agent"] =
+            "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+        return function(res)
+            res.headers = res.headers or {}
+            res.headers["content-type"] = 'application/json'
+            return res
+        end
+    end
+
+    if self._need_login == false then return true end
+    package.loaded["Spore.Middleware.Legado3Auth"] = {}
+    require("Spore.Middleware.Legado3Auth").call = function(args, req)
+        local spore = req.env.spore
+
+        if true == self._need_login then
+
+            local loginSuccess, token = self:_reader3Login()
+            if loginSuccess == true and type(token) == 'string' and token ~= '' then
+
+                local accessToken = string.format("accessToken=%s", token)
+                if type(req.env.QUERY_STRING) == 'string' and #req.env.QUERY_STRING > 0 then
+                    req.env.QUERY_STRING = req.env.QUERY_STRING .. '&' .. accessToken
+                else
+                    req.env.QUERY_STRING = accessToken
+                end
+            else
+                logger.warn('Legado3Auth', '登录失败', token or 'nil')
+            end
+        end
+
+        return function(res)
+            if type(res) == 'table' and type(res.body) == 'table' and 
+                res.body.isSuccess == false and self:isNeedLogin(res.body.data) then
+                self:reader3Token(nil)
+            end
+            return res
+        end
+    end
 end
 
-function M:handleResponse(requestFunc, callback, opts, logName)
-  local socketutil = require("socketutil")
+function M:getLuaConfig(path)
+    return LuaSettings:open(path)
+end
 
-  local server_address = self.settings.server_address
-  logName = logName or 'handleResponse'
-  opts = opts or {}
+function M:isNeedLogin(err_msg)
+    if self._need_login == true and 
+        string.find(tostring(err_msg), 'NEED_LOGIN', 1, true) then
+        return true
+    end
+    return false
+end
 
-  local timeouts = opts.timeouts
-  if not H.is_tbl(timeouts) or not H.is_num(timeouts[1]) or not H.is_num(timeouts[2]) then
-      timeouts = {8, 12}
-  end
+function M:reader3Token(token)
+    local cfg, key = self:getLuaConfig(H.getTempDirectory() .. '/cache.lua'), self.name or "r3k"
+    if H.is_str(token) then
+        return cfg:saveSetting(key, token):flush()
+    elseif token == true then
+        return cfg:readSetting(key)
+    elseif token == nil then
+        return cfg:delSetting(key):flush()
+    end
+end
 
-  self.client:reset_middlewares()
-  self.client:enable("Format.JSON")
-  self.client:enable("ForceJSON")
+function M:reader3Login()
+    return nil, "login 函数未定义"
+end
 
-  -- 单次轮询 timeout,总 timeout
-  socketutil:set_timeout(timeouts[1], timeouts[2])
-  local status, res = H.safe_pcall(requestFunc)
-  socketutil:reset_timeout()
+function M:_reader3Login()
+    local cache_token = self:reader3Token(true)
+    if H.is_str(cache_token) then
+        return true, cache_token
+    end
+    return self:reader3Login()
+end
 
-  if not (status and H.is_tbl(res) and H.is_tbl(res.body)) then
-      
-      logger.err(logName, "requestFunc err:", tostring(res))
-      local err_msg = H.map_error_message(res)
-      return nil, string.format("Web 服务: %s", err_msg)
-  end
+function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
+    local socketutil = require("socketutil")
 
-  if H.is_tbl(res.body) and res.body.isSuccess == true and res.body.data then
-        if H.is_func(callback)  then
-            return callback(res.body) 
-        end
-        return res.body.data
-  else
-      return nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错'
-  end
+    local server_address = self.settings.server_address
+    logName = logName or 'handleResponse'
+    opts = opts or {}
+  
+    local timeouts = opts.timeouts
+    if not H.is_tbl(timeouts) or not H.is_num(timeouts[1]) or not H.is_num(timeouts[2]) then
+        timeouts = {8, 12}
+    end
+  
+    self.client:reset_middlewares()
+    if self._need_login == true then
+        self.client:enable("Legado3Auth")
+    end
+    self.client:enable("Format.JSON")
+    self.client:enable("ForceJSON")
+  
+    socketutil:set_timeout(timeouts[1], timeouts[2])
+    local status, res = H.pcall(requestFunc)
+    socketutil:reset_timeout()
+  
+    if not (status and H.is_tbl(res) and H.is_tbl(res.body)) then
+  
+        logger.err(logName, "requestFunc err:", tostring(res))
+        local err_msg = H.map_error_message(res)
+        return nil, string.format("Web 服务: %s", err_msg)
+    end
+  
+    if isRetry ~= true and res.body.isSuccess == false and self:isNeedLogin(res.body.data) then
+        self:reader3Token(nil)
+        self:_reader3Login()
+        logger.err("Need login, refreshed session and retrying")
+        return self:handleResponse(requestFunc, callback, opts, logName, true)
+    end
+
+    if res.body.isSuccess == true then
+          -- fix isSuccess == true 但是没有 data 的情况, 如 saveBookProgress
+          if not res.body.data then res.body.data = {} end
+          if H.is_func(callback)  then
+              return callback(res.body) 
+           end
+          return res.body.data
+    else
+        return nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错'
+    end
 end
 
 function M:getBookshelf(callback)
@@ -289,10 +369,6 @@ function M:changeBookSource(new_book_source, callback)
     return self:saveBook(new_book_source, callback)
 end
 
-function M:searchBookSingle(options, callback)
-    return nil, "后端不支持此功能"
-end
-
 -- { errmsg = "", list = err, lastIndex = 1}
 function M:searchBookMulti(options, callback)
     local search_text = options.search_text
@@ -302,10 +378,6 @@ function M:searchBookMulti(options, callback)
     else
         return {list = ret}
     end
-end
-
-function M:autoChangeBookSource_(bookinfo, callbak)
-    self:_autoChangeSourceSocket(bookinfo, callbak)
 end
 
 function M:_searchBookSocket(search_text, filter, timeout)
@@ -381,7 +453,7 @@ function M:_searchBookSocket(search_text, filter, timeout)
   end
 
   client:send(key_json)
-  ok, err = H.safe_pcall(function()
+  ok, err = H.pcall(function()
       local response = {}
       local start_time = os.time()
       local deduplication = {}
@@ -432,6 +504,23 @@ function M:_searchBookSocket(search_text, filter, timeout)
   end
 
   return err
+end
+
+function M:unsupportedMethod()
+    return nil, "后端暂不支持此功能"
+end
+
+function M:searchBookSingle(options, callback)
+    return self:unsupportedMethod()
+end
+function M:autoChangeBookSource(bookinfo, callbak)
+    return self:unsupportedMethod()
+end
+function M:getChaptersList(bookinfo)
+    return self:unsupportedMethod()
+end
+function M:getBookSourcesList(callback)
+    return self:unsupportedMethod()
 end
 
 return M

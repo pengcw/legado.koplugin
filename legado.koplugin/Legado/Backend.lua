@@ -229,29 +229,16 @@ function M:loadApiProvider()
 end
 
 function M:initialize()
-    self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
-    self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
-    -- 兼容历史版本 <1.0.9
-    if self.settings_data.data.setting_url then
-        self.settings_data.data.setting_url = nil
-        self.settings_data.data.servers_history = nil
-    end
-    -- 兼容历史版本 <1.038
-    if self.settings_data.data.legado_server then
-        self.settings_data.data.legado_server = nil
-    end
-    -- <1.049
-    if not self.settings_data.data.server_address and H.is_str(self.settings_data.data.legado_server) then
-        self.settings_data.data.server_address = self.settings_data.data.legado_server
-        if string.find(string.lower(self.settings_data.data.server_address), "/reader3$") then
-            self.settings_data.data.server_type = 2
-        else
-            self.settings_data.data.server_type = 1
-        end
-        self.settings_data.data.legado_server = nil
-        self.settings_data:flush()
+    local ok, err_msg = pcall(function()
+        local fn, file_path = H.require("Legado/_r3l_once")
+        return fn and fn() == true and util.removeFile(file_path)
+    end)
+    if not ok then
+        logger.err("run_once_task loading loading failed", err_msg)
     end
 
+    self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
+    self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
     if self.settings_data and not self.settings_data.data['server_address'] then
         self.settings_data.data = {
             chapter_sorting_mode = "chapter_descending",
@@ -269,7 +256,6 @@ function M:initialize()
     end
 
     self:loadApiProvider()
-
     local BookInfoDB = require("Legado/BookInfoDB")
     self.dbManager = BookInfoDB:new({
         dbPath = H.getTempDirectory() .. "/bookinfo.db"
@@ -373,7 +359,7 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
     local bookUrl = bookinfo.bookUrl
 
     return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
-        local status, err = pcall(function()
+        local status, err = H.pcall(function()
             return self.dbManager:upsertChapters(book_cache_id, response.data)
         end)
         if not status then
@@ -401,7 +387,6 @@ end
 function M:getProxyImageUrl(bookUrl, img_src)
     return self.apiClient:getProxyImageUrl(bookUrl, img_src)
 end
-
 function M:getBookSourcesList(callback)
     return wrap_response(self.apiClient:getBookSourcesList(callback))
 end
@@ -418,9 +403,6 @@ end
 --- return list lastIndex
 function M:searchBookMulti(options, callback)
     return wrap_response(self.apiClient:searchBookMulti(options, callback))
-end
-function M:autoChangeBookSource(bookinfo, callback)
-    return wrap_response(self.apiClient:autoChangeBookSource(bookinfo, callback))
 end
 function M:changeBookSource(newBookSource)
     return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
@@ -971,7 +953,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                 return chapter_writeToFile(chapter, filePath, err['data'])
             else
                 filePath = filePath .. '.cbz'
-                local status, err = H.safe_pcall(pDownload_CreateCBZ, filePath, img_sources)
+                local status, err = H.pcall(pDownload_CreateCBZ, filePath, img_sources)
 
                 if not status then
                     error('CreateCBZ err: ' .. tostring(err))
@@ -1190,9 +1172,9 @@ function M:_pDownloadChapter(chapter, message_dialog, is_recursive)
 
     local response = self:pGetChapterContent(chapter)
 
-    if is_recursive ~= true and H.is_tbl(response) and response.type == 'ERROR' and
-        self.apiClient:isNeedLogin(response.message) == true then
-        self.apiClient:resetReader3Token()
+    if is_recursive ~= true and H.is_tbl(response) and response.type == 'ERROR' and 
+            self.apiClient:isNeedLogin(response.message) == true then
+        self.apiClient:reader3Token(nil)
         return self:_pDownloadChapter(chapter, message_dialog, true)
     end
 
@@ -1335,15 +1317,12 @@ function M:getChapterImgList(chapter)
     local origin = chapter.origin
     local down_chapters_index = chapters_index
 
-    if not H.is_str(bookUrl) and not H.is_str(chapter.book_cache_id) then
-        return
-    end
-
     return self:HandleResponse(self:pGetChapterContent({
         bookUrl = bookUrl,
         chapters_index = down_chapters_index,
-        orgin = origin,
+        origin = origin,
     }), function(data)
+        local err_msg
         if H.is_str(data) then
             local img_sources = self:getPorxyPicUrls(bookUrl, data)
             if H.is_tbl(img_sources) and #img_sources > 0 then
@@ -1352,15 +1331,16 @@ function M:getChapterImgList(chapter)
                 end
                 return img_sources
             else
-                logger.dbg('获取图片列表失败 ')
-                return
+                err_msg = "获取图片列表失败"
             end
         else
-            logger.dbg('返回数据格式出错')
-            return
+            err_msg = "获取图片列表失败"
         end
+        logger.dbg("getChapterImgList err:", err_msg)
+        return nil, err_msg
     end, function(err_msg)
-        return
+        logger.err("getChapterImgList err:", err_msg)
+        return nil, err_msg
     end)
 end
 
@@ -1870,7 +1850,7 @@ function M:downloadChapter(chapter, message_dialog)
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 
-    local status, err = H.safe_pcall(function()
+    local status, err = H.pcall(function()
         return self:_pDownloadChapter(chapter, message_dialog)
     end)
     if not status then

@@ -1,5 +1,6 @@
 local UIManager = require("ui/uimanager")
 local InputDialog = require("ui/widget/inputdialog")
+local Screen = require("device").screen
 local RenderImage = require("ui/renderimage")
 local ImageViewer = require("ui/widget/imageviewer")
 local logger = require("logger")
@@ -22,9 +23,9 @@ function M:init()
 end
 
 function M:fetchAndShow(options)
-    self.bookinfo = options.bookinfo
     self.chapter = options.chapter
     self.on_return_callback = options.on_return_callback
+    self.bookinfo = Backend:getBookInfoCache(self.chapter.book_cache_id)
 
     local viewer = M:new{
         image = {self:loadChatperInitImage(self.chapter)},
@@ -35,6 +36,7 @@ function M:fetchAndShow(options)
         image_padding = 0
     }
     UIManager:show(viewer)
+    return viewer
 end
 
 function M:onClose()
@@ -42,6 +44,17 @@ function M:onClose()
     if H.is_func(self.on_return_callback) then
         self.on_return_callback()
     end
+end
+
+function M:onSwipe(_, ges)
+    local direction = ges.direction
+    local distance = ges.distance
+    local w = Screen:getWidth()
+    -- south close
+    if direction == "south" and ges.pos.x >= w/8 and ges.pos.x <= w*7/8 and self.scale_factor == 0 then
+        return true
+    end
+    ImageViewer.init(self, nil, ges)
 end
 
 function M:onShowNextImage()
@@ -82,7 +95,7 @@ function M:get_image_bb(imgData)
 end
 
 function M:loadChatperInitImage(chapter)
-    local new_chapter_imglist = Backend:getChapterImgList(chapter)
+    local new_chapter_imglist, err_msg = Backend:getChapterImgList(chapter)
     if H.is_tbl(new_chapter_imglist) and #new_chapter_imglist > 0 then
         self.chapter_imglist = new_chapter_imglist
         local img_src = self.chapter_imglist[1]
@@ -95,8 +108,8 @@ function M:loadChatperInitImage(chapter)
 
         return self.image
     else
-        logger.err("获取章节图片列表失败 Init")
-        MessageBox:notice("内容加载失败")
+        logger.err("获取章节图片列表失败 Init", err_msg)
+        MessageBox:notice("内容加载失败", err_msg)
         return RenderImage:renderImageFile("resources/koreader.png", false)
     end
 end

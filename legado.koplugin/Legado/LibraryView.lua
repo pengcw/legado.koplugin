@@ -31,6 +31,7 @@ local LibraryView = {
     _chapter_direction = nil,
     -- menu mode
     book_menu = nil,
+    stream_view = nil,
     -- file browser mode
     book_browser = nil,
     book_browser_homedir = nil,
@@ -222,6 +223,26 @@ local function switch_sync_reading(settings)
     return settings
 end
 
+local function switch_stream_mode(settings, callback)
+    settings = H.is_tbl(settings) and settings or Backend:getSettings()
+    MessageBox:confirm(string.format(
+        "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
+        (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
+        if result then
+            settings.stream_image_view = not settings.stream_image_view or nil
+            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
+                MessageBox:notice("设置成功")
+                if H.is_func(callback) then callback() end
+            end, function(err_msg)
+                MessageBox:error('设置失败:', err_msg)
+            end)
+        end
+    end, {
+        ok_text = "切换",
+        cancel_text = "取消"
+    })
+end
+
 function LibraryView:openMenu(dimen)
     local dialog
     self:getInstance()
@@ -242,22 +263,7 @@ function LibraryView:openMenu(dimen)
             (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
         callback = function()
             UIManager:close(dialog)
-            MessageBox:confirm(string.format(
-                "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
-                (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
-                if result then
-                    settings.stream_image_view = not settings.stream_image_view or nil
-                    Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-                        MessageBox:notice("设置成功")
-                        self:closeMenu()
-                    end, function(err_msg)
-                        MessageBox:error('设置失败:', err_msg)
-                    end)
-                end
-            end, {
-                ok_text = "切换",
-                cancel_text = "取消"
-            })
+            switch_stream_mode(settings)
         end,
         align = unified_align,
     }}, {{
@@ -426,6 +432,29 @@ function LibraryView:afterCloseReaderUi(callback)
 end
 
 function LibraryView:loadAndRenderChapter(chapter)
+    if not (H.is_tbl(chapter) and chapter.book_cache_id) then 
+        logger.err("loadAndRenderChapter  parameter error")
+        return 
+    end
+    if chapter.cacheExt == 'cbz' and Backend:getSettings().stream_image_view == true then
+        MessageBox:notice("流式漫画开启")
+        if not NetworkMgr:isConnected() then
+            MessageBox:error("需要网络连接")
+            return
+        end
+         self:afterCloseReaderUi(function()
+            local ex_chapter = chapter
+            self.stream_view = require("Legado/StreamImageView"):fetchAndShow({
+                chapter = ex_chapter,
+                on_return_callback = function()
+                    local bookinfo = Backend:getBookInfoCache(ex_chapter.book_cache_id)
+                    --self:openLastReadChapter(bookinfo)
+                    self:showBookTocDialog(bookinfo)
+                end,
+            })   
+        end)
+        return 
+    end
 
     local cache_chapter = Backend:getCacheChapterFilePath(chapter)
 
@@ -475,7 +504,7 @@ function LibraryView:ReaderUIEventCallback(chapter_direction)
     else
         local book_cache_id = self:getReadingBookId()
         if book_cache_id then
-            local bookinfo = Backend:getBookInfoCache(chapter.book_cache_id)
+            local bookinfo = Backend:getBookInfoCache(book_cache_id)
             self:afterCloseReaderUi(function()
                 self:showBookTocDialog(bookinfo)
             end)
@@ -551,6 +580,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
     local library_ref = self
     local ext_switch_sync_reading = switch_sync_reading
+    local ext_switch_stream_mode = switch_stream_mode
 
     local is_legado_path = function(file_path, instance)
         if instance and instance.document and instance.document.file then
@@ -908,7 +938,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         if not (document and menu_items and is_legado_path(document.file)) then 
             return 
         end
-        
+
         if not self.patches_ok then
             menu_items.go_back_to_legado = {
                 text = "返回 Legado...",
@@ -926,6 +956,21 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             text = "Legado 书目",
             sorting_hint = "search",
             sub_item_table = {{
+                text = "流式漫画模式",
+                keep_menu_open = true,
+                help_text = "阅读时，自动上传阅读进度",
+                checked_func = function() return settings.stream_image_view == true end,
+                callback = function() 
+                    local library_obj = library_ref:getInstance()
+                    local reading_chapter = library_obj:readingChapter()
+                    if reading_chapter.cacheExt ~= 'cbz'  then
+                        return MessageBox:error("当前阅读不是漫画类型, 设置无效")
+                    end
+                    switch_stream_mode(settings, function()
+                        library_obj:loadAndRenderChapter(reading_chapter)
+                    end)
+                end,
+            }, {
                 text = "强制刷新本章",
                 separator = true,
                 callback = function()
@@ -934,8 +979,10 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     if reading_chapter then
                         reading_chapter.isDownLoaded = true
                         Backend:HandleResponse(Backend:ChangeChapterCache(reading_chapter), function(data)
-                            library_obj:loadAndRenderChapter(reading_chapter)
                             MessageBox:notice("刷新成功")
+                            UIManager:nextChapter(function()
+                                library_obj:loadAndRenderChapter(reading_chapter)
+                            end)
                         end, function(err_msg)
                             MessageBox:error('操作失败:', tostring(err_msg))
                         end)
@@ -964,7 +1011,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     end
                 end,
             }},
-        }   
+        }
     end
 end
 
@@ -1209,7 +1256,7 @@ local function init_book_menu(parent)
         if Device:hasKeyboard() then
             book_menu.refresh_menu_key = "F5"
         end
-        book_menu.key_events.RefreshChapters = { { book_menu.refresh_menu_key } }
+        book_menu.key_events.RefreshLibrary = { { book_menu.refresh_menu_key } }
     end
     if Device:hasDPad() then
         book_menu.key_events.FocusRight = {{ "Right" }}
@@ -1294,7 +1341,6 @@ local function init_book_menu(parent)
 
         update_toc_visibility()
         self:onClose()
-        --self.parent_ref:openLastReadChapter(bookinfo, on_return_callback)
         
         UIManager:nextTick(function()
             Backend:autoPinToTop(bookinfo.cache_id, bookinfo.sortOrder)
