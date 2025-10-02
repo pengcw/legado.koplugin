@@ -515,7 +515,7 @@ function M:selectBookSource(selectCallback)
                 })
 
             end, function(err_msg)
-                MessageBox:notice('列表请求失败：' .. tostring(err_msg))
+                MessageBox:notice('列表请求失败:', tostring(err_msg))
             end)
         end
     end)

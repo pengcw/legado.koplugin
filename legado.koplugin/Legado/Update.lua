@@ -9,16 +9,12 @@ local M = {}
 local RELEASE_API = "https://api.github.com/repos/pengcw/legado.koplugin/releases/latest"
 
 function M:getPluginMetaInfo()
-    local plugin_path = H.get_plugin_path()
-    if plugin_path then
-        local meta_file_path = string.format("%s/_meta.lua", plugin_path)
-        local ok, result = pcall(dofile, meta_file_path)
-        if not ok then
-            logger.warn(string.format("getPluginMetaInfo load %s/_meta.lua err", plugin_path))
-            return
-        end
-        return result
+    local result, err_msg= H.require("_meta")
+    if not result then
+        logger.warn(string.format("getPluginMetaInfo load %s/_meta.lua err", plugin_path))
+        return
     end
+    return result
 end
 
 function M:getCurrentPluginVersion()

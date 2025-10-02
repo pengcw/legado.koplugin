@@ -32,12 +32,9 @@ function M:custom(options)
     local defaultOptions = {
         text = '',
         icon = "notice-info",
-
         timeout = nil,
-
         alignment = "left",
         modal = true,
-
         _timeout_func = nil
     }
     if options then
@@ -52,15 +49,12 @@ end
 
 function M:error(message, ...)
     local args = {...}
-
     local timeout = nil
     if #args > 0 and type(args[1]) == "number" then
         timeout = table.remove(args, 1)
-
     end
-
     if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
+        message = string.format("%s %s", tostring(message), custom_concat(args, " "))
     end
     return self:custom({
         text = message,
@@ -70,19 +64,14 @@ function M:error(message, ...)
 end
 
 function M:info(message, ...)
-
     local args = {...}
-
     local timeout = nil
     if #args > 0 and type(args[1]) == "number" then
         timeout = table.remove(args, 1)
-
     end
-
     if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
+        message = string.format("%s %s", tostring(message), custom_concat(args, " "))
     end
-
     return self:custom({
         text = message,
         icon = "notice-info",
@@ -93,15 +82,13 @@ end
 
 function M:success(message, ...)
     local args = {...}
-
     local timeout = nil
     if #args > 0 and type(args[1]) == "number" then
         timeout = table.remove(args, 1)
 
     end
-
     if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
+        message = string.format("%s %s", tostring(message), custom_concat(args, " "))
     end
     return self:custom({
         text = _(message),
@@ -111,13 +98,10 @@ function M:success(message, ...)
 end
 
 function M:confirm(message, callback, options)
-
     local dialog
     local defaultOptions = {
         text = message,
-
         timeout = nil
-
     }
 
     if options then
@@ -224,8 +208,16 @@ function M:loading(message, runnable, callback, options)
     end)
 end
 
-function M:notice(msg, timeout)
-    Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
+function M:notice(message, ...)
+     local args = {...}
+    local timeout
+    if #args > 0 and type(args[1]) == "number" then
+        timeout = table.remove(args, 1)
+    end
+    if #args > 0 then
+        message = string.format("%s %s", tostring(message), custom_concat(args, " "))
+    end
+    Notification:notify(message, Notification.SOURCE_ALWAYS_SHOW)
 end
 
 function M:askForRestart(msg)

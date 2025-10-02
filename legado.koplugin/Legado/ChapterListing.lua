@@ -16,7 +16,6 @@ local Screen = Device.screen
 local Backend = require("Legado/Backend")
 local Icons = require("Legado/Icons")
 local MessageBox = require("Legado/MessageBox")
-local StreamImageView = require("Legado/StreamImageView")
 local H = require("Legado/Helper")
 
 if not dbg.log then
@@ -204,25 +203,8 @@ function ChapterListing:onMenuChoice(item)
     local chapters_index = item.chapters_index
 
     local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
-    if chapter.cacheExt == 'cbz' and Backend:getSettings().stream_image_view == true then
-        ChapterListing.onReturnCallback = function()
-            self:gotoLastReadChapter()
-        end
-        NetworkMgr:runWhenOnline(function()
-            UIManager:nextTick(function()
-                StreamImageView:fetchAndShow({
-                    bookinfo = self.bookinfo,
-                    chapter = chapter,
-                    on_return_callback = ChapterListing.onReturnCallback
-                })
-                UIManager:close(self)
-            end)
-        end)
-        MessageBox:notice("流式漫画开启")
-    else
-        if self.onShowingReader then self:onShowingReader() end
-        self:showReaderUI(chapter)
-    end
+    if self.onShowingReader then self:onShowingReader() end
+    self:showReaderUI(chapter)
     return true
 end
 
@@ -310,7 +292,7 @@ function ChapterListing:onMenuHold(item)
                     end
                 end,
                 extra_callback = function()
-                    MessageBox:confirm("请确认缓存全部章节 (短时间大量下载有可能触发反爬)",
+                    MessageBox:confirm("请确认缓存全部章节 (有的书源有频率限制)",
                         function(result)
                             if result then
                                 local status, err = pcall(function()
@@ -481,7 +463,7 @@ function ChapterListing:syncProgressShow(chapter)
                     self._ui_refresh_time = os.time()
                 end
             end, function(err_msg)
-                MessageBox:error('同步失败：' .. tostring(err_msg))
+                MessageBox:error('同步失败：', tostring(err_msg))
             end)
         end
     end)
