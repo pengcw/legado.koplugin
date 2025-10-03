@@ -2012,9 +2012,9 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
         local success, result = pcall(function()
             -- 准备输出路径
             local export_settings = self:getEpubExportSettings()
-            local safe_filename = util.getSafeFilename(bookinfo.name or "book")
+            local filename = self:generateExportFilename(bookinfo, ".cbz")
             local output_dir = export_settings.output_path or H.getHomeDir()
-            local output_path = H.joinPath(output_dir, safe_filename .. ".cbz")
+            local output_path = H.joinPath(output_dir, filename)
 
             -- 如果文件已存在，先删除
             if util.fileExists(output_path) then
@@ -2065,6 +2065,7 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
             -- 合并所有章节的图片到一个 CBZ
             local current_progress = 0
             local image_index = 1
+            local total_pages = 0
 
             for _, valid_chapter in ipairs(valid_chapters) do
                 local chapter = valid_chapter.chapter
@@ -2093,6 +2094,7 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
                                     end
 
                                     image_index = image_index + 1
+                                    total_pages = total_pages + 1
                                 end
                             end
                         end
@@ -2104,6 +2106,34 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
                 if export_msg.reportProgress then
                     export_msg:reportProgress(current_progress)
                 end
+            end
+
+            -- 生成 ComicInfo.xml 元数据
+            local comic_info = string.format([[<?xml version="1.0" encoding="utf-8"?>
+<ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <Title>%s</Title>
+  <Series>%s</Series>
+  <Writer>%s</Writer>
+  <Publisher>Legado</Publisher>
+  <Genre>%s</Genre>
+  <PageCount>%d</PageCount>
+  <Summary>%s</Summary>
+  <LanguageISO>zh</LanguageISO>
+  <Manga>Yes</Manga>
+</ComicInfo>]],
+                H.escapeXml(bookinfo.name or "未命名"),
+                H.escapeXml(bookinfo.name or "未命名"),
+                H.escapeXml(bookinfo.author or "未知作者"),
+                H.escapeXml(bookinfo.kind or "漫画"),
+                total_pages,
+                H.escapeXml(bookinfo.intro or "")
+            )
+
+            -- 添加 ComicInfo.xml 到 CBZ
+            if cbz_lib == "zipwriter" then
+                cbz:add("ComicInfo.xml", comic_info, true)
+            else
+                cbz:addFileFromMemory("ComicInfo.xml", comic_info, os.time())
             end
 
             -- 关闭并保存 CBZ
@@ -2469,9 +2499,9 @@ function LibraryView:generateEpubFile(bookinfo, chapter_count, only_cached, cach
 
             -- 准备输出路径
             local export_settings = self:getEpubExportSettings()
-            local safe_filename = util.getSafeFilename(bookinfo.name or "book")
+            local filename = self:generateExportFilename(bookinfo, ".epub")
             local output_dir = export_settings.output_path or H.getHomeDir()
-            local output_path = H.joinPath(output_dir, safe_filename .. ".epub")
+            local output_path = H.joinPath(output_dir, filename)
 
             -- 如果文件已存在，先删除
             if util.fileExists(output_path) then
@@ -2663,7 +2693,9 @@ function LibraryView:getEpubExportSettings()
     return {
         output_path = settings.epub_output_path,
         custom_css_path = settings.epub_custom_css_path,
-        use_custom_css = settings.epub_use_custom_css
+        use_custom_css = settings.epub_use_custom_css,
+        filename_template = settings.export_filename_template or "{书名}",
+        epub_extension = settings.export_epub_extension or ".epub"
     }
 end
 
@@ -2673,7 +2705,35 @@ function LibraryView:saveEpubExportSettings(export_settings)
     settings.epub_output_path = export_settings.output_path
     settings.epub_custom_css_path = export_settings.custom_css_path
     settings.epub_use_custom_css = export_settings.use_custom_css
+    settings.export_filename_template = export_settings.filename_template
+    settings.export_epub_extension = export_settings.epub_extension
     return Backend:saveSettings(settings)
+end
+
+-- 生成导出文件名
+function LibraryView:generateExportFilename(bookinfo, extension)
+    local export_settings = self:getEpubExportSettings()
+    local template = export_settings.filename_template or "{书名}"
+
+    -- 如果是 EPUB，使用自定义扩展名
+    local file_ext = extension
+    if extension == ".epub" then
+        file_ext = export_settings.epub_extension or ".epub"
+    end
+
+    -- 获取当前日期
+    local date = os.date("%Y%m%d")
+
+    -- 替换变量
+    local filename = template
+    filename = filename:gsub("{书名}", bookinfo.name or "未命名")
+    filename = filename:gsub("{作者}", bookinfo.author or "未知作者")
+    filename = filename:gsub("{导出日期}", date)
+
+    -- 安全化文件名
+    filename = util.getSafeFilename(filename)
+
+    return filename .. file_ext
 end
 
 -- 显示导出设置菜单
@@ -2697,6 +2757,14 @@ function LibraryView:showEpubExportSettings()
         end
     end
 
+    local function getFilenameTemplateText()
+        return export_settings.filename_template or "{书名}"
+    end
+
+    local function getEpubExtensionText()
+        return export_settings.epub_extension or ".epub"
+    end
+
     local buttons = {{{
         text = string.format("%s 自定义输出路径", Icons.FA_FOLDER),
         callback = function()
@@ -2716,6 +2784,102 @@ function LibraryView:showEpubExportSettings()
                 end
             }
             UIManager:show(path_chooser)
+        end,
+    }}, {{
+        text = string.format("%s 文件名模板: %s", Icons.FA_FILE, getFilenameTemplateText()),
+        callback = function()
+            UIManager:close(dialog)
+
+            -- 显示变量说明对话框
+            local help_text = [[
+支持的变量：
+
+{书名} - 书籍名称
+{作者} - 作者名称
+{导出日期} - 导出日期 (YYYYMMDD)
+
+示例：
+{书名} → 三体
+{书名}-{作者} → 三体-刘慈欣
+{作者}-{书名}-{导出日期} → 刘慈欣-三体-20251003
+
+注意：文件名中的特殊字符会被自动处理
+]]
+
+            MessageBox:confirm(help_text, function(confirmed)
+                if confirmed then
+                    -- 显示输入对话框
+                    local InputDialog = require("ui/widget/inputdialog")
+                    local input_dialog
+                    input_dialog = InputDialog:new{
+                        title = "设置文件名模板",
+                        input = export_settings.filename_template or "{书名}",
+                        input_hint = "支持变量: {书名} {作者} {导出日期}",
+                        buttons = {{
+                            {
+                                text = "取消",
+                                callback = function()
+                                    UIManager:close(input_dialog)
+                                end,
+                            },
+                            {
+                                text = "确定",
+                                is_enter_default = true,
+                                callback = function()
+                                    local template = input_dialog:getInputText()
+                                    export_settings.filename_template = template
+                                    Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
+                                        MessageBox:notice("文件名模板已设置为：" .. template)
+                                    end, function(err)
+                                        MessageBox:error("设置失败：" .. tostring(err))
+                                    end)
+                                    UIManager:close(input_dialog)
+                                end,
+                            },
+                        }},
+                    }
+                    UIManager:show(input_dialog)
+                    input_dialog:onShowKeyboard()
+                end
+            end, {
+                ok_text = "开始设置",
+                cancel_text = "返回"
+            })
+        end,
+    }}, {{
+        text = string.format("%s EPUB 扩展名: %s", Icons.FA_FILE_ALT, getEpubExtensionText()),
+        callback = function()
+            UIManager:close(dialog)
+            local ext_dialog
+            local ext_buttons = {{{
+                text = ".epub (标准)",
+                callback = function()
+                    UIManager:close(ext_dialog)
+                    export_settings.epub_extension = ".epub"
+                    Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
+                        MessageBox:notice("EPUB 扩展名已设置为：.epub")
+                    end, function(err)
+                        MessageBox:error("设置失败：" .. tostring(err))
+                    end)
+                end,
+            }}, {{
+                text = ".kepub.epub (Kobo)",
+                callback = function()
+                    UIManager:close(ext_dialog)
+                    export_settings.epub_extension = ".kepub.epub"
+                    Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
+                        MessageBox:notice("EPUB 扩展名已设置为：.kepub.epub")
+                    end, function(err)
+                        MessageBox:error("设置失败：" .. tostring(err))
+                    end)
+                end,
+            }}}
+            ext_dialog = require("ui/widget/buttondialog"):new{
+                title = "选择 EPUB 扩展名",
+                title_align = "center",
+                buttons = ext_buttons,
+            }
+            UIManager:show(ext_dialog)
         end,
     }}, {{
         text = string.format("%s 自定义 CSS 样式  %s", Icons.FA_PAINT_BRUSH, getCSSStatusText()),
@@ -2778,6 +2942,8 @@ function LibraryView:showEpubExportSettings()
                     export_settings.output_path = nil
                     export_settings.custom_css_path = nil
                     export_settings.use_custom_css = false
+                    export_settings.filename_template = "{书名}"
+                    export_settings.epub_extension = ".epub"
                     Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
                         MessageBox:notice("已重置为默认设置")
                     end, function(err)
