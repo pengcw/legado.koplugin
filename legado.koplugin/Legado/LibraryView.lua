@@ -1453,6 +1453,8 @@ local function init_book_menu(parent)
             return
         end
         local bookinfo = Backend:getBookInfoCache(item.cache_id)
+
+        -- 构建信息文本，当字段为空时显示空
         local msginfo = [[
 书名： <<%1>>
 作者： %2
@@ -1460,18 +1462,15 @@ local function init_book_menu(parent)
 书源： %4
 总章数：%5
 总字数：%6
-简介：%7
     ]]
 
-        -- 限制简介长度，避免字体过小
-        local intro = bookinfo.intro or ''
-        local max_intro_length = 200
-        if #intro > max_intro_length then
-            intro = intro:sub(1, max_intro_length) .. "..."
-        end
-
-        msginfo = T(msginfo, bookinfo.name or '', bookinfo.author or '', bookinfo.kind or '', bookinfo.originName or '',
-            bookinfo.totalChapterNum or '', bookinfo.wordCount or '', intro)
+        msginfo = T(msginfo,
+            bookinfo.name or '',
+            bookinfo.author or '',
+            bookinfo.kind or '',
+            bookinfo.originName or '',
+            bookinfo.totalChapterNum or '',
+            bookinfo.wordCount or '')
 
         -- 检查是否为漫画类型（通过第一个章节的 cacheExt 判断）
         local is_comic = false
@@ -1489,6 +1488,20 @@ local function init_book_menu(parent)
             no_ok_button = true,
             other_buttons_first = true,
             other_buttons = {{{
+                text = "简介",
+                callback = function()
+                    local intro_text
+                    if bookinfo.intro and bookinfo.intro ~= '' then
+                        intro_text = string.format("《%s》\n\n%s", bookinfo.name or "未命名", bookinfo.intro)
+                    else
+                        intro_text = "暂无简介"
+                    end
+                    MessageBox:custom({
+                        text = intro_text,
+                        alignment = "left"
+                    })
+                end
+            }}, {{
                 text = (bookinfo.sortOrder > 0) and '置顶书籍' or '取消置顶',
                 callback = function()
                     Backend:manuallyPinToTop(item.cache_id, bookinfo.sortOrder)
