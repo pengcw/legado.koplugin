@@ -1011,17 +1011,17 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
     end
 
     local sql_stmt = [[
-        SELECT 
-        c.chapterIndex, 
-        c.title, 
+        SELECT
+        c.chapterIndex,
+        c.title,
         b.bookUrl,
         b.name,
-        b.origin 
+        b.origin
     FROM chapters AS c
     INNER JOIN books AS b
-        ON c.bookCacheId = b.bookCacheId 
-    WHERE 
-         c.bookCacheId = ? AND b.isEnabled = 1 AND c.isRead = 0 AND c.cacheFilePath IS NULL
+        ON c.bookCacheId = b.bookCacheId
+    WHERE
+         c.bookCacheId = ? AND b.isEnabled = 1 AND c.cacheFilePath IS NULL
          ]]
 
     local suffix = "  AND c.chapterIndex > ?  ORDER BY c.chapterIndex ASC LIMIT "
