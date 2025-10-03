@@ -2073,9 +2073,26 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
 
                 -- 如果是 CBZ 文件，需要解压并提取图片
                 if cache_chapter.cacheFilePath and cache_chapter.cacheFilePath:match("%.cbz$") then
-                    -- 使用 ZipArchive 读取 CBZ
-                    local ZipArchive = require("ffi/ziparchive")
-                    local chapter_cbz = ZipArchive:new()
+                    -- 根据 KOReader 版本选择读取库
+                    local chapter_cbz
+                    local cbz_reader_lib
+
+                    -- 优先尝试使用 archiver
+                    local ok_archiver, Archiver = pcall(require, "ffi/archiver")
+                    if ok_archiver and Archiver then
+                        cbz_reader_lib = "archiver"
+                        chapter_cbz = Archiver.Reader:new{}
+                    else
+                        -- 尝试使用 zipwriter
+                        local ok_zip, zipwriter = pcall(require, "ffi/zipwriter")
+                        if ok_zip and zipwriter then
+                            cbz_reader_lib = "zipwriter"
+                            chapter_cbz = zipwriter:new()
+                        else
+                            error("无法加载任何压缩读取库，请确保 KOReader 版本支持")
+                        end
+                    end
+
                     if chapter_cbz:open(cache_chapter.cacheFilePath) then
                         -- 遍历 CBZ 中的所有文件
                         for file_name in chapter_cbz:entries() do
