@@ -230,8 +230,15 @@ function M:showBookInfo(bookinfo)
 简介：%8
 ]]
 
+    -- 限制简介长度，避免字体过小
+    local intro = bookinfo.intro or ''
+    local max_intro_length = 200
+    if #intro > max_intro_length then
+        intro = intro:sub(1, max_intro_length) .. "..."
+    end
+
     msginfo = T(msginfo, bookinfo.name or '', bookinfo.author or '', bookinfo.kind or '', bookinfo.originName or '',
-        bookinfo.origin or '', bookinfo.totalChapterNum or '', bookinfo.wordCount or '', bookinfo.intro or '')
+        bookinfo.origin or '', bookinfo.totalChapterNum or '', bookinfo.wordCount or '', intro)
 
     MessageBox:confirm(msginfo, nil, {
         icon = "notice-info",

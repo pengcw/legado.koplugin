@@ -109,30 +109,47 @@ local function pDownload_CreateCBZ(filePath, img_sources)
     local no_compression
     local mtime
 
-    -- 20250525 PR # 2090: Archive.Writer replaces ZipWriter
-    local ok , ZipWriter = pcall(require, "ffi/zipwriter")
-    if ok and ZipWriter then
-        cbz_lib = "zipwriter"
-        no_compression = true
+    -- 根据 KOReader 版本选择压缩库
+    -- 2025.08 (202508000000) 之后优先使用 Archiver
+    local ko_version = require("version"):getNormalizedCurrentVersion()
+    local use_archiver = ko_version and ko_version >= 202508000000
 
-        cbz = ZipWriter:new{}
-        if not cbz:open(cbz_path_tmp) then
-            error('CreateCBZ cbz:open err')
+    if use_archiver then
+        -- KOReader 2025.08+ 使用新版 Archiver
+        local ok, Archiver = pcall(require, "ffi/archiver")
+        if ok and Archiver then
+            cbz_lib = "archiver"
+            mtime = os.time()
+
+            cbz = Archiver.Writer:new{}
+            if not cbz:open(cbz_path_tmp, "epub") then
+                error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
+            end
+
+            cbz:setZipCompression("store")
+            cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", mtime)
+            cbz:setZipCompression("deflate")
+        else
+            -- 降级使用 ZipWriter
+            use_archiver = false
         end
-        cbz:add("mimetype", "application/vnd.comicbook+zip", true)
-    else
-        cbz_lib = "archiver"
-        mtime = os.time()
+    end
 
-        local Archiver = require("ffi/archiver").Writer
-        cbz = Archiver:new{}
-        if not cbz:open(cbz_path_tmp, "epub") then
-            error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
+    if not use_archiver then
+        -- KOReader 2025.08 之前或 Archiver 不可用，使用 ZipWriter
+        local ok, ZipWriter = pcall(require, "ffi/zipwriter")
+        if ok and ZipWriter then
+            cbz_lib = "zipwriter"
+            no_compression = true
+
+            cbz = ZipWriter:new{}
+            if not cbz:open(cbz_path_tmp) then
+                error('CreateCBZ cbz:open err')
+            end
+            cbz:add("mimetype", "application/vnd.comicbook+zip", true)
+        else
+            error("无法加载任何压缩库")
         end
-
-        cbz:setZipCompression("store")
-        cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", mtime)
-        cbz:setZipCompression("deflate")
     end
 
     for i, img_src in ipairs(img_sources) do
@@ -1715,9 +1732,22 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
         logger.err("download_cover_img parameter error")
         return
     end
-    
+
+    -- 优先使用缓存目录作为封面存储位置
     cover_path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
-    
+
+    -- 检查缓存中是否已存在封面
+    local extensions = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
+    for _, ext in ipairs(extensions) do
+        local cached_cover = string.format("%s.%s", cover_path_no_ext, ext)
+        if util.fileExists(cached_cover) then
+            local dir, image_filename = util.splitFilePathName(cached_cover)
+            dbg.v('使用已缓存的封面:', cached_cover)
+            return cached_cover, image_filename
+        end
+    end
+
+    -- 下载封面到缓存目录
     local img_src = self:getProxyCoverUrl(cover_url)
     local status, err = pGetUrlContent({
                         url = img_src,
@@ -1727,7 +1757,7 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
                 })
     if status and err and err['data'] then
         local cover_img_data = err['data']
-        local path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
+        local path_no_ext = cover_path_no_ext
 
         local cover_img_path = string.format("%s.%s", path_no_ext, err['ext'] or "jpg")
         local dir, image_filename = util.splitFilePathName(cover_img_path)

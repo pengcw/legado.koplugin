@@ -144,8 +144,29 @@ function LibraryView:openBrowserMenu(file)
             local ui = FileManager.instance or ReaderUI.instance
             if file and ui and ui.bookinfo then
                 UIManager:close(dialog)
+
+                logger.info("更换封面: 快捷方式文件 =", file)
+
+                -- 获取书籍缓存ID，优先从DocSettings读取，如果没有则从.lua配置文件读取
+                local doc_settings = DocSettings:open(file)
+                local book_cache_id = doc_settings:readSetting("book_cache_id")
+
+                if not book_cache_id then
+                    local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, file)
+                    if ok and lnk_config then
+                        book_cache_id = lnk_config:readSetting("book_cache_id")
+                        -- 同步到DocSettings以便下次直接读取
+                        if book_cache_id then
+                            doc_settings:saveSetting("book_cache_id", book_cache_id):flush()
+                        end
+                    end
+                end
+
+                logger.info("更换封面: 获取到的 book_cache_id =", book_cache_id or "无")
+
                 local custom_book_cover = DocSettings:findCustomCoverFile(file)
                 if custom_book_cover and util.fileExists(custom_book_cover) then
+                    logger.info("更换封面: 删除旧的自定义封面 -", custom_book_cover)
                     util.removeFile(custom_book_cover)
                 end
 
@@ -158,8 +179,41 @@ function LibraryView:openBrowserMenu(file)
                         return DocumentRegistry:isImageFile(filename)
                     end,
                     onConfirm = function(image_file)
+                        -- 更新快捷方式封面
                         if DocSettings:flushCustomCover(file, image_file) then
                             self.book_browser:emitMetadataChanged(file)
+                        end
+
+                        -- 同时更新缓存目录的封面
+                        logger.info("更换封面: book_cache_id =", book_cache_id)
+                        logger.info("更换封面: image_file =", image_file)
+                        if book_cache_id then
+                            local cover_cache_path = H.getCoverCacheFilePath(book_cache_id)
+                            local ext = image_file:match("%.([^.]+)$") or "jpg"
+                            local target_cover = string.format("%s.%s", cover_cache_path, ext:lower())
+
+                            logger.info("更换封面: 目标路径 =", target_cover)
+
+                            -- 删除旧的缓存封面
+                            local extensions = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
+                            for _, old_ext in ipairs(extensions) do
+                                local old_cover = string.format("%s.%s", cover_cache_path, old_ext)
+                                if util.fileExists(old_cover) and old_cover ~= target_cover then
+                                    logger.info("更换封面: 删除旧封面 -", old_cover)
+                                    util.removeFile(old_cover)
+                                end
+                            end
+
+                            -- 复制新封面到缓存目录
+                            local success = H.copyFileFromTo(image_file, target_cover)
+                            logger.info("更换封面: 复制结果 =", success)
+                            if util.fileExists(target_cover) then
+                                logger.info("更换封面: 成功 - 新封面已保存到缓存目录")
+                            else
+                                logger.warn("更换封面: 失败 - 新封面未能保存到缓存目录")
+                            end
+                        else
+                            logger.warn("更换封面: 无 book_cache_id，无法更新缓存目录")
                         end
                     end
                 }
@@ -298,13 +352,6 @@ function LibraryView:openMenu(dimen)
                 ok_text = "切换",
                 cancel_text = "取消"
             })
-        end,
-        align = unified_align,
-    }}, {{
-        text = string.format("%s EPUB 导出设置", Icons.FA_COG),
-        callback = function()
-            UIManager:close(dialog)
-            self:showEpubExportSettings()
         end,
         align = unified_align,
     }}, {{
@@ -1145,6 +1192,7 @@ local function init_book_browser(parent)
             return
         end
 
+        local book_cache_id = bookinfo.cache_id
         local book_lnk_path, book_lnk_name = self:wirteLnk(bookinfo)
         if not (book_lnk_path and util.fileExists(book_lnk_path)) then
             logger.err("addBookShortcut: failed to create lnk")
@@ -1158,6 +1206,30 @@ local function init_book_browser(parent)
         end
 
         if DocSettings:findCustomCoverFile(book_lnk_path) then
+            -- 检查是否需要迁移旧版自定义封面到缓存目录
+            local custom_cover = DocSettings:findCustomCoverFile(book_lnk_path)
+            if custom_cover and util.fileExists(custom_cover) then
+                local cover_cache_path = H.getCoverCacheFilePath(book_cache_id)
+                local ext = custom_cover:match("%.([^.]+)$") or "jpg"
+                local target_cover = string.format("%s.%s", cover_cache_path, ext:lower())
+
+                -- 如果缓存目录中没有封面，迁移自定义封面
+                local has_cached_cover = false
+                local extensions = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
+                for _, check_ext in ipairs(extensions) do
+                    local check_cover = string.format("%s.%s", cover_cache_path, check_ext)
+                    if util.fileExists(check_cover) then
+                        has_cached_cover = true
+                        break
+                    end
+                end
+
+                if not has_cached_cover then
+                    -- 复制自定义封面到缓存目录
+                    H.copyFileFromTo(custom_cover, target_cover)
+                    logger.info("已迁移自定义封面到缓存目录:", target_cover)
+                end
+            end
             return
         end
 
@@ -1174,8 +1246,10 @@ local function init_book_browser(parent)
                 end
             end, 12000, 2000)
             Backend:launchProcess(function()
+                -- 下载封面到缓存目录（统一管理）
                 local cover_path, cover_name = Backend:download_cover_img(book_cache_id, cover_url)
                 if cover_path and util.fileExists(cover_path) then
+                    -- 快捷方式直接使用缓存封面（通过软链接或直接引用）
                     DocSettings:flushCustomCover(book_lnk_path, cover_path)
                 end
             end)
@@ -1389,8 +1463,26 @@ local function init_book_menu(parent)
 简介：%7
     ]]
 
+        -- 限制简介长度，避免字体过小
+        local intro = bookinfo.intro or ''
+        local max_intro_length = 200
+        if #intro > max_intro_length then
+            intro = intro:sub(1, max_intro_length) .. "..."
+        end
+
         msginfo = T(msginfo, bookinfo.name or '', bookinfo.author or '', bookinfo.kind or '', bookinfo.originName or '',
-            bookinfo.totalChapterNum or '', bookinfo.wordCount or '', bookinfo.intro or '')
+            bookinfo.totalChapterNum or '', bookinfo.wordCount or '', intro)
+
+        -- 检查是否为漫画类型（通过第一个章节的 cacheExt 判断）
+        local is_comic = false
+        local first_chapter = Backend:getChapterInfoCache(bookinfo.cache_id, 0)
+        if first_chapter then
+            local cache_chapter = Backend:getCacheChapterFilePath(first_chapter, true)
+            if cache_chapter and cache_chapter.cacheFilePath and
+               cache_chapter.cacheFilePath:match("%.cbz$") then
+                is_comic = true
+            end
+        end
 
         MessageBox:confirm(msginfo, nil, {
             icon = "notice-info",
@@ -1420,9 +1512,13 @@ local function init_book_menu(parent)
                     end)
                 end
             }}, {{
-                text = '导出 EPUB',
+                text = is_comic and '导出 CBZ' or '导出 EPUB',
                 callback = function()
-                    self.parent_ref:exportBookToEpub(bookinfo)
+                    if is_comic then
+                        self.parent_ref:exportBookToCbz(bookinfo)
+                    else
+                        self.parent_ref:exportBookToEpub(bookinfo)
+                    end
                 end
             }}, {{
                 text = '删除',
@@ -1551,10 +1647,14 @@ function LibraryView:deleteFile(file, is_file)
         return false
     end
 
-    if FileManager.instance then
-        FileManager.instance:goHome()
+    if FileManager.instance and FileManager.instance.goHome then
+        pcall(function()
+            FileManager.instance:goHome()
+        end)
         FileManager.instance:deleteFile(file, is_file)
-        FileManager.instance:onRefresh()
+        pcall(function()
+            FileManager.instance:onRefresh()
+        end)
         return true
     end
     if is_file then
@@ -1693,6 +1793,396 @@ function LibraryView:currentSelectedBook(book)
     return self._selected_book
 end
 
+function LibraryView:exportBookToCbz(bookinfo)
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+        MessageBox:error("书籍信息错误")
+        return
+    end
+
+    -- 获取章节列表
+    local chapter_count = Backend:getChapterCount(bookinfo.cache_id)
+    if not chapter_count or chapter_count == 0 then
+        MessageBox:error("该书没有章节")
+        return
+    end
+
+    -- 显示加载提示
+    local loading_msg
+    if chapter_count > 100 then
+        loading_msg = MessageBox:showloadingMessage("正在统计已缓存章节...")
+    end
+
+    -- 异步统计已缓存章节数
+    UIManager:nextTick(function()
+        local cached_count = 0
+        local book_cache_id = bookinfo.cache_id
+
+        -- 统计已缓存的 CBZ 章节
+        for i = 0, chapter_count - 1 do
+            local chapter = Backend:getChapterInfoCache(book_cache_id, i)
+            if chapter and chapter.cacheFilePath then
+                if util.fileExists(chapter.cacheFilePath) then
+                    cached_count = cached_count + 1
+                end
+            end
+        end
+
+        if loading_msg then
+            if loading_msg.close then
+                loading_msg:close()
+            else
+                UIManager:close(loading_msg)
+            end
+        end
+
+        -- 确认导出
+        MessageBox:confirm(string.format(
+            "是否导出 <<%s>> 为 CBZ 文件？\n\n作者：%s\n总章节数：%d\n已缓存章节：%d\n\n全部导出需要下载所有章节，可能需要一些时间",
+            bookinfo.name or "未命名",
+            bookinfo.author or "未知作者",
+            chapter_count,
+            cached_count
+        ), function(result)
+            if not result then
+                return
+            end
+
+            -- 开始导出流程（下载缺失章节）
+            self:startCbzExport(bookinfo, chapter_count, false)
+        end, {
+            ok_text = "全部导出",
+            cancel_text = "取消",
+            other_buttons = {{
+                {
+                    text = "仅已缓存",
+                    callback = function()
+                        if cached_count == 0 then
+                            MessageBox:error("没有已缓存的章节")
+                            return
+                        end
+                        -- 直接导出已缓存章节（不下载）
+                        self:startCbzExport(bookinfo, chapter_count, true)
+                    end
+                },
+            }}
+        })
+    end)
+end
+
+function LibraryView:startCbzExport(bookinfo, chapter_count, only_cached)
+    local book_cache_id = bookinfo.cache_id
+
+    -- 步骤1: 生成全书章节列表，检查缓存是否存在
+    local all_chapters = {}
+    local missing_count = 0
+    local cached_chapters = {}
+
+    for i = 0, chapter_count - 1 do
+        local chapter = Backend:getChapterInfoCache(book_cache_id, i)
+        if chapter then
+            local cache_chapter = Backend:getCacheChapterFilePath(chapter, true)
+            local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
+
+            if not is_cached then
+                chapter.call_event = 'next'
+                table.insert(all_chapters, chapter)
+                missing_count = missing_count + 1
+            else
+                table.insert(cached_chapters, {
+                    index = i,
+                    chapter = chapter,
+                    cache_chapter = cache_chapter
+                })
+            end
+        end
+    end
+
+    -- 如果只导出已缓存章节，跳过下载直接生成CBZ
+    if only_cached then
+        MessageBox:notice(string.format('跳过 %d 个未缓存章节，开始生成 CBZ', missing_count))
+        UIManager:nextTick(function()
+            self:generateCbzFile(bookinfo, chapter_count, true, cached_chapters)
+        end)
+        return
+    end
+
+    -- 如果所有章节都已缓存，直接生成CBZ
+    if missing_count == 0 then
+        MessageBox:notice('所有章节已缓存，开始生成 CBZ')
+        UIManager:nextTick(function()
+            self:generateCbzFile(bookinfo, chapter_count, false, cached_chapters)
+        end)
+        return
+    end
+
+    -- 步骤2: 缓存缺失的章节
+    local dialog_title = string.format("缓存书籍 %d/%d 章", missing_count, chapter_count)
+    local loading_msg = missing_count > 10 and
+        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max = missing_count}) or
+        MessageBox:showloadingMessage(dialog_title, {progress_max = missing_count})
+
+    if not (loading_msg and loading_msg.reportProgress and loading_msg.close) then
+        return MessageBox:error("进度显示控件生成失败")
+    end
+
+    local cache_complete = false
+    local cache_cancelled = false
+
+    -- 缓存进度回调
+    local cache_progress_callback = function(progress, err_msg)
+        if progress == false or progress == true then
+            loading_msg:close()
+            cache_complete = true
+
+            if progress == true and not cache_cancelled then
+                -- 缓存完成，开始生成CBZ
+                UIManager:nextTick(function()
+                    self:generateCbzFile(bookinfo, chapter_count)
+                end)
+            elseif err_msg then
+                MessageBox:error('缓存章节出错：', tostring(err_msg))
+            elseif cache_cancelled then
+                MessageBox:notice('已取消导出')
+            end
+        elseif H.is_num(progress) then
+            loading_msg:reportProgress(progress)
+        end
+    end
+
+    Backend:preLoadingChapters(all_chapters, nil, cache_progress_callback)
+
+    -- 添加取消按钮
+    if loading_msg.cancel then
+        loading_msg:setCancelCallback(function()
+            cache_cancelled = true
+            if not cache_complete then
+                loading_msg:close()
+                MessageBox:notice('已取消缓存')
+            end
+        end)
+    end
+end
+
+function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cached_chapters_param)
+    local book_cache_id = bookinfo.cache_id
+
+    if not H.is_str(book_cache_id) then
+        MessageBox:error("书籍缓存ID错误")
+        return
+    end
+
+    -- 准备章节数据
+    local valid_chapters = cached_chapters_param or {}
+
+    if not cached_chapters_param then
+        -- 未传入缓存章节列表，需要重新收集
+        for i = 0, chapter_count - 1 do
+            local chapter = Backend:getChapterInfoCache(book_cache_id, i)
+            if chapter then
+                local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+                if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
+                    table.insert(valid_chapters, {
+                        index = i,
+                        chapter = chapter,
+                        cache_chapter = cache_chapter
+                    })
+                end
+            end
+        end
+    end
+
+    local actual_chapter_count = #valid_chapters
+
+    if actual_chapter_count == 0 then
+        MessageBox:error("没有可导出的章节")
+        return
+    end
+
+    -- 显示生成进度
+    local export_msg = MessageBox:progressBar("正在生成 CBZ 文件", {
+        title = "导出进度",
+        max = actual_chapter_count
+    })
+
+    if not export_msg then
+        export_msg = MessageBox:showloadingMessage("正在生成 CBZ 文件")
+    end
+
+    UIManager:nextTick(function()
+        local success, result = pcall(function()
+            -- 准备输出路径
+            local export_settings = self:getEpubExportSettings()
+            local safe_filename = util.getSafeFilename(bookinfo.name or "book")
+            local output_dir = export_settings.output_path or H.getHomeDir()
+            local output_path = H.joinPath(output_dir, safe_filename .. ".cbz")
+
+            -- 如果文件已存在，先删除
+            if util.fileExists(output_path) then
+                pcall(function()
+                    util.removeFile(output_path)
+                end)
+            end
+
+            -- 创建 CBZ 压缩包
+            local cbz_path_tmp = output_path .. '.tmp'
+            local cbz
+            local cbz_lib
+
+            -- 根据 KOReader 版本选择压缩库
+            local ko_version = require("version"):getNormalizedCurrentVersion()
+            local use_archiver = ko_version and ko_version >= 202508000000
+
+            if use_archiver then
+                local ok, Archiver = pcall(require, "ffi/archiver")
+                if ok and Archiver then
+                    cbz_lib = "archiver"
+                    cbz = Archiver.Writer:new{}
+                    if not cbz:open(cbz_path_tmp, "epub") then
+                        error(string.format("无法创建 CBZ 文件: %s", tostring(cbz.err)))
+                    end
+                    cbz:setZipCompression("store")
+                    cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", os.time())
+                    cbz:setZipCompression("deflate")
+                else
+                    use_archiver = false
+                end
+            end
+
+            if not use_archiver then
+                local ok, ZipWriter = pcall(require, "ffi/zipwriter")
+                if ok and ZipWriter then
+                    cbz_lib = "zipwriter"
+                    cbz = ZipWriter:new{}
+                    if not cbz:open(cbz_path_tmp) then
+                        error("无法创建 CBZ 文件")
+                    end
+                    cbz:add("mimetype", "application/vnd.comicbook+zip", true)
+                else
+                    error("无法加载任何压缩库")
+                end
+            end
+
+            -- 合并所有章节的图片到一个 CBZ
+            local current_progress = 0
+            local image_index = 1
+
+            for _, valid_chapter in ipairs(valid_chapters) do
+                local chapter = valid_chapter.chapter
+                local cache_chapter = valid_chapter.cache_chapter
+
+                -- 如果是 CBZ 文件，需要解压并提取图片
+                if cache_chapter.cacheFilePath and cache_chapter.cacheFilePath:match("%.cbz$") then
+                    -- 使用 ZipArchive 读取 CBZ
+                    local ZipArchive = require("ffi/ziparchive")
+                    local chapter_cbz = ZipArchive:new()
+                    if chapter_cbz:open(cache_chapter.cacheFilePath) then
+                        -- 遍历 CBZ 中的所有文件
+                        for file_name in chapter_cbz:entries() do
+                            -- 只处理图片文件
+                            if file_name:match("%.(jpg|jpeg|png|gif|webp)$") then
+                                local img_data = chapter_cbz:readEntry(file_name)
+                                if img_data then
+                                    -- 生成新的文件名（带零填充）
+                                    local ext = file_name:match("%.([^.]+)$")
+                                    local new_name = string.format("%04d.%s", image_index, ext)
+
+                                    if cbz_lib == "zipwriter" then
+                                        cbz:add(new_name, img_data, true)
+                                    else
+                                        cbz:addFileFromMemory(new_name, img_data, os.time())
+                                    end
+
+                                    image_index = image_index + 1
+                                end
+                            end
+                        end
+                        chapter_cbz:close()
+                    end
+                end
+
+                current_progress = current_progress + 1
+                if export_msg.reportProgress then
+                    export_msg:reportProgress(current_progress)
+                end
+            end
+
+            -- 关闭并保存 CBZ
+            if cbz and cbz.close then
+                cbz:close()
+            end
+
+            -- 重命名临时文件
+            if util.fileExists(output_path) then
+                util.removeFile(output_path)
+            end
+            os.rename(cbz_path_tmp, output_path)
+
+            return {
+                success = true,
+                path = output_path
+            }
+        end)
+
+        -- 关闭进度对话框
+        if export_msg then
+            if export_msg.close then
+                export_msg:close()
+            else
+                UIManager:close(export_msg)
+            end
+        end
+
+        -- 显示结果
+        if success and result then
+            if result.success then
+                local filename = result.path and result.path:match("([^/\\]+)$") or "未知"
+                local output_dir = result.path and result.path:match("(.+)[/\\]") or H.getHomeDir()
+                MessageBox:confirm(
+                    string.format("CBZ 导出成功！\n\n文件：%s\n位置：%s", filename, output_dir),
+                    function(open_file)
+                        if open_file and result.path then
+                            UIManager:close(self.book_menu)
+                            UIManager:scheduleIn(0.1, function()
+                                require("apps/reader/readerui"):showReader(result.path)
+                            end)
+                        end
+                    end,
+                    {
+                        ok_text = "打开",
+                        cancel_text = "完成"
+                    }
+                )
+            else
+                MessageBox:confirm(
+                    "CBZ 导出失败：" .. (result.error or "未知错误"),
+                    function(retry)
+                        if retry then
+                            self:exportBookToCbz(bookinfo)
+                        end
+                    end,
+                    {
+                        ok_text = "重试",
+                        cancel_text = "完成"
+                    }
+                )
+            end
+        else
+            MessageBox:confirm(
+                "CBZ 导出失败：" .. tostring(result),
+                function(retry)
+                    if retry then
+                        self:exportBookToCbz(bookinfo)
+                    end
+                end,
+                {
+                    ok_text = "重试",
+                    cancel_text = "完成"
+                }
+            )
+        end
+    end)
+end
+
 function LibraryView:exportBookToEpub(bookinfo)
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
         MessageBox:error("书籍信息错误")
@@ -1706,33 +2196,133 @@ function LibraryView:exportBookToEpub(bookinfo)
         return
     end
 
-    -- 确认导出
-    MessageBox:confirm(string.format(
-        "是否导出 <<%s>> 为 EPUB 文件？\n\n作者：%s\n章节数：%d\n\n导出需要下载所有章节，可能需要一些时间",
-        bookinfo.name or "未命名",
-        bookinfo.author or "未知作者",
-        chapter_count
-    ), function(result)
-        if not result then
-            return
+    -- 显示加载提示（统计章节可能需要时间）
+    local loading_msg
+    if chapter_count > 100 then
+        loading_msg = MessageBox:showloadingMessage("正在统计已缓存章节...")
+    end
+
+    -- 异步统计已缓存章节数
+    UIManager:nextTick(function()
+        local cached_count = 0
+
+        -- 优化：批量检查，减少数据库查询
+        local book_cache_id = bookinfo.cache_id
+        local book_cache_path = H.getBookCachePath(book_cache_id)
+
+        -- 只需要遍历检查文件是否存在，不需要每次都查数据库
+        for i = 0, chapter_count - 1 do
+            local chapter = Backend:getChapterInfoCache(book_cache_id, i)
+            if chapter and chapter.cacheFilePath then
+                -- 如果数据库已标记有缓存路径，快速检查文件是否存在
+                if util.fileExists(chapter.cacheFilePath) then
+                    cached_count = cached_count + 1
+                end
+            end
         end
 
-        -- 开始导出流程
-        self:startEpubExport(bookinfo, chapter_count)
-    end, {
-        ok_text = "导出",
-        cancel_text = "取消"
-    })
+        if loading_msg then
+            if loading_msg.close then
+                loading_msg:close()
+            else
+                UIManager:close(loading_msg)
+            end
+        end
+
+        -- 确认导出
+        MessageBox:confirm(string.format(
+            "是否导出 <<%s>> 为 EPUB 文件？\n\n作者：%s\n总章节数：%d\n已缓存章节：%d\n\n全部导出需要下载所有章节，可能需要一些时间",
+            bookinfo.name or "未命名",
+            bookinfo.author or "未知作者",
+            chapter_count,
+            cached_count
+        ), function(result)
+            if not result then
+                return
+            end
+
+            -- 开始导出流程（下载缺失章节）
+            self:startEpubExport(bookinfo, chapter_count, false)
+        end, {
+            ok_text = "全部导出",
+            cancel_text = "取消",
+            other_buttons = {{
+                {
+                    text = "仅已缓存",
+                    callback = function()
+                        if cached_count == 0 then
+                            MessageBox:error("没有已缓存的章节")
+                            return
+                        end
+                        -- 直接导出已缓存章节（不下载）
+                        self:startEpubExport(bookinfo, chapter_count, true)
+                    end
+                },
+                {
+                    text = "设置",
+                    callback = function()
+                        self:showEpubExportSettings()
+                    end
+                }
+            }}
+        })
+    end)
 end
 
-function LibraryView:startEpubExport(bookinfo, chapter_count)
+function LibraryView:startEpubExport(bookinfo, chapter_count, only_cached)
     local book_cache_id = bookinfo.cache_id
 
-    -- 步骤1: 先缓存所有章节
-    local dialog_title = string.format("缓存书籍共%s章", chapter_count)
-    local loading_msg = chapter_count > 10 and
-        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max = chapter_count}) or
-        MessageBox:showloadingMessage(dialog_title, {progress_max = chapter_count})
+    -- 步骤1: 生成全书章节列表，检查缓存是否存在
+    local all_chapters = {}
+    local missing_count = 0
+    local cached_chapters = {}  -- 保存已缓存章节信息
+
+    for i = 0, chapter_count - 1 do
+        local chapter = Backend:getChapterInfoCache(book_cache_id, i)
+        if chapter then
+            -- 检查缓存文件是否实际存在（不依赖数据库标志）
+            local cache_chapter = Backend:getCacheChapterFilePath(chapter, true)
+            local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
+
+            if not is_cached then
+                -- 添加到待下载列表
+                chapter.call_event = 'next'
+                table.insert(all_chapters, chapter)
+                missing_count = missing_count + 1
+            else
+                -- 保存已缓存章节信息
+                table.insert(cached_chapters, {
+                    index = i,
+                    chapter = chapter,
+                    cache_chapter = cache_chapter
+                })
+            end
+        end
+    end
+
+    -- 如果只导出已缓存章节，跳过下载直接生成EPUB
+    if only_cached then
+        MessageBox:notice(string.format('跳过 %d 个未缓存章节，开始生成 EPUB', missing_count))
+        UIManager:nextTick(function()
+            self:generateEpubFile(bookinfo, chapter_count, true, cached_chapters)
+        end)
+        return
+    end
+
+    -- 如果所有章节都已缓存，直接生成EPUB
+    if missing_count == 0 then
+        MessageBox:notice('所有章节已缓存，开始生成 EPUB')
+        UIManager:nextTick(function()
+            self:generateEpubFile(bookinfo, chapter_count, false, cached_chapters)
+        end)
+        return
+    end
+
+    -- 步骤2: 缓存缺失的章节
+    local dialog_title = string.format("缓存书籍 %d/%d 章", missing_count, chapter_count)
+    local loading_msg = missing_count > 10 and
+        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max = missing_count}) or
+        MessageBox:showloadingMessage(dialog_title, {progress_max = missing_count})
 
     if not (loading_msg and loading_msg.reportProgress and loading_msg.close) then
         return MessageBox:error("进度显示控件生成失败")
@@ -1763,15 +2353,9 @@ function LibraryView:startEpubExport(bookinfo, chapter_count)
         end
     end
 
-    -- 开始缓存章节
-    local begin_chapter = Backend:getChapterInfoCache(book_cache_id, 0)
-    if not begin_chapter then
-        loading_msg:close()
-        return MessageBox:error('获取章节信息失败')
-    end
-
-    begin_chapter.call_event = 'next'
-    Backend:preLoadingChapters(begin_chapter, chapter_count, cache_progress_callback)
+    -- 使用章节列表直接调用 preLoadingChapters
+    -- 第一个参数支持传入待下载章节列表
+    Backend:preLoadingChapters(all_chapters, nil, cache_progress_callback)
 
     -- 添加取消按钮（如果支持进度条）
     if loading_msg.cancel then
@@ -1785,13 +2369,45 @@ function LibraryView:startEpubExport(bookinfo, chapter_count)
     end
 end
 
-function LibraryView:generateEpubFile(bookinfo, chapter_count)
+function LibraryView:generateEpubFile(bookinfo, chapter_count, only_cached, cached_chapters_param)
     local book_cache_id = bookinfo.cache_id
+
+    if not H.is_str(book_cache_id) then
+        MessageBox:error("书籍缓存ID错误")
+        return
+    end
+
+    -- 准备章节数据（如果传入了缓存章节列表，直接使用；否则重新收集）
+    local valid_chapters = cached_chapters_param or {}
+
+    if not cached_chapters_param then
+        -- 未传入缓存章节列表，需要重新收集
+        for i = 0, chapter_count - 1 do
+            local chapter = Backend:getChapterInfoCache(book_cache_id, i)
+            if chapter then
+                local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+                if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
+                    table.insert(valid_chapters, {
+                        index = i,
+                        chapter = chapter,
+                        cache_chapter = cache_chapter
+                    })
+                end
+            end
+        end
+    end
+
+    local actual_chapter_count = #valid_chapters
+
+    if actual_chapter_count == 0 then
+        MessageBox:error("没有可导出的章节")
+        return
+    end
 
     -- 显示生成进度
     local export_msg = MessageBox:progressBar("正在生成 EPUB 文件", {
         title = "导出进度",
-        max = chapter_count + 2  -- 章节数 + 封面 + 打包
+        max = actual_chapter_count + 2  -- 实际章节数 + 封面 + 打包
     })
 
     if not export_msg then
@@ -1804,52 +2420,50 @@ function LibraryView:generateEpubFile(bookinfo, chapter_count)
 
             -- 准备章节数据
             local chapters = {}
-            for i = 0, chapter_count - 1 do
-                local chapter = Backend:getChapterInfoCache(book_cache_id, i)
-                if chapter then
-                    local cache_chapter = Backend:getCacheChapterFilePath(chapter)
+            for _, valid_chapter in ipairs(valid_chapters) do
+                local chapter = valid_chapter.chapter
+                local cache_chapter = valid_chapter.cache_chapter
 
-                    -- 读取章节内容
-                    local content = ""
-                    if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
-                        local file_ext = cache_chapter.cacheFilePath:match("%.([^.]+)$")
-                        if file_ext == "txt" then
-                            local f = io.open(cache_chapter.cacheFilePath, "r")
-                            if f then
-                                content = f:read("*all")
-                                f:close()
-                                -- 将文本段落转换为HTML段落
-                                content = content:gsub("([^\n]+)", "<p>%1</p>")
-                            end
-                        elseif file_ext == "html" or file_ext == "xhtml" then
-                            local f = io.open(cache_chapter.cacheFilePath, "r")
-                            if f then
-                                local html_content = f:read("*all")
-                                f:close()
+                -- 读取章节内容
+                local content = ""
+                if cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
+                    local file_ext = cache_chapter.cacheFilePath:match("%.([^.]+)$")
+                    if file_ext == "txt" then
+                        local f = io.open(cache_chapter.cacheFilePath, "r")
+                        if f then
+                            content = f:read("*all")
+                            f:close()
+                            -- 将文本段落转换为HTML段落
+                            content = content:gsub("([^\n]+)", "<p>%1</p>")
+                        end
+                    elseif file_ext == "html" or file_ext == "xhtml" then
+                        local f = io.open(cache_chapter.cacheFilePath, "r")
+                        if f then
+                            local html_content = f:read("*all")
+                            f:close()
 
-                                -- 提取 body 中的内容，避免重复的 HTML 结构
-                                local body_content = html_content:match("<body[^>]*>(.-)</body>")
-                                if body_content then
-                                    -- 移除可能重复的标题
-                                    content = body_content:gsub("<h2[^>]*>.-</h2>", "", 1)
-                                else
-                                    -- 如果没有 body 标签，尝试提取 div 内容
-                                    local div_content = html_content:match("<div[^>]*>(.-)</div>")
-                                    content = div_content or html_content
-                                end
+                            -- 提取 body 中的内容，避免重复的 HTML 结构
+                            local body_content = html_content:match("<body[^>]*>(.-)</body>")
+                            if body_content then
+                                -- 移除可能重复的标题
+                                content = body_content:gsub("<h2[^>]*>.-</h2>", "", 1)
+                            else
+                                -- 如果没有 body 标签，尝试提取 div 内容
+                                local div_content = html_content:match("<div[^>]*>(.-)</div>")
+                                content = div_content or html_content
                             end
                         end
                     end
+                end
 
-                    table.insert(chapters, {
-                        title = chapter.title or string.format("第%d章", i + 1),
-                        content = content
-                    })
+                table.insert(chapters, {
+                    title = chapter.title or string.format("第%d章", valid_chapter.index + 1),
+                    content = content
+                })
 
-                    current_progress = current_progress + 1
-                    if export_msg.reportProgress then
-                        export_msg:reportProgress(current_progress)
-                    end
+                current_progress = current_progress + 1
+                if export_msg.reportProgress then
+                    export_msg:reportProgress(current_progress)
                 end
             end
 
@@ -1866,40 +2480,93 @@ function LibraryView:generateEpubFile(bookinfo, chapter_count)
                 end)
             end
 
-            -- 下载封面（如果有）
+            -- 获取封面（统一使用缓存目录）
             local cover_path = nil
+            local cover_source = "无"
 
-            -- 优先使用快捷方式的自定义封面
-            local DocSettings = require("docsettings")
-            local home_dir = H.getHomeDir()
-            local book_lnk_name = string.format("%s-%s\u{200B}.html",
-                bookinfo.name or "未命名图书",
-                bookinfo.author or "未知作者")
-            book_lnk_name = util.getSafeFilename(book_lnk_name)
+            -- 检查缓存目录中的封面
+            local cover_cache_path = H.getCoverCacheFilePath(book_cache_id)
+            local extensions = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
+            for _, ext in ipairs(extensions) do
+                local cached_cover = string.format("%s.%s", cover_cache_path, ext)
+                if util.fileExists(cached_cover) then
+                    cover_path = cached_cover
+                    cover_source = "缓存目录"
+                    logger.info("EPUB导出: 使用缓存封面 -", cached_cover)
+                    break
+                end
+            end
 
-            if book_lnk_name then
-                local book_lnk_path = H.joinPath(home_dir, book_lnk_name)
-                if util.fileExists(book_lnk_path) then
-                    local custom_cover = DocSettings:findCustomCoverFile(book_lnk_path)
-                    if custom_cover and util.fileExists(custom_cover) then
-                        cover_path = custom_cover
+            -- 如果缓存中没有封面，检查是否有旧版自定义封面需要迁移
+            if not cover_path then
+                logger.info("EPUB导出: 缓存目录无封面，检查旧版自定义封面")
+                local DocSettings = require("docsettings")
+                local home_dir = H.getHomeDir()
+                local book_lnk_name = string.format("%s-%s\u{200B}.html",
+                    bookinfo.name or "未命名图书",
+                    bookinfo.author or "未知作者")
+                book_lnk_name = util.getSafeFilename(book_lnk_name)
+
+                if book_lnk_name then
+                    local book_lnk_path = H.joinPath(home_dir, book_lnk_name)
+                    logger.info("EPUB导出: 检查快捷方式 -", book_lnk_path)
+                    if util.fileExists(book_lnk_path) then
+                        local custom_cover = DocSettings:findCustomCoverFile(book_lnk_path)
+                        logger.info("EPUB导出: 自定义封面路径 -", custom_cover or "无")
+                        if custom_cover and util.fileExists(custom_cover) then
+                            -- 迁移旧版自定义封面到缓存目录
+                            local ext = custom_cover:match("%.([^.]+)$") or "jpg"
+                            local target_cover = string.format("%s.%s", cover_cache_path, ext:lower())
+                            logger.info("EPUB导出: 迁移自定义封面", custom_cover, "->", target_cover)
+                            H.copyFileFromTo(custom_cover, target_cover)
+                            cover_path = target_cover
+                            cover_source = "旧版自定义封面(已迁移)"
+                            logger.info("EPUB导出: 封面迁移成功")
+                        else
+                            logger.info("EPUB导出: 未找到有效的自定义封面文件")
+                        end
+                    else
+                        logger.info("EPUB导出: 快捷方式文件不存在")
                     end
                 end
             end
 
-            -- 如果没有自定义封面，下载默认封面
+            -- 如果还是没有封面，则下载
             if not cover_path and bookinfo.coverUrl then
+                logger.info("EPUB导出: 从网络下载封面 -", bookinfo.coverUrl)
                 cover_path, _ = Backend:download_cover_img(book_cache_id, bookinfo.coverUrl)
+                if cover_path then
+                    cover_source = "网络下载"
+                    logger.info("EPUB导出: 封面下载成功 -", cover_path)
+                else
+                    logger.warn("EPUB导出: 封面下载失败")
+                end
+            elseif not cover_path then
+                logger.warn("EPUB导出: 无封面URL，跳过封面")
             end
+
+            logger.info("EPUB导出: 最终封面来源 -", cover_source, "| 路径 -", cover_path or "无")
 
             -- 准备自定义 CSS
             local custom_css = nil
+            local use_custom_css = false
             if export_settings.use_custom_css and export_settings.custom_css_path then
                 if util.fileExists(export_settings.custom_css_path) then
                     local f = io.open(export_settings.custom_css_path, "r")
                     if f then
                         custom_css = f:read("*all")
+                        use_custom_css = true
                         f:close()
+                    end
+                end
+            end
+
+            -- 如果使用自定义 CSS，移除章节中的首字下沉相关代码
+            if use_custom_css then
+                for _, chapter in ipairs(chapters) do
+                    if chapter.content then
+                        -- 移除首字下沉的 span 标签和内联样式
+                        chapter.content = chapter.content:gsub('<p%s+style="text%-indent:%s*0em;"><span%s+class="duokan%-dropcaps%-two">(.)</span>', '<p>%1')
                     end
                 end
             end
@@ -1910,10 +2577,11 @@ function LibraryView:generateEpubFile(bookinfo, chapter_count)
             end
 
             -- 创建导出器
-            local EpubExporter = require("Legado/EpubExporter")
-            local exporter = EpubExporter:new():init({
+            local EpubHelper = require("Legado/EpubHelper")
+            local exporter = EpubHelper.EpubExporter:new():init({
                 title = bookinfo.name or "未命名图书",
                 author = bookinfo.author or "未知作者",
+                description = bookinfo.intro,
                 cover_path = cover_path,
                 custom_css = custom_css,
                 chapters = chapters,
