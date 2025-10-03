@@ -2088,7 +2088,7 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
                     local ok_archiver, Archiver = pcall(require, "ffi/archiver")
                     if ok_archiver and Archiver then
                         cbz_reader_lib = "archiver"
-                        chapter_cbz = Archiver.Reader:new{}
+                        chapter_cbz = Archiver.Reader:new()
                     else
                         -- 尝试使用 ziparchive
                         local ok_zip, ZipArchive = pcall(require, "ffi/ziparchive")
@@ -2101,80 +2101,43 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
                     end
 
                     if chapter_cbz:open(cache_chapter.cacheFilePath) then
-                        -- 遍历 CBZ 中的所有文件
-                        -- entries() 在不同的库中可能返回：
-                        -- 1) 一个 iterator 函数（可直接用于 for .. in）
-                        -- 2) 一个表（数组），需 ipairs 遍历
-                        -- 3) 三个值（迭代器、状态、初始值）
-                        local ok, entries_res = pcall(function() return chapter_cbz:entries() end)
-                        if ok then
-                            -- 如果 entries_res 是函数，则直接使用泛型 for
-                            if type(entries_res) == "function" then
-                                for file_name in entries_res do
-                                    if file_name:match("%.(jpg|jpeg|png|gif|webp)$") then
-                                        local img_data = chapter_cbz:readEntry(file_name)
-                                        if img_data then
-                                            local ext = file_name:match("%.([^.]+)$")
-                                            local new_name = string.format("%04d.%s", image_index, ext)
-                                            if cbz_lib == "zipwriter" then
-                                                cbz:add(new_name, img_data, true)
-                                            else
-                                                cbz:addFileFromMemory(new_name, img_data, os.time())
-                                            end
-                                            image_index = image_index + 1
-                                            total_pages = total_pages + 1
+                        -- 根据不同的库使用不同的API
+                        if cbz_reader_lib == "archiver" then
+                            -- archiver使用iterate()迭代，extractToMemory()提取内容
+                            for entry in chapter_cbz:iterate() do
+                                if entry.mode == "file" and entry.path:match("%.(jpg|jpeg|png|gif|webp)$") then
+                                    local img_data = chapter_cbz:extractToMemory(entry.path)
+                                    if img_data then
+                                        local ext = entry.path:match("%.([^.]+)$")
+                                        local new_name = string.format("%04d.%s", image_index, ext)
+                                        if cbz_lib == "zipwriter" then
+                                            cbz:add(new_name, img_data, true)
+                                        else
+                                            cbz:addFileFromMemory(new_name, img_data, os.time())
                                         end
+                                        image_index = image_index + 1
+                                        total_pages = total_pages + 1
                                     end
-                                end
-                            elseif type(entries_res) == "table" then
-                                for _, file_name in ipairs(entries_res) do
-                                    if type(file_name) == "string" and file_name:match("%.(jpg|jpeg|png|gif|webp)$") then
-                                        local img_data = chapter_cbz:readEntry(file_name)
-                                        if img_data then
-                                            local ext = file_name:match("%.([^.]+)$")
-                                            local new_name = string.format("%04d.%s", image_index, ext)
-                                            if cbz_lib == "zipwriter" then
-                                                cbz:add(new_name, img_data, true)
-                                            else
-                                                cbz:addFileFromMemory(new_name, img_data, os.time())
-                                            end
-                                            image_index = image_index + 1
-                                            total_pages = total_pages + 1
-                                        end
-                                    end
-                                end
-                            else
-                                -- 可能是三值迭代器：iterator, state, init
-                                local iter, state, init = entries_res, nil, nil
-                                -- 如果 pcall 返回多个值 they'd already be packed into entries_res only; try calling entries() again
-                                local ok2, a, b, c = pcall(function() return chapter_cbz:entries() end)
-                                if ok2 then
-                                    iter, state, init = a, b, c
-                                end
-                                if type(iter) == "function" then
-                                    for file_name in iter, state, init do
-                                        if type(file_name) == "string" and file_name:match("%.(jpg|jpeg|png|gif|webp)$") then
-                                            local img_data = chapter_cbz:readEntry(file_name)
-                                            if img_data then
-                                                local ext = file_name:match("%.([^.]+)$")
-                                                local new_name = string.format("%04d.%s", image_index, ext)
-                                                if cbz_lib == "zipwriter" then
-                                                    cbz:add(new_name, img_data, true)
-                                                else
-                                                    cbz:addFileFromMemory(new_name, img_data, os.time())
-                                                end
-                                                image_index = image_index + 1
-                                                total_pages = total_pages + 1
-                                            end
-                                        end
-                                    end
-                                else
-                                    -- 无法识别 entries() 返回类型，跳过该章节并记录日志
-                                    logger.warn("无法遍历 CBZ 条目，entries() 返回未知类型: ", type(entries_res))
                                 end
                             end
                         else
-                            logger.warn("调用 chapter_cbz:entries() 失败：", tostring(entries_res))
+                            -- ziparchive使用entries()和readEntry()
+                            for file_name in chapter_cbz:entries() do
+                                if file_name:match("%.(jpg|jpeg|png|gif|webp)$") then
+                                    local img_data = chapter_cbz:readEntry(file_name)
+                                    if img_data then
+                                        local ext = file_name:match("%.([^.]+)$")
+                                        local new_name = string.format("%04d.%s", image_index, ext)
+                                        if cbz_lib == "zipwriter" then
+                                            cbz:add(new_name, img_data, true)
+                                        else
+                                            cbz:addFileFromMemory(new_name, img_data, os.time())
+                                        end
+                                        image_index = image_index + 1
+                                        total_pages = total_pages + 1
+                                    end
+                                end
+                            end
                         end
                         chapter_cbz:close()
                     end
