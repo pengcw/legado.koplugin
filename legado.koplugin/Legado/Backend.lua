@@ -109,30 +109,36 @@ local function pDownload_CreateCBZ(filePath, img_sources)
     local no_compression
     local mtime
 
-    -- 20250525 PR # 2090: Archive.Writer replaces ZipWriter
-    local ok , ZipWriter = pcall(require, "ffi/zipwriter")
-    if ok and ZipWriter then
-        cbz_lib = "zipwriter"
-        no_compression = true
-
-        cbz = ZipWriter:new{}
-        if not cbz:open(cbz_path_tmp) then
-            error('CreateCBZ cbz:open err')
-        end
-        cbz:add("mimetype", "application/vnd.comicbook+zip", true)
-    else
+    -- 优先尝试使用 Archiver
+    local ok, Archiver = pcall(require, "ffi/archiver")
+    if ok and Archiver then
         cbz_lib = "archiver"
         mtime = os.time()
 
-        local Archiver = require("ffi/archiver").Writer
-        cbz = Archiver:new{}
+        cbz = Archiver.Writer:new{}
         if not cbz:open(cbz_path_tmp, "epub") then
-            error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
+            logger.err(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
+            return nil, string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err))
         end
 
         cbz:setZipCompression("store")
         cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", mtime)
         cbz:setZipCompression("deflate")
+    else
+        -- 使用 ZipWriter 作为备用
+        local ok_zip, ZipWriter = pcall(require, "ffi/zipwriter")
+        if ok_zip and ZipWriter then
+            cbz_lib = "zipwriter"
+            no_compression = true
+
+            cbz = ZipWriter:new{}
+            if not cbz:open(cbz_path_tmp) then
+                error('CreateCBZ cbz:open err')
+            end
+            cbz:add("mimetype", "application/vnd.comicbook+zip", true)
+        else
+            error("无法加载任何压缩库")
+        end
     end
 
     for i, img_src in ipairs(img_sources) do
@@ -1205,6 +1211,11 @@ function M:getCacheChapterFilePath(chapter, not_write_db)
             return chapter
         else
             dbg.v('Files are deleted, clear database record flag', cache_file_path)
+            -- 清理可能的临时文件
+            local tmp_file = cache_file_path .. ".tmp"
+            if util.fileExists(tmp_file) then
+                pcall(function() util.removeFile(tmp_file) end)
+            end
             if not not_write_db then
                 pcall(function()
                     self.dbManager:updateCacheFilePath(chapter, false)
@@ -1351,7 +1362,7 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
         error_msg = error_msg or "未知错误"
         logger.dbg("Legado.preLoadingChapters - ", error_msg)
         if has_result_progress_callback then
-            has_result_progress_callback(false, error_msg)
+            result_progress_callback(false, error_msg)
         else
             return false, error_msg
         end
@@ -1377,7 +1388,12 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
     end
 
     if not H.is_tbl(chapter_down_tasks) or #chapter_down_tasks < 1 then
-        return return_error_handle('No chapter to be downloaded')
+        -- 所有章节已缓存，视为成功
+        logger.dbg("Legado.preLoadingChapters - All chapters already cached")
+        if has_result_progress_callback then
+            result_progress_callback(true, "所有章节已缓存")
+        end
+        return true, "所有章节已缓存"
     end
 
     -- task mark
@@ -1705,9 +1721,22 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
         logger.err("download_cover_img parameter error")
         return
     end
-    
+
+    -- 优先使用缓存目录作为封面存储位置
     cover_path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
-    
+
+    -- 检查缓存中是否已存在封面
+    local extensions = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
+    for _, ext in ipairs(extensions) do
+        local cached_cover = string.format("%s.%s", cover_path_no_ext, ext)
+        if util.fileExists(cached_cover) then
+            local dir, image_filename = util.splitFilePathName(cached_cover)
+            dbg.v('使用已缓存的封面:', cached_cover)
+            return cached_cover, image_filename
+        end
+    end
+
+    -- 下载封面到缓存目录
     local img_src = self:getProxyCoverUrl(cover_url)
     local status, err = pGetUrlContent({
                         url = img_src,
@@ -1717,7 +1746,7 @@ function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
                 })
     if status and err and err['data'] then
         local cover_img_data = err['data']
-        local path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
+        local path_no_ext = cover_path_no_ext
 
         local cover_img_path = string.format("%s.%s", path_no_ext, err['ext'] or "jpg")
         local dir, image_filename = util.splitFilePathName(cover_img_path)
