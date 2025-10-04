@@ -117,7 +117,8 @@ local function pDownload_CreateCBZ(filePath, img_sources)
 
         cbz = Archiver.Writer:new{}
         if not cbz:open(cbz_path_tmp, "epub") then
-            error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
+            logger.err(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
+            return nil, string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err))
         end
 
         cbz:setZipCompression("store")
