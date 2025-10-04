@@ -1472,15 +1472,11 @@ local function init_book_menu(parent)
             bookinfo.totalChapterNum or '',
             bookinfo.wordCount or '')
 
-        -- 检查是否为漫画类型（通过章节的 cacheExt 判断）
+     -- 检查是否为漫画类型（通过章节的 cacheExt 判断）
         local is_comic = false
         local first_chapter = Backend:getChapterInfoCache(bookinfo.cache_id, 1)
-        if first_chapter then
-            local cache_chapter = Backend:getCacheChapterFilePath(first_chapter, true)
-            if cache_chapter and cache_chapter.cacheFilePath and
-               cache_chapter.cacheFilePath:match("%.cbz$") then
-                is_comic = true
-            end
+        if first_chapter and first_chapter.cacheExt == "cbz" then
+            is_comic = true
         end
 
         MessageBox:confirm(msginfo, nil, {
