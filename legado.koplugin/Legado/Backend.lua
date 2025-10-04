@@ -109,36 +109,24 @@ local function pDownload_CreateCBZ(filePath, img_sources)
     local no_compression
     local mtime
 
-    -- 根据 KOReader 版本选择压缩库
-    -- 2025.08 (202508000000) 之后优先使用 Archiver
-    local ko_version = require("version"):getNormalizedCurrentVersion()
-    local use_archiver = ko_version and ko_version >= 202508000000
+    -- 优先尝试使用 Archiver
+    local ok, Archiver = pcall(require, "ffi/archiver")
+    if ok and Archiver then
+        cbz_lib = "archiver"
+        mtime = os.time()
 
-    if use_archiver then
-        -- KOReader 2025.08+ 使用新版 Archiver
-        local ok, Archiver = pcall(require, "ffi/archiver")
-        if ok and Archiver then
-            cbz_lib = "archiver"
-            mtime = os.time()
-
-            cbz = Archiver.Writer:new{}
-            if not cbz:open(cbz_path_tmp, "epub") then
-                error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
-            end
-
-            cbz:setZipCompression("store")
-            cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", mtime)
-            cbz:setZipCompression("deflate")
-        else
-            -- 降级使用 ZipWriter
-            use_archiver = false
+        cbz = Archiver.Writer:new{}
+        if not cbz:open(cbz_path_tmp, "epub") then
+            error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
         end
-    end
 
-    if not use_archiver then
-        -- KOReader 2025.08 之前或 Archiver 不可用，使用 ZipWriter
-        local ok, ZipWriter = pcall(require, "ffi/zipwriter")
-        if ok and ZipWriter then
+        cbz:setZipCompression("store")
+        cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", mtime)
+        cbz:setZipCompression("deflate")
+    else
+        -- 使用 ZipWriter 作为备用
+        local ok_zip, ZipWriter = pcall(require, "ffi/zipwriter")
+        if ok_zip and ZipWriter then
             cbz_lib = "zipwriter"
             no_compression = true
 

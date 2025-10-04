@@ -1472,9 +1472,9 @@ local function init_book_menu(parent)
             bookinfo.totalChapterNum or '',
             bookinfo.wordCount or '')
 
-        -- 检查是否为漫画类型（通过第一个章节的 cacheExt 判断）
+        -- 检查是否为漫画类型（通过章节的 cacheExt 判断）
         local is_comic = false
-        local first_chapter = Backend:getChapterInfoCache(bookinfo.cache_id, 0)
+        local first_chapter = Backend:getChapterInfoCache(bookinfo.cache_id, 1)
         if first_chapter then
             local cache_chapter = Backend:getCacheChapterFilePath(first_chapter, true)
             if cache_chapter and cache_chapter.cacheFilePath and
@@ -1885,28 +1885,30 @@ end
 function LibraryView:startCbzExport(bookinfo, chapter_count, only_cached)
     local book_cache_id = bookinfo.cache_id
 
-    -- 步骤1: 生成全书章节列表，检查缓存是否存在
-    local all_chapters = {}
-    local missing_count = 0
+    -- 开始缓存章节
+    local all_chapters = Backend:getAllChapters(book_cache_id)
+    loading_msg:close()
+    if not (H.is_tbl(all_chapters) and #all_chapters == chapter_count) then
+        return MessageBox:error('获取全部章节信息失败')
+    end
+    Backend:preLoadingChapters(all_chapters, nil, cache_progress_callback)
+
+    -- 统计已缓存的章节
     local cached_chapters = {}
+    local missing_count = 0
 
-    for i = 0, chapter_count - 1 do
-        local chapter = Backend:getChapterInfoCache(book_cache_id, i)
-        if chapter then
-            local cache_chapter = Backend:getCacheChapterFilePath(chapter, true)
-            local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
+    for i, chapter in ipairs(all_chapters) do
+        local cache_chapter = Backend:getCacheChapterFilePath(chapter, true)
+        local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
 
-            if not is_cached then
-                chapter.call_event = 'next'
-                table.insert(all_chapters, chapter)
-                missing_count = missing_count + 1
-            else
-                table.insert(cached_chapters, {
-                    index = i,
-                    chapter = chapter,
-                    cache_chapter = cache_chapter
-                })
-            end
+        if is_cached then
+            table.insert(cached_chapters, {
+                index = i - 1,
+                chapter = chapter,
+                cache_chapter = cache_chapter
+            })
+        else
+            missing_count = missing_count + 1
         end
     end
 
@@ -2044,21 +2046,35 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
                 end)
             end
 
+            local function get_image_ext(filename)
+                local extension = filename:match("%.(%w+)$")
+                if extension then
+                    local valid_extensions = {
+                        jpg = true, jpeg = true, png = true, 
+                        gif = true, webp = true, bmp = true
+                    }
+                    if valid_extensions[extension:lower()] then
+                        return extension
+                    end
+                end
+                return nil
+            end
+
             -- 创建 CBZ 压缩包
             local cbz
             local cbz_lib
-
-            -- 根据 KOReader 版本选择压缩库
-            local ko_version = require("version"):getNormalizedCurrentVersion()
-            local use_archiver = ko_version and ko_version >= 202508000000
-
-            if use_archiver then
+            -- 准备临时目录
+            local tmp_base
+            local main_temp_dir
+            
+            local use_archiver = true
                 local ok, Archiver = pcall(require, "ffi/archiver")
                 if ok and Archiver then
                     cbz_lib = "archiver"
                     cbz = Archiver.Writer:new{}
                     if not cbz:open(cbz_path_tmp, "epub") then
-                        error(string.format("无法创建 CBZ 文件: %s", tostring(cbz.err)))
+                        -- 不能用 error 会崩溃
+                        MessageBox:error(string.format("无法创建 CBZ 文件: %s", tostring(cbz.err)))
                     end
                     cbz:setZipCompression("store")
                     cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", os.time())
@@ -2066,7 +2082,7 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
                 else
                     use_archiver = false
                 end
-            end
+            
 
             if not use_archiver then
                 local ok, ZipWriter = pcall(require, "ffi/zipwriter")
@@ -2074,11 +2090,21 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
                     cbz_lib = "zipwriter"
                     cbz = ZipWriter:new{}
                     if not cbz:open(cbz_path_tmp) then
-                        error("无法创建 CBZ 文件")
+                        -- 不能用 error 会崩溃
+                        MessageBox:error("无法创建 CBZ 文件")
                     end
+
+                    -- 解压的临时目录
+                    tmp_base = H.joinPath(H.getTempDirectory(), ".tmp.sdr")
+                    H.checkAndCreateFolder(tmp_base)
+                    local run_stamp = tostring(os.time()) .. "_" .. tostring(math.floor(math.random() * 100000))
+                    main_temp_dir = H.joinPath(tmp_base, "cbz_temp_" .. run_stamp)
+                    H.checkAndCreateFolder(main_temp_dir)
+
                     cbz:add("mimetype", "application/vnd.comicbook+zip", true)
                 else
-                    error("无法加载任何压缩库")
+                    -- 不能用 error 会崩溃
+                    MessageBox:error("无法加载任何压缩库")
                 end
             end
 
@@ -2093,67 +2119,96 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
 
                 -- 如果是 CBZ 文件，需要解压并提取图片
                 if cache_chapter.cacheFilePath and cache_chapter.cacheFilePath:match("%.cbz$") then
-                    -- 根据 KOReader 版本选择读取库
-                    local chapter_cbz
-                    local cbz_reader_lib
-
-                    -- 优先尝试使用 archiver
-                    local ok_archiver, Archiver = pcall(require, "ffi/archiver")
-                    if ok_archiver and Archiver then
-                        cbz_reader_lib = "archiver"
-                        chapter_cbz = Archiver.Reader:new()
-                    else
-                        -- 尝试使用 ziparchive
-                        local ok_zip, ZipArchive = pcall(require, "ffi/ziparchive")
-                        if ok_zip and ZipArchive then
-                            cbz_reader_lib = "ziparchive"
-                            chapter_cbz = ZipArchive:new()
-                        else
-                            error("无法加载任何压缩读取库，请确保 KOReader 版本支持")
-                        end
-                    end
-
-                    if chapter_cbz:open(cache_chapter.cacheFilePath) then
-                        -- 根据不同的库使用不同的API
-                        if cbz_reader_lib == "archiver" then
-                            -- archiver使用iterate()迭代，extractToMemory()提取内容
-                            for entry in chapter_cbz:iterate() do
-                                if entry.mode == "file" and entry.path:match("%.(jpg|jpeg|png|gif|webp)$") then
-                                    local img_data = chapter_cbz:extractToMemory(entry.path)
-                                    if img_data then
-                                        local ext = entry.path:match("%.([^.]+)$")
-                                        local new_name = string.format("%04d.%s", image_index, ext)
-                                        if cbz_lib == "zipwriter" then
-                                            cbz:add(new_name, img_data, true)
-                                        else
+                    -- 根据已有库选择使用处理方式
+                   if cbz_lib == "archiver" then
+                            local chapter_cbz
+                            chapter_cbz = Archiver.Reader:new()
+                            chapter_cbz:open(cache_chapter.cacheFilePath) 
+                                -- archiver使用iterate()迭代，extractToMemory()提取内容
+                                for entry in chapter_cbz:iterate() do
+                                    
+                                    local ext = get_image_ext(entry.path)
+                                    if entry.mode == "file" and ext then
+                                        
+                                        local img_data = chapter_cbz:extractToMemory(entry.path)
+                                        if img_data then
+                                            local new_name = string.format("%04d.%s", image_index, ext)
+                                            -- archiver
                                             cbz:addFileFromMemory(new_name, img_data, os.time())
+                                            
+                                            image_index = image_index + 1
+                                            total_pages = total_pages + 1
                                         end
-                                        image_index = image_index + 1
-                                        total_pages = total_pages + 1
                                     end
                                 end
-                            end
+                           
+                            chapter_cbz:close()
                         else
-                            -- ziparchive使用entries()和readEntry()
-                            for file_name in chapter_cbz:entries() do
-                                if file_name:match("%.(jpg|jpeg|png|gif|webp)$") then
-                                    local img_data = chapter_cbz:readEntry(file_name)
-                                    if img_data then
-                                        local ext = file_name:match("%.([^.]+)$")
-                                        local new_name = string.format("%04d.%s", image_index, ext)
-                                        if cbz_lib == "zipwriter" then
-                                            cbz:add(new_name, img_data, true)
-                                        else
-                                            cbz:addFileFromMemory(new_name, img_data, os.time())
-                                        end
-                                        image_index = image_index + 1
-                                        total_pages = total_pages + 1
+                             -- 兼容旧版本处理压缩文件
+                             -- 为每个章节创建独立的临时目录
+                            local chapter_temp_dir = H.joinPath(main_temp_dir, "chapter_" .. current_progress)
+                            logger.info(chapter_temp_dir)
+                            H.checkAndCreateFolder(chapter_temp_dir)
+                            
+                            -- 解压 CBZ 到临时目录
+                            local cache_path_escaped = cache_chapter.cacheFilePath:gsub("'", "'\\''")
+                            local target_escaped = chapter_temp_dir:gsub("'", "'\\''")
+                            local unzip_cmd = string.format("unzip -qqo '%s' -d '%s'", 
+                                cache_path_escaped, target_escaped)
+                            local result = os.execute(unzip_cmd)
+                            
+                            if result == 0 then
+                                -- 遍历临时目录中的图片文件，按文件名排序
+                                local image_files = {}
+                                
+                                -- 先收集所有图片文件
+                                util.findFiles(chapter_temp_dir, function(path, fname, attr)
+                                    if get_image_ext(fname) then
+                                        table.insert(image_files, {
+                                            path = path,
+                                            name = fname
+                                        })
                                     end
+                                end, false)
+                                
+                                -- 按文件名排序
+                                table.sort(image_files, function(a, b)
+                                    local num_a = tonumber(a.name:match("^(%d+)")) or 0
+                                    local num_b = tonumber(b.name:match("^(%d+)")) or 0
+                                    logger.info("测试测试:num_a", num_a, num_b)
+                                    return num_a < num_b
+                                end)
+                                
+                                -- 将图片添加到 CBZ
+                                for _, file in ipairs(image_files) do
+                                    local file_path = H.joinPath(chapter_temp_dir, file.path)
+                                    -- 读取图片文件
+                                    local img_data = util.readFromFile(file_path, "rb")
+                                    if img_data then
+                                            local ext = get_image_ext(file.name) or "jpg"
+                                            local new_name = string.format("%04d.%s", image_index, ext:lower())
+                                            
+                                            -- 使用 zipwriter 添加图片（启用压缩）
+                                            cbz:add(new_name, img_data, false) -- false = 使用压缩
+
+                                            --logger.info("添加图片:", new_name, "来自:", file)
+                                            image_index = image_index + 1
+                                            total_pages = total_pages + 1
+                                    end
+                                end
+                                -- 清理本章节的临时目录
+                                if util.directoryExists(chapter_temp_dir) then
+                                    ffiUtil.purgeDir(chapter_temp_dir)
+                                    util.removePath(chapter_temp_dir)
+                                end
+                           else
+                                logger.warn("解压失败:", cache_path_escaped)
+                                if util.directoryExists(chapter_temp_dir) then
+                                    ffiUtil.purgeDir(chapter_temp_dir)
+                                    util.removePath(chapter_temp_dir)
                                 end
                             end
                         end
-                        chapter_cbz:close()
-                    end
                 end
 
                 current_progress = current_progress + 1
@@ -2199,6 +2254,13 @@ function LibraryView:generateCbzFile(bookinfo, chapter_count, only_cached, cache
             if util.fileExists(output_path) then
                 util.removeFile(output_path)
             end
+
+            if cbz_lib == "zipwriter" and util.directoryExists(tmp_base) then
+                -- 清理所有的临时目录
+                ffiUtil.purgeDir(tmp_base)
+                util.removePath(tmp_base)
+            end
+            
             os.rename(cbz_path_tmp, output_path)
 
             return {

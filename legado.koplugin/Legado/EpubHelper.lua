@@ -462,39 +462,29 @@ function EpubExporter:packageEpub()
     local mtime
     local no_compression
 
-    local ko_version = require("version"):getNormalizedCurrentVersion()
-    local use_archiver = ko_version and ko_version >= 202508000000
+    -- 优先尝试使用 Archiver
+    local ok, Archiver = pcall(require, "ffi/archiver")
+    if ok and Archiver then
+        epub_lib = "archiver"
+        mtime = os.time()
 
-    if use_archiver then
-        -- KOReader 2025.08+ 使用新版 Archiver
-        local ok, Archiver = pcall(require, "ffi/archiver")
-        if ok and Archiver then
-            epub_lib = "archiver"
-            mtime = os.time()
-
-            epub = Archiver.Writer:new{}
-            if not epub:open(epub_path_tmp, "epub") then
-                logger.warn("无法创建 EPUB 文件 (archiver):", epub_path_tmp)
-                return {
-                    success = false,
-                    error = "无法创建 EPUB 文件"
-                }
-            end
-
-            -- mimetype 必须不压缩存储
-            epub:setZipCompression("store")
-            epub:addFileFromMemory("mimetype", self:createMimetype(), mtime)
-            epub:setZipCompression("deflate")
-        else
-            -- 降级使用 ZipWriter
-            use_archiver = false
+        epub = Archiver.Writer:new{}
+        if not epub:open(epub_path_tmp, "epub") then
+            logger.warn("无法创建 EPUB 文件 (archiver):", epub_path_tmp)
+            return {
+                success = false,
+                error = "无法创建 EPUB 文件"
+            }
         end
-    end
 
-    if not use_archiver then
-        -- KOReader 2025.08 之前或 Archiver 不可用，使用 ZipWriter
-        local ok, ZipWriter = pcall(require, "ffi/zipwriter")
-        if ok and ZipWriter then
+        -- mimetype 必须不压缩存储
+        epub:setZipCompression("store")
+        epub:addFileFromMemory("mimetype", self:createMimetype(), mtime)
+        epub:setZipCompression("deflate")
+    else
+        -- 使用 ZipWriter 作为备用
+        local ok_zip, ZipWriter = pcall(require, "ffi/zipwriter")
+        if ok_zip and ZipWriter then
             epub_lib = "zipwriter"
             no_compression = true
 
