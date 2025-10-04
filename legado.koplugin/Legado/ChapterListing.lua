@@ -292,20 +292,56 @@ function ChapterListing:onMenuHold(item)
                     end
                 end,
                 extra_callback = function()
-                    MessageBox:confirm("请确认缓存全部章节 (有的书源有频率限制)",
-                        function(result)
-                            if result then
-                                local status, err = pcall(function()
-                                    self:ChapterDownManager(0, 'next')
-                                end)
-                                if not status then
-                                    dbg.log('缓存全部章节出错：', tostring(err))
-                                end
+                    local dialog
+                    local buttons = {
+                        {{
+                            text = Icons.FA_DOWNLOAD .. " 缓存全部",
+                            callback = function()
+                                UIManager:close(dialog)
+                                MessageBox:confirm("请确认缓存全部章节 (有的书源有频率限制)",
+                                    function(result)
+                                        if result then
+                                            local status, err = pcall(function()
+                                                self:ChapterDownManager(0, 'next')
+                                            end)
+                                            if not status then
+                                                dbg.log('缓存全部章节出错：', tostring(err))
+                                            end
+                                        end
+                                    end, {
+                                        ok_text = "开始",
+                                        cancel_text = "取消"
+                                    })
                             end
-                        end, {
-                            ok_text = "开始",
-                            cancel_text = "取消"
-                        })
+                        }},
+                        {{
+                            text = Icons.FA_ARROW_DOWN .. " 下载本章后全部",
+                            callback = function()
+                                UIManager:close(dialog)
+                                MessageBox:confirm("请确认从本章开始缓存后续所有章节 (有的书源有频率限制)",
+                                    function(result)
+                                        if result then
+                                            local status, err = pcall(function()
+                                                local remaining_chapters = tonumber(self.all_chapters_count) - tonumber(chapters_index) + 1
+                                                self:ChapterDownManager(tonumber(chapters_index), 'next', remaining_chapters)
+                                            end)
+                                            if not status then
+                                                dbg.log('下载本章后全部出错：', tostring(err))
+                                            end
+                                        end
+                                    end, {
+                                        ok_text = "开始",
+                                        cancel_text = "取消"
+                                    })
+                            end
+                        }}
+                    }
+                    dialog = ButtonDialog:new{
+                        title = "选择缓存方式",
+                        title_align = "center",
+                        buttons = buttons,
+                    }
+                    UIManager:show(dialog)
                 end
             }
 
