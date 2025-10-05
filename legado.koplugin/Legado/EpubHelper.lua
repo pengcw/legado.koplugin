@@ -227,12 +227,13 @@ function EpubExporter:createOPF()
     -- 添加CSS
     table.insert(manifest_items, '<item id="stylesheet" href="Text/resources/legado.css" media-type="text/css"/>')
 
-    -- 添加章节
-    for i, chapter in ipairs(self.chapters) do
-        local chapter_id = string.format("chapter%d", i)
+    -- 添加章节, 章节不一定是连续的, 不能使用 i
+    for _, chapter in ipairs(self.chapters) do
+        local chapter_index = chapter.chapters_index
+        local chapter_id = string.format("chapter%d", chapter_index)
         table.insert(manifest_items, string.format(
             '<item id="%s" href="Text/chapter%d.xhtml" media-type="application/xhtml+xml"/>',
-            chapter_id, i
+            chapter_id, chapter_index
         ))
         table.insert(spine_items, string.format('<itemref idref="%s"/>', chapter_id))
     end
@@ -283,12 +284,13 @@ end
 function EpubExporter:createNCX()
     local nav_points = {}
 
-    for i, chapter in ipairs(self.chapters) do
+    for _, chapter in ipairs(self.chapters) do
+        local chapter_index = chapter.chapters_index
         local nav_point = string.format([[
     <navPoint id="navPoint-%d" playOrder="%d">
       <navLabel><text>%s</text></navLabel>
       <content src="Text/chapter%d.xhtml"/>
-    </navPoint]], i, i, chapter.title or ("第" .. i .. "章"), i)
+    </navPoint]], chapter_index, chapter_index, chapter.title or ("第" .. (chapter_index + 1) .. "章"), chapter_index)
         table.insert(nav_points, nav_point)
     end
 
@@ -348,10 +350,11 @@ end
 function EpubExporter:createNavPage()
     local nav_items = {}
 
-    for i, chapter in ipairs(self.chapters) do
+    for _, chapter in ipairs(self.chapters) do
+        local chapter_index = chapter.chapters_index
         table.insert(nav_items, string.format(
             '        <li><a href="chapter%d.xhtml">%s</a></li>',
-            i, chapter.title or ("第" .. i .. "章")
+            chapter_index, chapter.title or ("第" .. (chapter_index + 1) .. "章")
         ))
     end
 
@@ -516,9 +519,9 @@ function EpubExporter:packageEpub()
     local cache_file_path
     local chapter_content
     local file_index
-    for i, chapter in ipairs(self.chapters) do
+    for _, chapter in ipairs(self.chapters) do
         
-        file_index = chapter.cache_index + 1
+        file_index = chapter.chapters_index
         cache_ext = chapter.cache_ext
         cache_file_path = chapter.cache_path
         chapter_content = ""

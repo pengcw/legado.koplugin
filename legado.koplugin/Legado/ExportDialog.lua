@@ -146,8 +146,7 @@ function CbzExporter:package()
             local image_index = 1
             local total_pages = 0
 
-            for _, valid_chapter in ipairs(valid_chapters) do
-                local cache_chapter = valid_chapter.cache_chapter
+            for _, cache_chapter in ipairs(valid_chapters) do
 
                 -- 如果是 CBZ 文件，需要解压并提取图片
                 if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) and cache_chapter.cacheFilePath:match("%.cbz$") then
@@ -324,7 +323,9 @@ function M:exportBookToCbz(bookinfo)
             cached_count
         ), function(result)
             if not result then return end
-            self:startCbzExport(bookinfo, chapter_count, false)
+            UIManager:nextTick(function()
+                self:startCbzExport(bookinfo, chapter_count, false)
+            end)
         end, {
             ok_text = "全部导出",
             cancel_text = "取消",
@@ -336,7 +337,9 @@ function M:exportBookToCbz(bookinfo)
                             MessageBox:error("没有已缓存的章节")
                             return
                         end
-                        self:startCbzExport(bookinfo, chapter_count, true)
+                        UIManager:nextTick(function()
+                            self:startCbzExport(bookinfo, chapter_count, true)
+                        end)
                     end
                 },
             }}
@@ -362,10 +365,7 @@ function M:startCbzExport(bookinfo, chapter_count, only_cached)
         local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
 
         if is_cached then
-            table.insert(cached_chapters, {
-                index = i - 1,
-                cache_chapter = cache_chapter
-            })
+            table.insert(cached_chapters, cache_chapter)
         else
             missing_count = missing_count + 1
         end
@@ -373,17 +373,13 @@ function M:startCbzExport(bookinfo, chapter_count, only_cached)
 
     if only_cached then
         MessageBox:notice(string.format('跳过 %d 个未缓存章节，开始生成 CBZ', missing_count))
-        UIManager:nextTick(function()
-            self:generateCbzFile(bookinfo, chapter_count, true, cached_chapters)
-        end)
+        self:generateCbzFile(bookinfo, chapter_count, cached_chapters)
         return
     end
 
     if missing_count == 0 then
         MessageBox:notice('所有章节已缓存，开始生成 CBZ')
-        UIManager:nextTick(function()
-            self:generateCbzFile(bookinfo, chapter_count, false, cached_chapters)
-        end)
+        self:generateCbzFile(bookinfo, chapter_count, cached_chapters)
         return
     end
 
@@ -407,9 +403,7 @@ function M:startCbzExport(bookinfo, chapter_count, only_cached)
 
             if progress == true and not cache_cancelled then
                 -- 缓存完成，开始生成CBZ
-                UIManager:nextTick(function()
-                    self:generateCbzFile(bookinfo, chapter_count)
-                end)
+                self:generateCbzFile(bookinfo, chapter_count)
             elseif err_msg then
                 MessageBox:error('缓存章节出错：', tostring(err_msg))
             elseif cache_cancelled then
@@ -434,7 +428,7 @@ function M:startCbzExport(bookinfo, chapter_count, only_cached)
     end
 end
 
-function M:generateCbzFile(bookinfo, chapter_count, only_cached, cached_chapters_param)
+function M:generateCbzFile(bookinfo, chapter_count, cached_chapters_param)
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
         MessageBox:error("书籍信息错误")
         return
@@ -450,10 +444,7 @@ function M:generateCbzFile(bookinfo, chapter_count, only_cached, cached_chapters
             if chapter then
                 local cache_chapter = Backend:getCacheChapterFilePath(chapter)
                 if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
-                    table.insert(valid_chapters, {
-                        index = i,
-                        cache_chapter = cache_chapter
-                    })
+                    table.insert(valid_chapters, cache_chapter)
                 end
             end
         end
@@ -509,7 +500,7 @@ function M:generateCbzFile(bookinfo, chapter_count, only_cached, cached_chapters
                     function(open_file)
                         if open_file and result.path then
                             UIManager:close(self.book_menu)
-                            UIManager:scheduleIn(0.1, function()
+                            UIManager:nextTick(function()
                                 self:showReaderUI(result.path)
                             end)
                         end
@@ -615,13 +606,17 @@ function M:exportBookToEpub(bookinfo)
                             MessageBox:error("没有已缓存的章节")
                             return
                         end
-                        self:startEpubExport(bookinfo, chapter_count, true)
+                        UIManager:nextTick(function()
+                            self:startEpubExport(bookinfo, chapter_count, true)
+                        end)
                     end
                 },
                 {
                     text = "设置",
                     callback = function()
-                        self:showEpubExportSettings()
+                        UIManager:nextTick(function()
+                            self:showEpubExportSettings()
+                        end)
                     end
                 }
             }}
@@ -656,27 +651,20 @@ function M:startEpubExport(bookinfo, chapter_count, only_cached)
                 missing_count = missing_count + 1
             else
                 -- 保存已缓存章节信息
-                table.insert(cached_chapters, {
-                    index = i,
-                    cache_chapter = cache_chapter
-                })
+                table.insert(cached_chapters, cache_chapter)
             end
         end
     end
 
     if only_cached then
         MessageBox:notice(string.format('跳过 %d 个未缓存章节，开始生成 EPUB', missing_count))
-        UIManager:nextTick(function()
-            self:generateEpubFile(bookinfo, chapter_count, true, cached_chapters)
-        end)
+        self:generateEpubFile(bookinfo, chapter_count, cached_chapters)
         return
     end
 
     if missing_count == 0 then
         MessageBox:notice('所有章节已缓存，开始生成 EPUB')
-        UIManager:nextTick(function()
-            self:generateEpubFile(bookinfo, chapter_count, false, cached_chapters)
-        end)
+        self:generateEpubFile(bookinfo, chapter_count, cached_chapters)
         return
     end
 
@@ -727,7 +715,8 @@ function M:startEpubExport(bookinfo, chapter_count, only_cached)
     end
 end
 
-function M:generateEpubFile(bookinfo, chapter_count, only_cached, cached_chapters_param)
+-- 将已缓存章节生成 epub
+function M:generateEpubFile(bookinfo, chapter_count, cached_chapters_param)
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
         MessageBox:error("书籍信息错误")
         return
@@ -737,7 +726,7 @@ function M:generateEpubFile(bookinfo, chapter_count, only_cached, cached_chapter
     bookinfo.name = bookinfo.name or "未知书名"
     bookinfo.author = bookinfo.author or "未知作者"
     
-    -- 准备章节数据（如果传入了缓存章节列表，直接使用；否则重新收集）
+    -- 准备章节数据（如果传入了缓存章节列表，直接使用, 否则重新检测收集）
     local valid_chapters = cached_chapters_param or {}
 
     if not cached_chapters_param then
@@ -746,10 +735,7 @@ function M:generateEpubFile(bookinfo, chapter_count, only_cached, cached_chapter
             if chapter then
                 local cache_chapter = Backend:getCacheChapterFilePath(chapter)
                 if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
-                    table.insert(valid_chapters, {
-                        index = i,
-                        cache_chapter = cache_chapter
-                    })
+                    table.insert(valid_chapters, cache_chapter)
                 end
             end
         end
@@ -764,17 +750,16 @@ function M:generateEpubFile(bookinfo, chapter_count, only_cached, cached_chapter
 
     local export_settings = self:getEpubExportSettings()
     local function build_epub()
-            
-            local chapters = {}
-            for _, valid_chapter in ipairs(valid_chapters) do
-                local cache_chapter = valid_chapter.cache_chapter
 
-                local content = ""
+            local chapters = {}
+            for _, cache_chapter in ipairs(valid_chapters) do
                 if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) and util.fileExists(cache_chapter.cacheFilePath) then
                     local file_ext = cache_chapter.cacheFilePath:match("%.([^.]+)$")
+                    local chapters_index = cache_chapter.chapters_index
+                    -- 当仅缓存的时候, 这里章节不一定是连续的
                     table.insert(chapters, {
-                        cache_index = cache_chapter.chapters_index,
-                        title = cache_chapter.title or string.format("第%d章", valid_chapter.index + 1),
+                        chapters_index = chapters_index,
+                        title = cache_chapter.title or string.format("第%d章", chapters_index + 1),
                         cache_ext = file_ext,
                         cache_path = cache_chapter.cacheFilePath,
                     })
@@ -824,7 +809,7 @@ function M:generateEpubFile(bookinfo, chapter_count, only_cached, cached_chapter
                 output_path = output_path,
                 book_cache_id = book_cache_id
             })
-
+            
             local build_result = exporter:build()
             return build_result
     end
@@ -841,7 +826,7 @@ function M:generateEpubFile(bookinfo, chapter_count, only_cached, cached_chapter
                         function(open_file)
                             if open_file and result.path then
                                 UIManager:close(self.book_menu)
-                                UIManager:scheduleIn(0.1, function()
+                                UIManager:nextTick(function()
                                     self:showReaderUI(result.path)
                                 end)
                             end
