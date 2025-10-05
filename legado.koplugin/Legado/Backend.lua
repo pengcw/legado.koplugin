@@ -1684,12 +1684,12 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
     local uncached_count = #uncached_chapters
 
     -- 显示缓存进度
-    local title_text = string.format("正在缓存 %d/%d 章节", bookinfo.name, uncached_count, chapter_count)
+    local title_text = string.format("%s - 正在缓存 %d/%d 章节", bookinfo.name, uncached_count, chapter_count)
     if retry_count > 0 then
         title_text = title_text .. string.format(" (重试 %d)", retry_count)
     end
 
-    local cache_msg = MessageBox:progressBar("%s - 缓存进度", {
+    local cache_msg = MessageBox:progressBar("缓存进度", {
         title = title_text,
         max = uncached_count
     })
