@@ -429,14 +429,4 @@ M.getHomeDir = function()
                require("apps/filemanager/filemanagerutil").getDefaultDir()
 end
 
--- XML 转义函数
-function M.escapeXml(str)
-    if not str then return "" end
-    return str:gsub("&", "&amp;")
-              :gsub("<", "&lt;")
-              :gsub(">", "&gt;")
-              :gsub("\"", "&quot;")
-              :gsub("'", "&apos;")
-end
-
 return M

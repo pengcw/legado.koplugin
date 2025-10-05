@@ -265,7 +265,7 @@ function ChapterListing:onMenuHold(item)
             self:syncProgressShow(chapter)
         end
     }, {
-        text = table.concat({Icons.FA_BOOK, " 缓存章节"}),
+        text = table.concat({Icons.FA_BOOK, " 缓存/导出"}),
         callback = function()
             UIManager:close(dialog)
             if not self.all_chapters_count then
@@ -280,11 +280,10 @@ function ChapterListing:onMenuHold(item)
                 ok_text = "下载",
                 title_text = "请选择需下载的章数：",
                 info_text = "( 默认跳过已读和已下载, 点击中间数字可直接输入)",
-                extra_text = Icons.FA_DOWNLOAD .. " 缓存全部",
+                extra_text = Icons.FA_DOWNLOAD .. " 缓存更多/导出书籍",
                 callback = function(autoturn_spin)
 
                     local status, err = pcall(function()
-
                         self:ChapterDownManager(tonumber(chapters_index), 'next', autoturn_spin.value)
                     end)
                     if not status and err then
@@ -292,15 +291,16 @@ function ChapterListing:onMenuHold(item)
                     end
                 end,
                 extra_callback = function()
+                    local is_comic = Backend:isBookTypeComic(self.bookinfo.cache_id)
                     local dialog
                     local buttons = {
                         {{
-                            text = Icons.FA_DOWNLOAD .. " 缓存全部",
+                            text = Icons.FA_DOWNLOAD .. " 缓存全书",
                             callback = function()
-                                UIManager:close(dialog)
                                 MessageBox:confirm("请确认缓存全部章节 (有的书源有频率限制)",
                                     function(result)
                                         if result then
+                                            UIManager:close(dialog)
                                             local status, err = pcall(function()
                                                 self:ChapterDownManager(0, 'next')
                                             end)
@@ -321,6 +321,7 @@ function ChapterListing:onMenuHold(item)
                                 MessageBox:confirm("请确认从本章开始缓存后续所有章节 (有的书源有频率限制)",
                                     function(result)
                                         if result then
+                                            UIManager:close(dialog)
                                             local status, err = pcall(function()
                                                 local remaining_chapters = tonumber(self.all_chapters_count) - tonumber(chapters_index) + 1
                                                 self:ChapterDownManager(tonumber(chapters_index), 'next', remaining_chapters)
@@ -334,10 +335,20 @@ function ChapterListing:onMenuHold(item)
                                         cancel_text = "取消"
                                     })
                             end
-                        }}
+                        }},{{
+                            text = table.concat({Icons.FA_BOOK, (is_comic and ' 导出 CBZ' or ' 导出 EPUB')}),
+                            callback = function()
+                                UIManager:close(dialog)
+                                if is_comic then
+                                    require("Legado/ExportDialog"):exportBookToCbz(self.bookinfo)
+                                else
+                                    require("Legado/ExportDialog"):exportBookToEpub(self.bookinfo)
+                                end
+                            end
+                        }},
                     }
                     dialog = ButtonDialog:new{
-                        title = "选择缓存方式",
+                        title = "请选择操作",
                         title_align = "center",
                         buttons = buttons,
                     }

@@ -109,36 +109,30 @@ local function pDownload_CreateCBZ(filePath, img_sources)
     local no_compression
     local mtime
 
-    -- 优先尝试使用 Archiver
-    local ok, Archiver = pcall(require, "ffi/archiver")
-    if ok and Archiver then
+    -- 20250525 PR # 2090: Archive.Writer replaces ZipWriter
+    local ok , ZipWriter = pcall(require, "ffi/zipwriter")
+    if ok and ZipWriter then
+        cbz_lib = "zipwriter"
+        no_compression = true
+
+        cbz = ZipWriter:new{}
+        if not cbz:open(cbz_path_tmp) then
+            error('CreateCBZ cbz:open err')
+        end
+        cbz:add("mimetype", "application/vnd.comicbook+zip", true)
+    else
         cbz_lib = "archiver"
         mtime = os.time()
 
-        cbz = Archiver.Writer:new{}
+        local Archiver = require("ffi/archiver").Writer
+        cbz = Archiver:new{}
         if not cbz:open(cbz_path_tmp, "epub") then
-            logger.err(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
-            return nil, string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err))
+            error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
         end
 
         cbz:setZipCompression("store")
         cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", mtime)
         cbz:setZipCompression("deflate")
-    else
-        -- 使用 ZipWriter 作为备用
-        local ok_zip, ZipWriter = pcall(require, "ffi/zipwriter")
-        if ok_zip and ZipWriter then
-            cbz_lib = "zipwriter"
-            no_compression = true
-
-            cbz = ZipWriter:new{}
-            if not cbz:open(cbz_path_tmp) then
-                error('CreateCBZ cbz:open err')
-            end
-            cbz:add("mimetype", "application/vnd.comicbook+zip", true)
-        else
-            error("无法加载任何压缩库")
-        end
     end
 
     for i, img_src in ipairs(img_sources) do
@@ -309,6 +303,12 @@ function M:getLuaConfig(path)
 end
 function M:backgroundCacheConfig()
     return self:getLuaConfig(H.getTempDirectory() .. '/cache.lua')
+end
+
+function M:isBookTypeComic(book_cache_id)
+    if not H.is_str(book_cache_id) then return false end
+    local chapter = self:getChapterInfoCache(book_cache_id, 1)
+    return H.is_tbl(chapter) and chapter.cacheExt == "cbz" or false
 end
 
 function M:refreshLibraryCache(last_refresh_time)
@@ -1716,58 +1716,55 @@ function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
     checkTask()
 end
 
-function M:download_cover_img(book_cache_id, cover_url, cover_path_no_ext)
-    if not (H.is_str(book_cache_id) and H.is_str(cover_url)) then
-        logger.err("download_cover_img parameter error")
-        return
+function M:download_cover_img(book_cache_id, cover_url, is_force)
+     if not (H.is_str(book_cache_id) and book_cache_id ~= "" 
+        and H.is_str(cover_url) and cover_url ~= "") then
+        logger.err("download_cover_img: invalid parameter", book_cache_id, cover_url)
+        return nil, nil
     end
+    
+    local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
+    local dir, image_filename = util.splitFilePathName(cover_path_no_ext)
+    if not (dir and image_filename) then
+        logger.err(string.format("download_cover_img: invalid name (%s, %s)", tostring(dir), tostring(image_filename)))
+        return nil, nil
+    end
+    H.checkAndCreateFolder(dir)
 
-    -- 优先使用缓存目录作为封面存储位置
-    cover_path_no_ext = cover_path_no_ext or H.getCoverCacheFilePath(book_cache_id)
+    if not is_force then
+        local function find_cover(base_path)
+            -- 可能的封面图片格式
+            local extensions = { "jpg", "jpeg", "png", "webp", "bmp", "tiff" }
+            for _, ext in ipairs(extensions) do
+                local cover_full_path = string.format("%s.%s", base_path, ext)
+                if util.fileExists(cover_full_path) then
+                    return cover_full_path
+                end
+            end
+            return nil
+        end
 
-    -- 检查缓存中是否已存在封面
-    local extensions = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
-    for _, ext in ipairs(extensions) do
-        local cached_cover = string.format("%s.%s", cover_path_no_ext, ext)
-        if util.fileExists(cached_cover) then
-            local dir, image_filename = util.splitFilePathName(cached_cover)
-            dbg.v('使用已缓存的封面:', cached_cover)
-            return cached_cover, image_filename
+        local cover_full_path = find_cover(cover_path_no_ext)
+        if cover_full_path then
+            return cover_full_path, image_filename
         end
     end
 
-    -- 下载封面到缓存目录
     local img_src = self:getProxyCoverUrl(cover_url)
-    local status, err = pGetUrlContent({
+    local ok, resp = pGetUrlContent({
                         url = img_src,
                         timeout = 15,
                         maxtime = 60,
                         is_pic = true,
                 })
-    if status and err and err['data'] then
-        local cover_img_data = err['data']
-        local path_no_ext = cover_path_no_ext
-
-        local cover_img_path = string.format("%s.%s", path_no_ext, err['ext'] or "jpg")
-        local dir, image_filename = util.splitFilePathName(cover_img_path)
-        if not (dir and image_filename) then
-            logger.err("download_cover_img name error: ",dir, image_filename)
-            return
-        end
-
-        H.checkAndCreateFolder(dir)
-
-        local cover_file_name = util.getSafeFilename(image_filename)
-        if not cover_file_name then
-            logger.err("download_cover_img getSafeFilename error")
-            return
-        end
-        local safe_cover_img_path = H.joinPath(dir, image_filename)
-        util.writeToFile(cover_img_data, safe_cover_img_path, true)
-
+    if ok and resp and resp['data'] then
+        local ext = resp.ext or "jpg"
+        local cover_img_path = string.format("%s.%s", cover_path_no_ext, ext)
+        util.writeToFile(resp.data, cover_img_path, true)
         return cover_img_path, image_filename
     else
-        logger.err("download_cover_img error: ", cover_url, err)
+        logger.err("download_cover_img: failed", cover_url, resp)
+        return nil, nil
     end
 end
 
