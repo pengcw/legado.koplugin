@@ -1,7 +1,7 @@
 local util = require("util")
 local H = require("Legado/Helper")
 local logger = require("logger")
-local lfs = require("libs/libkoreader-lfs")
+local ffiUtil = require("ffi/util")
 
 --[[
     EpubHelper - EPUB 工具集
@@ -15,7 +15,6 @@ local lfs = require("libs/libkoreader-lfs")
 
 local M = {}
 
--- EPUB 导出器配置
 local EpubExporter = {
     default_author = "未知作者",
     default_title = "未命名图书",
@@ -143,7 +142,6 @@ end
 -- EPUB 导出器（用于 LibraryView 导出 EPUB）
 -- ============================================================
 
--- 生成简单的UUID
 local function generateUUID()
     local template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
     math.randomseed(os.time() + os.clock() * 1000000)
@@ -211,7 +209,6 @@ function EpubExporter:init(options)
     return self
 end
 
--- 创建OPF文件（核心元数据文件）
 function EpubExporter:createOPF()
     local manifest_items = {}
     local spine_items = {}
@@ -228,7 +225,7 @@ function EpubExporter:createOPF()
     end
 
     -- 添加CSS
-    table.insert(manifest_items, '<item id="stylesheet" href="resources/legado.css" media-type="text/css"/>')
+    table.insert(manifest_items, '<item id="stylesheet" href="Text/resources/legado.css" media-type="text/css"/>')
 
     -- 添加章节
     for i, chapter in ipairs(self.chapters) do
@@ -245,7 +242,7 @@ function EpubExporter:createOPF()
 
     -- 构建 description 元数据（如果有）
     local description_meta = ""
-    if self.description and self.description ~= "" then
+    if H.is_str(self.description) and self.description ~= "" then
         -- 转义 XML 特殊字符
         local escaped_desc = self.description:gsub("&", "&amp;")
                                             :gsub("<", "&lt;")
@@ -283,7 +280,6 @@ function EpubExporter:createOPF()
     return string.format(opf_template, self.title, self.author, description_meta, uuid, timestamp, manifest_str, spine_str)
 end
 
--- 创建NCX文件（导航文件）
 function EpubExporter:createNCX()
     local nav_points = {}
 
@@ -317,7 +313,6 @@ function EpubExporter:createNCX()
     return string.format(ncx_template, uuid, self.title, self.author, nav_str)
 end
 
--- 创建封面页面
 function EpubExporter:createCoverPage()
     local cover_template = [[<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -342,7 +337,7 @@ function EpubExporter:createCoverPage()
 </html>]]
 
     local cover_image = ""
-    if self.cover_path then
+    if H.is_str(self.cover_path) then
         local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
         cover_image = string.format('<div class="pic"><img src="../Images/%s" style="width: 100%%; height: auto;"/></div>', cover_filename)
     end
@@ -350,7 +345,6 @@ function EpubExporter:createCoverPage()
     return string.format(cover_template, cover_image, self.title, self.author)
 end
 
--- 创建导航页面（EPUB3）
 function EpubExporter:createNavPage()
     local nav_items = {}
 
@@ -381,7 +375,6 @@ function EpubExporter:createNavPage()
     return string.format(nav_template, nav_str)
 end
 
--- 创建章节页面
 function EpubExporter:createChapterPage(index, chapter)
     local title = chapter.title or ("第" .. index .. "章")
     local content = chapter.content or ""
@@ -393,7 +386,7 @@ function EpubExporter:createChapterPage(index, chapter)
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head>
     <title>%s</title>
-    <link href="../resources/legado.css" type="text/css" rel="stylesheet"/>
+    <link href="resources/legado.css" type="text/css" rel="stylesheet"/>
     <style>p + p {margin-top: 0.5em;}</style>
 </head>
 <body>
@@ -407,7 +400,6 @@ function EpubExporter:createChapterPage(index, chapter)
     return string.format(chapter_template, title, part or "", subpart or "", content)
 end
 
--- 创建container.xml（EPUB必需文件）
 function EpubExporter:createContainer()
     return [[<?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -417,31 +409,27 @@ function EpubExporter:createContainer()
 </container>]]
 end
 
--- 创建mimetype文件（EPUB必需文件）
 function EpubExporter:createMimetype()
     return "application/epub+zip"
 end
 
--- 构建EPUB文件
 function EpubExporter:build()
+
     -- 清理失败的缓存文件（.tmp 文件）
-    if self.book_cache_path and lfs.attributes(self.book_cache_path, "mode") == "directory" then
-        for file in lfs.dir(self.book_cache_path) do
-            if file:match("%.tmp$") then
-                local tmp_file = self.book_cache_path .. "/" .. file
+    if H.is_str(self.book_cache_path) and util.directoryExists(self.book_cache_path) then
+        util.findFiles(self.book_cache_path, function(path, fname, attr)
+            if attr and attr.mode == "file" and H.is_str(fname) and fname:match("%.tmp$")then
                 pcall(function()
-                    util.removeFile(tmp_file)
-                    logger.dbg("Cleaned up tmp file:", tmp_file)
+                    util.removeFile(path)
+                    logger.dbg("Cleaned up tmp file:", path)
                 end)
             end
-        end
+        end, false)
     end
 
-    -- 打包EPUB
     return self:packageEpub()
 end
 
--- 打包EPUB文件（使用 Archiver 或 ZipWriter）
 function EpubExporter:packageEpub()
     local epub_path = self.output_path
     if not epub_path then
@@ -452,17 +440,13 @@ function EpubExporter:packageEpub()
         }
     end
 
-    -- 创建临时文件
     local epub_path_tmp = epub_path .. ".tmp"
 
-    -- 根据 KOReader 版本选择压缩库
-    -- 2025.08 (202508000000) 之后优先使用 Archiver
     local epub_lib
     local epub
     local mtime
     local no_compression
 
-    -- 优先尝试使用 Archiver
     local ok, Archiver = pcall(require, "ffi/archiver")
     if ok and Archiver then
         epub_lib = "archiver"
@@ -482,7 +466,7 @@ function EpubExporter:packageEpub()
         epub:addFileFromMemory("mimetype", self:createMimetype(), mtime)
         epub:setZipCompression("deflate")
     else
-        -- 使用 ZipWriter 作为备用
+        
         local ok_zip, ZipWriter = pcall(require, "ffi/zipwriter")
         if ok_zip and ZipWriter then
             epub_lib = "zipwriter"
@@ -506,7 +490,6 @@ function EpubExporter:packageEpub()
         end
     end
 
-    -- 辅助函数：兼容两种压缩库的文件添加
     local function addFile(filename, content, no_compress)
         if epub_lib == "zipwriter" then
             epub:add(filename, content, no_compress or no_compression)
@@ -515,49 +498,56 @@ function EpubExporter:packageEpub()
         end
     end
 
-    -- container.xml
     addFile("META-INF/container.xml", self:createContainer())
 
-    -- CSS
-    local css_content
-    if self.custom_css then
-        css_content = self.custom_css
-    else
-        local default_css_path = string.format("%s/Legado/main.css.lua", H.get_plugin_path())
-        if util.fileExists(default_css_path) then
-            local f = io.open(default_css_path, "r")
-            if f then
-                css_content = f:read("*all")
-                f:close()
-            end
-        end
-    end
-    if css_content then
-        addFile("OEBPS/resources/legado.css", css_content)
+    if H.is_str(self.cover_path) and util.fileExists(self.cover_path) then
+        local cover_data = util.readFromFile(self.cover_path, "rb")
+        local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
+        -- 图片不需要压缩
+        addFile("OEBPS/Images/" .. cover_filename, cover_data, true)
     end
 
-    -- 封面图片
-    if self.cover_path and util.fileExists(self.cover_path) then
-        local f = io.open(self.cover_path, "rb")
-        if f then
-            local cover_data = f:read("*all")
-            f:close()
-            local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
-            -- 图片不需要压缩
-            addFile("OEBPS/Images/" .. cover_filename, cover_data, true)
-        end
-    end
-
-    -- 封面页
     addFile("OEBPS/Text/cover.xhtml", self:createCoverPage())
 
-    -- 导航页
     addFile("OEBPS/Text/nav.xhtml", self:createNavPage())
 
-    -- 章节
+    -- chapters
+    local cache_ext
+    local cache_file_path
+    local chapter_content
+    local file_index
     for i, chapter in ipairs(self.chapters) do
-        local chapter_content = self:createChapterPage(i, chapter)
-        addFile(string.format("OEBPS/Text/chapter%d.xhtml", i), chapter_content)
+        
+        file_index = chapter.cache_index + 1
+        cache_ext = chapter.cache_ext
+        cache_file_path = chapter.cache_path
+        chapter_content = ""
+
+        -- TODO use txt2html
+        if cache_ext == "txt" then
+            chapter_content = util.readFromFile(cache_file_path, "r") or ""
+            -- 将文本段落转换为HTML段落
+            chapter.content = chapter_content:gsub("([^\n]+)", "<p>%1</p>")
+            chapter_content = self:createChapterPage(file_index, chapter)
+        elseif cache_ext == "html" or cache_ext == "xhtml" then
+            chapter_content = util.readFromFile(cache_file_path, "r") or ""
+            -- 如果使用自定义 CSS，移除章节中的首字下沉相关代码
+            if self.custom_css_path then
+                -- 移除首字下沉的 span 标签和内联样式
+                chapter_content = chapter_content:gsub('<p%s+style="text%-indent:%s*0em;"><span%s+class="duokan%-dropcaps%-two">(.)</span>', '<p>%1')
+            end
+        elseif cache_ext == "png" or cache_ext == "jpg" or cache_ext == "jpeg" or 
+                    cache_ext == "bmp" then
+            -- 章节可能是单图片
+            local img_data = util.readFromFile(cache_file_path, "rb")
+            if img_data then
+                 chapter.content = string.format("<img src='resources/chapter%d.%s'><img>", file_index, cache_ext)
+                 chapter_content = self:createChapterPage(file_index, chapter)
+                 addFile(string.format("OEBPS/Text/resources/chapter%d.%s", file_index, cache_ext), img_data)
+            end
+        end  
+        
+        addFile(string.format("OEBPS/Text/chapter%d.xhtml", file_index), chapter_content)
     end
 
     -- OPF
@@ -566,17 +556,47 @@ function EpubExporter:packageEpub()
     -- NCX
     addFile("OEBPS/toc.ncx", self:createNCX())
 
-    -- 关闭压缩库
+    -- res /resources
+    local resources_path = H.joinPath(self.book_cache_path, "resources")
+    if util.directoryExists(resources_path) then
+        util.findFiles(resources_path, function(file_path, fname, attr)
+            if attr and attr.mode == "file" and H.is_str(fname) and fname ~= "" then
+                -- css 由后面添加
+                if not (fname:find("%.%.") and fname == "legado.css") then
+                    local file_content = util.readFromFile(file_path)
+                    if file_content and #file_content > 0 then
+                        addFile("OEBPS/Text/resources/" .. fname, file_content)
+                    else
+                        logger.warn("Empty or unreadable resource file:", file_path)
+                    end
+                else
+                    logger.warn("Skipped unsafe resource name:", fname)
+                end
+            end
+        end, false)
+    end
+
+    local css_content
+    if self.custom_css then
+        css_content = self.custom_css
+    else
+        local default_css_path = string.format("%s/Legado/main.css.lua", H.get_plugin_path())
+        if util.fileExists(default_css_path) then
+            css_content = util.readFromFile(default_css_path, "r")
+        end
+    end
+    if css_content then
+        addFile("OEBPS/Text/resources/legado.css", css_content)
+    end
+
     if epub and epub.close then
         epub:close()
     end
 
-    -- 重命名临时文件为最终文件
     local success = os.rename(epub_path_tmp, epub_path)
-
     if success then
-        logger.info("EPUB 创建成功:", epub_path)
-        logger.info("标题:", self.title, "作者:", self.author)
+        --logger.info("EPUB 创建成功:", epub_path)
+        --logger.info("标题:", self.title, "作者:", self.author)
 
         -- 清理缓存目录（可选）
         collectgarbage()
@@ -597,7 +617,6 @@ function EpubExporter:packageEpub()
     end
 end
 
--- 导出 EpubExporter 类
 M.EpubExporter = EpubExporter
 
 return M

@@ -30,7 +30,7 @@ end
 function M:init()
     local LegadoSpec, err_msg= H.require("Legado/LegadoSpec")
     if not LegadoSpec then
-        logger.err("LegadoSpec loading failed")
+        logger.err("LegadoSpec loading failed", err_msg)
         return 
     end
     local legado_spec = LegadoSpec[self.name]
