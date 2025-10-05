@@ -295,7 +295,7 @@ function ChapterListing:onMenuHold(item)
                     local dialog
                     local buttons = {
                         {{
-                            text = Icons.FA_DOWNLOAD .. " 缓存全书",
+                            text = Icons.FA_DOWNLOAD .. " 缓存全部",
                             callback = function()
                                 MessageBox:confirm("请确认缓存全部章节 (有的书源有频率限制)",
                                     function(result)
