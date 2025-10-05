@@ -297,43 +297,92 @@ function ChapterListing:onMenuHold(item)
                         {{
                             text = Icons.FA_DOWNLOAD .. " 缓存全部",
                             callback = function()
-                                MessageBox:confirm("请确认缓存全部章节 (有的书源有频率限制)",
-                                    function(result)
-                                        if result then
-                                            UIManager:close(dialog)
-                                            local status, err = pcall(function()
-                                                self:ChapterDownManager(0, 'next')
-                                            end)
-                                            if not status then
-                                                dbg.log('缓存全部章节出错：', tostring(err))
-                                            end
-                                        end
-                                    end, {
-                                        ok_text = "开始",
-                                        cancel_text = "取消"
-                                    })
+                               -- 传递刷新回调，在缓存完成后刷新章节列表
+                               Backend:cacheAllChapters(self.bookinfo, function(success)
+                                   if success then
+                                       self:refreshItems(true)
+                                   end
+                               end)
                             end
                         }},
                         {{
                             text = Icons.FA_ARROW_DOWN .. " 下载本章后全部",
                             callback = function()
                                 UIManager:close(dialog)
-                                MessageBox:confirm("请确认从本章开始缓存后续所有章节 (有的书源有频率限制)",
-                                    function(result)
+
+                                -- 获取章节总数，如果未初始化则从Backend获取
+                                if not self.all_chapters_count then
+                                    self.all_chapters_count = Backend:getChapterCount(self.bookinfo.cache_id)
+                                end
+
+                                local chapter_count = tonumber(self.all_chapters_count)
+                                local start_index = tonumber(chapters_index)
+
+                                if not chapter_count or chapter_count == 0 then
+                                    MessageBox:error("该书章节列表为空，请手动刷新目录后再缓存")
+                                    return
+                                end
+
+                                if start_index >= chapter_count then
+                                    MessageBox:notice("已经是最后一章")
+                                    return
+                                end
+
+                                local loading_msg = MessageBox:showloadingMessage("正在统计章节...")
+
+                                UIManager:nextTick(function()
+                                    -- 统计从当前章节到末尾的缓存状态
+                                    local cache_status = Backend:analyzeCacheStatus(self.bookinfo.cache_id, chapter_count)
+
+                                    if loading_msg then
+                                        if loading_msg.close then
+                                            loading_msg:close()
+                                        else
+                                            UIManager:close(loading_msg)
+                                        end
+                                    end
+
+                                    -- 筛选出从当前章节开始的未缓存章节
+                                    local remaining_uncached = {}
+                                    local remaining_total = chapter_count - start_index
+                                    local remaining_cached = 0
+
+                                    for _, chapter in ipairs(cache_status.uncached_chapters) do
+                                        if tonumber(chapter.chapters_index) >= start_index then
+                                            table.insert(remaining_uncached, chapter)
+                                        end
+                                    end
+
+                                    -- 计算剩余已缓存数量
+                                    remaining_cached = remaining_total - #remaining_uncached
+
+                                    if #remaining_uncached == 0 then
+                                        MessageBox:notice(string.format("本章及后续章节已全部缓存！\n剩余章节：%d", remaining_total))
+                                        return
+                                    end
+
+                                    MessageBox:confirm(string.format(
+                                        "书名：<<%s>>\n起始章节：第%d章\n\n剩余章节：%d\n已缓存：%d\n待缓存：%d\n\n是否开始缓存？",
+                                        self.bookinfo.name or "未命名",
+                                        start_index + 1,
+                                        remaining_total,
+                                        remaining_cached,
+                                        #remaining_uncached
+                                    ), function(result)
                                         if result then
-                                            UIManager:close(dialog)
-                                            local status, err = pcall(function()
-                                                local remaining_chapters = tonumber(self.all_chapters_count) - tonumber(chapters_index) + 1
-                                                self:ChapterDownManager(tonumber(chapters_index), 'next', remaining_chapters)
+                                            -- 使用Backend统一的缓存函数，支持自动重试和错误处理
+                                            -- 传递刷新回调，在缓存完成后刷新章节列表
+                                            Backend:startCacheChapters(self.bookinfo, remaining_uncached, chapter_count, nil, function(success)
+                                                if success then
+                                                    self:refreshItems(true)
+                                                end
                                             end)
-                                            if not status then
-                                                dbg.log('下载本章后全部出错：', tostring(err))
-                                            end
                                         end
                                     end, {
-                                        ok_text = "开始",
+                                        ok_text = "开始缓存",
                                         cancel_text = "取消"
                                     })
+                                end)
                             end
                         }},{{
                             text = table.concat({Icons.FA_BOOK, (is_comic and ' 导出 CBZ' or ' 导出 EPUB')}),
@@ -580,6 +629,25 @@ function ChapterListing:openMenu()
 
             end)
 
+        end,
+        align = "left",
+    }}, {{
+        text = Icons.FA_DOWNLOAD .. " 缓存全书",
+        callback = function()
+            Backend:cacheAllChapters(self.bookinfo)
+        end,
+        align = "left",
+    }}, {{
+        text = Icons.FA_BOOK .. " 导出书籍",
+        callback = function()
+            UIManager:close(dialog)
+
+            local is_comic = Backend:isBookTypeComic(self.bookinfo.cache_id)
+            if is_comic then
+                require("Legado/ExportDialog"):exportBookToCbz(self.bookinfo)
+            else
+                require("Legado/ExportDialog"):exportBookToEpub(self.bookinfo)
+            end
         end,
         align = "left",
     }}, {{
