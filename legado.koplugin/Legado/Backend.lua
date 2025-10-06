@@ -10,6 +10,7 @@ local util = require("util")
 local time = require("ui/time")
 
 local UIManager = require("ui/uimanager")
+local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
 
 -- 太旧版本缺少这个函数
@@ -22,7 +23,9 @@ local M = {
     settings_data = nil,
     task_pid_file = nil,
     apiClient = nil,
-    httpReq = nil
+    httpReq = nil,
+    -- 会话级别的临时配置
+    temp_disable_multithread = false,  -- 临时禁用多线程（本次会话）
 }
 
 local function wrap_response(data, err_message)
@@ -1396,17 +1399,77 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
         return true, "所有章节已缓存"
     end
 
-    -- task mark
-    local task_pid_info = self:getLuaConfig(self.task_pid_file)
-    local write_to_pid_file =function(chapter)
-        task_pid_info:saveSetting("chapter", {
-            chapters_index = chapter.chapters_index,
-            book_cache_id = chapter.book_cache_id,
-            stime = os.time(),
-        }):flush()
+    -- 获取线程数设置
+    local settings = self:getSettings()
+    local max_threads = tonumber(settings.download_threads) or 1
+    max_threads = math.max(1, math.min(16, max_threads)) -- 限制在1-16之间
+
+    -- 检查是否临时禁用多线程
+    if self.temp_disable_multithread then
+        max_threads = 1
+        logger.info("Multi-threading temporarily disabled for this session")
     end
 
-    local end_task_clean = function(is_complete, exit_msg) 
+    -- 判断书籍类型，设置超时时间（漫画120秒，普通书籍20秒）
+    local book_cache_id = chapter_down_tasks[1] and chapter_down_tasks[1].book_cache_id
+    local is_comic = book_cache_id and self:isBookTypeComic(book_cache_id) or false
+    local chapter_timeout = is_comic and 120 or 20
+
+    -- task mark
+    local task_pid_info = self:getLuaConfig(self.task_pid_file)
+    local write_to_pid_file = function(chapter_info)
+        -- 生成任务 ID：book_cache_id + chapters_index
+        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
+
+        -- 获取现有任务列表
+        local chapters = task_pid_info:readSetting("chapters") or {}
+
+        -- 添加/更新任务
+        chapters[task_id] = {
+            chapters_index = chapter_info.chapters_index,
+            book_cache_id = chapter_info.book_cache_id,
+            stime = os.time(),
+        }
+
+        task_pid_info:saveSetting("chapters", chapters):flush()
+    end
+
+    local remove_from_pid_file = function(chapter_info)
+        -- 生成任务 ID：book_cache_id + chapters_index
+        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
+
+        -- 获取现有任务列表
+        local chapters = task_pid_info:readSetting("chapters") or {}
+
+        -- 移除任务
+        chapters[task_id] = nil
+
+        if next(chapters) == nil then
+            -- 如果没有任务了，删除整个文件
+            task_pid_info:purge()
+            if util.fileExists(self.task_pid_file) then
+                util.removeFile(self.task_pid_file)
+            end
+        else
+            task_pid_info:saveSetting("chapters", chapters):flush()
+        end
+    end
+
+    local chapter_down_tasks_count = #chapter_down_tasks
+    local completed_count = 0
+    local running_count = 0
+    local current_index = 0
+    local has_error = false
+    local error_msg = nil
+    local timeout_timers = {}  -- 存储超时定时器
+
+    local end_task_clean = function(is_complete, exit_msg)
+        -- 清理所有超时定时器
+        for _, timer in ipairs(timeout_timers) do
+            UIManager:unschedule(timer)
+        end
+        timeout_timers = {}
+
         local status, err = pcall(function()
             task_pid_info:purge()
             if util.fileExists(self.task_pid_file) then
@@ -1421,72 +1484,452 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
     end
 
     local process_task
-    local chapter_down_tasks_count = #chapter_down_tasks
+    local start_next_task
 
-    -- Ensure the flow always reaches end_task_clean
-    process_task = function(dlChapter, index)
-        if not (H.is_num(index) and H.is_tbl(dlChapter) and dlChapter.chapters_index ~= nil and dlChapter.book_cache_id ~= nil) then
+    -- 启动下一个任务
+    start_next_task = function()
+        -- 如果已经出错，不再启动新任务
+        if has_error then
+            return
+        end
+
+        -- 启动所有可以启动的任务（直到达到最大并发数）
+        while running_count < max_threads and current_index < chapter_down_tasks_count do
+            current_index = current_index + 1
+            local dlChapter = chapter_down_tasks[current_index]
+
+            if not (H.is_tbl(dlChapter) and dlChapter.chapters_index ~= nil and dlChapter.book_cache_id ~= nil) then
                 logger.err("error: next chapter data source")
-                return end_task_clean(false, "task 参数错误：".. index or "")
-        else
-                -- flag instead of direct download
-                dlChapter.is_pre_loading = true
-                write_to_pid_file(dlChapter)
+                has_error = true
+                error_msg = "task 参数错误：" .. (current_index or "")
+                break
+            end
 
-                logger.dbg('Threaded tasks running: chapter_title:', dlChapter.title or nil)
-                
-                self:launchProcess(function()
-                    return self:_pDownloadChapter(dlChapter)
-                end, function(status, downloaded_chapter, r2)
-                    if not (status and H.is_tbl(downloaded_chapter) and downloaded_chapter.cacheFilePath) then
-                        
-                        logger.err("Failed to download chapter or job execution error: ", downloaded_chapter, r2)
-                        -- Determine if the task should stop on error
-                        return end_task_clean(false, "下载错误, 意外终止：" .. tostring(downloaded_chapter))
-                    else
-                        local cache_file_path = downloaded_chapter.cacheFilePath
-                        local chapters_index = tonumber(dlChapter.chapters_index)
-                        local book_cache_id = dlChapter.book_cache_id
+            -- 标记任务启动
+            running_count = running_count + 1
+            dlChapter.is_pre_loading = true
+            write_to_pid_file(dlChapter)
 
-                        logger.dbg('Download chapter successfully:', book_cache_id, chapters_index, cache_file_path)
+            logger.dbg('Threaded tasks running: chapter_title:', dlChapter.title or nil, 'thread:', current_index, '/', chapter_down_tasks_count)
 
-                        local ok, err = pcall(function()
-                            return self.dbManager:updateCacheFilePath(dlChapter, cache_file_path)
-                        end)
-                        if not ok then
-                            logger.err('Error saving download to database, updateCacheFilePath:', tostring(err))
-                        end
+            -- 为每个任务设置超时定时器（漫画120秒，普通书籍20秒）
+            local task_index = current_index
+            local task_completed = false
+            local timeout_timer = UIManager:scheduleIn(chapter_timeout, function()
+                if not task_completed then
+                    logger.err("Chapter download timeout:", dlChapter.title or task_index)
+                    running_count = running_count - 1
+                    has_error = true
+                    error_msg = string.format("章节下载超时: %s", dlChapter.title or ("第" .. task_index .. "章"))
 
-                        if has_result_progress_callback then
-                            ok, err = pcall(result_progress_callback, index)
-                            if not ok then
-                                logger.err("result_progress_callback run error")
-                            end
-                        end
+                    -- 检查是否所有任务完成
+                    if current_index >= chapter_down_tasks_count and running_count == 0 then
+                        return end_task_clean(false, error_msg)
+                    end
+                end
+            end)
+            table.insert(timeout_timers, timeout_timer)
+
+            -- 启动异步下载任务
+            self:launchProcess(function()
+                return self:_pDownloadChapter(dlChapter)
+            end, function(status, downloaded_chapter, r2)
+                -- 标记任务完成，取消超时
+                task_completed = true
+
+                -- 从 PID 文件中移除该任务（无论成功失败）
+                remove_from_pid_file(dlChapter)
+
+                -- 任务完成回调
+                running_count = running_count - 1
+
+                if not (status and H.is_tbl(downloaded_chapter) and downloaded_chapter.cacheFilePath) then
+                    logger.err("Failed to download chapter or job execution error: ", downloaded_chapter, r2)
+                    -- 标记错误但继续处理其他任务
+                    if not has_error then
+                        has_error = true
+                        error_msg = "下载错误：" .. tostring(downloaded_chapter)
+                    end
+                else
+                    local cache_file_path = downloaded_chapter.cacheFilePath
+                    local chapters_index = tonumber(dlChapter.chapters_index)
+                    local book_cache_id = dlChapter.book_cache_id
+
+                    logger.dbg('Download chapter successfully:', book_cache_id, chapters_index, cache_file_path)
+
+                    local ok, err = pcall(function()
+                        return self.dbManager:updateCacheFilePath(dlChapter, cache_file_path)
+                    end)
+                    if not ok then
+                        logger.err('Error saving download to database, updateCacheFilePath:', tostring(err))
                     end
 
-                    logger.dbg("task info - index,tasks_count:", index, chapter_down_tasks_count)
+                    completed_count = completed_count + 1
 
-                    if index < chapter_down_tasks_count then
-                        -- use event loop to avoid stack overflow
-                        -- 1s delay
-                        UIManager:scheduleIn(0.8, function()
-                            index = index + 1
-                            local next_chapter = chapter_down_tasks[index]
-                            process_task(next_chapter, index)
-                        end)
+                    if has_result_progress_callback then
+                        ok, err = pcall(result_progress_callback, completed_count)
+                        if not ok then
+                            logger.err("result_progress_callback run error")
+                        end
+                    end
+                end
+
+                logger.dbg("task info - completed/running/total:", completed_count, running_count, chapter_down_tasks_count)
+
+                -- 检查是否所有任务都完成
+                if completed_count >= chapter_down_tasks_count then
+                    logger.dbg("Legado.preLoadingChapters - All tasks completed")
+                    return end_task_clean(true, "任务结束")
+                elseif current_index >= chapter_down_tasks_count and running_count == 0 then
+                    -- 所有任务都已启动且全部完成（可能有失败）
+                    logger.dbg("Legado.preLoadingChapters - All tasks finished (some may have failed)")
+                    if has_error then
+                        return end_task_clean(false, error_msg or "部分章节下载失败")
                     else
-                        logger.dbg("Legado.preLoadingChapters - END")
                         return end_task_clean(true, "任务结束")
                     end
-                end)
-            end
+                elseif has_error and running_count == 0 then
+                    -- 发生错误且没有正在运行的任务，立即结束
+                    logger.dbg("Legado.preLoadingChapters - Error occurred, stopping")
+                    return end_task_clean(false, error_msg or "下载出错")
+                elseif not has_error then
+                    -- 没有错误才继续启动下一个任务
+                    UIManager:scheduleIn(0.1, function()
+                        start_next_task()
+                    end)
+                else
+                    -- 有错误但还有任务在运行，等待它们完成
+                    logger.dbg("Error occurred, waiting for running tasks to complete. Running:", running_count)
+                end
+            end)
+        end
+
+        -- 如果所有任务都已启动但还有任务在运行中，等待它们完成
+        if current_index >= chapter_down_tasks_count and running_count > 0 then
+            logger.dbg("All tasks started, waiting for completion. Running:", running_count)
+        end
     end
 
-    local begin_chapter = chapter_down_tasks[1]
-    logger.dbg("Legado.preLoadingChapters - START")
-    process_task(begin_chapter, 1)
+    logger.dbg("Legado.preLoadingChapters - START with", max_threads, "threads,",
+               "type:", is_comic and "comic" or "text",
+               "timeout:", chapter_timeout .. "s")
+    start_next_task()
     return true
+end
+
+-- 缓存全书功能：统计并返回未缓存章节信息
+function M:analyzeCacheStatus(book_cache_id, chapter_count)
+    local cached_count = 0
+    local uncached_chapters = {}
+
+    -- 遍历所有章节，统计和收集未缓存章节
+    for i = 0, chapter_count - 1 do
+        local chapter = self:getChapterInfoCache(book_cache_id, i)
+        if chapter then
+            local is_cached = false
+
+            -- 快速检查：如果数据库有缓存路径且文件存在
+            if chapter.cacheFilePath and util.fileExists(chapter.cacheFilePath) then
+                is_cached = true
+                cached_count = cached_count + 1
+            else
+                -- 完整检查并收集未缓存章节
+                local cache_chapter = self:getCacheChapterFilePath(chapter, true)
+                if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
+                    is_cached = true
+                    cached_count = cached_count + 1
+                else
+                    -- 未缓存，添加到列表
+                    chapter.call_event = 'next'
+                    table.insert(uncached_chapters, chapter)
+                end
+            end
+        end
+    end
+
+    return {
+        total_count = chapter_count,
+        cached_count = cached_count,
+        uncached_count = #uncached_chapters,
+        uncached_chapters = uncached_chapters
+    }
+end
+
+-- 缓存全书功能
+function M:cacheAllChapters(bookinfo, completion_callback)
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+        MessageBox:error("书籍信息错误")
+        return
+    end
+
+    -- 获取章节总数
+    local chapter_count = self:getChapterCount(bookinfo.cache_id)
+    if not chapter_count or chapter_count == 0 then
+        MessageBox:error("该书章节列表为空，请手动刷新目录后再缓存")
+        return
+    end
+
+    -- 显示统计进度
+    local loading_msg = MessageBox:showloadingMessage("正在统计章节...")
+
+    UIManager:nextTick(function()
+        -- 使用Backend的统计功能
+        local cache_status = self:analyzeCacheStatus(bookinfo.cache_id, chapter_count)
+
+        if loading_msg then
+            if loading_msg.close then
+                loading_msg:close()
+            else
+                UIManager:close(loading_msg)
+            end
+        end
+
+        if cache_status.uncached_count == 0 then
+            MessageBox:notice(string.format("全书已缓存完毕！\n总章节：%d", chapter_count))
+            -- 即使已全部缓存，也调用完成回调
+            if H.is_func(completion_callback) then
+                completion_callback(true)
+            end
+            return
+        end
+
+        -- 确认是否开始缓存
+        MessageBox:confirm(string.format(
+            "书名：<<%s>>\n作者：%s\n\n总章节：%d\n已缓存：%d\n待缓存：%d\n\n是否开始缓存全书？",
+            bookinfo.name or "未命名",
+            bookinfo.author or "未知作者",
+            chapter_count,
+            cache_status.cached_count,
+            cache_status.uncached_count
+        ), function(result)
+            if not result then
+                -- 用户取消，调用完成回调
+                if H.is_func(completion_callback) then
+                    completion_callback(false)
+                end
+                return
+            end
+
+            -- 直接开始缓存，使用已统计的未缓存章节列表，传递completion_callback
+            self:startCacheChapters(bookinfo, cache_status.uncached_chapters, chapter_count, nil, completion_callback)
+        end, {
+            ok_text = "开始缓存",
+            cancel_text = "取消"
+        })
+    end)
+end
+
+-- 开始缓存章节（统一所有下载功能）
+function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_count, completion_callback)
+    retry_count = retry_count or 0
+    local uncached_count = #uncached_chapters
+
+    -- 显示缓存进度
+    local title_text = string.format("%s - 正在缓存 %d/%d 章节", bookinfo.name, uncached_count, chapter_count)
+    if retry_count > 0 then
+        title_text = title_text .. string.format(" (重试 %d)", retry_count)
+    end
+
+    local cache_msg = MessageBox:progressBar("缓存进度", {
+        title = title_text,
+        max = uncached_count
+    })
+
+    if not cache_msg then
+        cache_msg = MessageBox:showloadingMessage("正在缓存章节...")
+    end
+
+    local cache_complete = false
+
+    -- 缓存进度回调
+    local cache_progress_callback = function(progress, err_msg)
+        if progress == false or progress == true then
+            if cache_msg and cache_msg.close then
+                cache_msg:close()
+            end
+            cache_complete = true
+
+            if progress == true then
+                -- 缓存完成，检查完整性
+                UIManager:nextTick(function()
+                    self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
+                end)
+            elseif err_msg then
+                -- 首次出错自动重试一次
+                if retry_count == 0 then
+                    UIManager:scheduleIn(1, function()
+                        self:startCacheChapters(bookinfo, uncached_chapters, chapter_count, 1, completion_callback)
+                    end)
+                    return
+                end
+
+                -- 重试后仍失败，显示重试对话框
+                local error_title = "⚠ 缓存出错"
+                local is_timeout = err_msg:find("超时")
+                local is_toc_empty = err_msg:find("目录为空") or err_msg:find("TOC") or err_msg:find("章节列表")
+
+                if is_timeout then
+                    error_title = "⚠ 下载超时"
+                elseif is_toc_empty then
+                    error_title = "⚠ 目录为空"
+                end
+
+                UIManager:nextTick(function()
+                    -- 检查是否启用了多线程
+                    local settings = self:getSettings()
+                    local current_threads = tonumber(settings.download_threads) or 1
+                    local has_multithread = current_threads > 1 and not self.temp_disable_multithread
+
+                    -- 构建其他按钮列表
+                    local other_buttons_list = {{
+                        {
+                            text = "查看已缓存",
+                            callback = function()
+                                self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
+                            end
+                        }
+                    }}
+
+                    -- 如果启用了多线程，添加"停用多线程并重试"按钮
+                    if has_multithread then
+                        table.insert(other_buttons_list[1], {
+                            text = "停用多线程并重试",
+                            callback = function()
+                                self.temp_disable_multithread = true
+                                logger.info("User disabled multi-threading for this session")
+                                self:cacheAllChapters(bookinfo)
+                            end
+                        })
+                    end
+
+                    -- 所有错误统一提供重试选项
+                    MessageBox:confirm(
+                        string.format("%s\n\n%s\n\n已自动重试1次仍失败，是否继续重试？", error_title, err_msg),
+                        function(result)
+                            if result then
+                                self:cacheAllChapters(bookinfo)
+                            else
+                                -- 用户取消重试，调用完成回调
+                                if H.is_func(completion_callback) then
+                                    completion_callback(false)
+                                end
+                            end
+                        end,
+                        {
+                            ok_text = "重试",
+                            cancel_text = "取消",
+                            other_buttons = other_buttons_list
+                        }
+                    )
+                end)
+            end
+        elseif H.is_num(progress) then
+            if cache_msg and cache_msg.reportProgress then
+                cache_msg:reportProgress(progress)
+            end
+        end
+    end
+
+    -- 开始缓存
+    self:preLoadingChapters(uncached_chapters, nil, cache_progress_callback)
+end
+
+-- 检查缓存完整性
+function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+        return
+    end
+
+    local checking_msg = MessageBox:showloadingMessage("正在检查缓存完整性...")
+
+    UIManager:nextTick(function()
+        local book_cache_id = bookinfo.cache_id
+        local missing_chapters = {}
+        local cached_count = 0
+
+        -- 检查每个章节
+        for i = 0, chapter_count - 1 do
+            local chapter = self:getChapterInfoCache(book_cache_id, i)
+            if chapter then
+                local cache_chapter = self:getCacheChapterFilePath(chapter, true)
+                local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
+
+                if is_cached then
+                    cached_count = cached_count + 1
+                else
+                    table.insert(missing_chapters, {
+                        index = i,
+                        title = chapter.title or string.format("第%d章", i + 1)
+                    })
+                end
+            end
+        end
+
+        if checking_msg then
+            if checking_msg.close then
+                checking_msg:close()
+            else
+                UIManager:close(checking_msg)
+            end
+        end
+
+        local missing_count = #missing_chapters
+
+        if missing_count == 0 then
+            -- 缓存完整，使用MessageBox:confirm提示
+            UIManager:nextTick(function()
+                MessageBox:confirm(
+                    string.format("✓ 缓存完成\n\n书名：%s\n总章节：%d\n已缓存：%d",
+                        bookinfo.name or "未命名",
+                        chapter_count,
+                        cached_count),
+                    function()
+                        -- 用户点击确定后，调用完成回调
+                        if H.is_func(completion_callback) then
+                            completion_callback(true)
+                        end
+                    end,
+                    {
+                        no_ok_button = true,
+                        cancel_text = "确定"
+                    }
+                )
+            end)
+        else
+            -- 构建缺失章节列表文本
+            local missing_text = ""
+            local max_display = 10
+            for i, missing in ipairs(missing_chapters) do
+                if i > max_display then
+                    missing_text = missing_text .. string.format("\n...还有 %d 章未缓存", missing_count - max_display)
+                    break
+                end
+                missing_text = missing_text .. string.format("\n第 %d 章: %s", missing.index + 1, missing.title)
+            end
+
+            MessageBox:confirm(string.format(
+                "缓存不完整！\n\n书名：<<%s>>\n总章节：%d\n已缓存：%d\n未缓存：%d\n%s\n\n是否重新缓存缺失章节？",
+                bookinfo.name or "未命名",
+                chapter_count,
+                cached_count,
+                missing_count,
+                missing_text
+            ), function(result)
+                if result then
+                    -- 重新缓存缺失章节
+                    self:cacheAllChapters(bookinfo)
+                else
+                    -- 用户取消重新缓存，调用完成回调
+                    if H.is_func(completion_callback) then
+                        completion_callback(false)
+                    end
+                end
+            end, {
+                ok_text = "重新缓存",
+                cancel_text = "完成"
+            })
+        end
+    end)
 end
 
 function M:getChapterInfoCache(bookCacheId, chapterIndex)
@@ -1768,23 +2211,46 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
     end
 end
 
-function M:getBackgroundTaskInfo()
+function M:getBackgroundTaskInfo(chapter_info)
     -- ffiUtil.isSubProcessDone(task_pid)
     local pid_file = self.task_pid_file
     if not util.fileExists(pid_file) then
         return false
     end
     local task_pid_info = self:getLuaConfig(pid_file)
-    local task_chapter = task_pid_info:readSetting("chapter")
-    if not H.is_tbl(task_chapter) then
+    local chapters = task_pid_info:readSetting("chapters")
+    if not H.is_tbl(chapters) then
         return false
     end
-    -- timeout
-    if task_chapter.stime and os.time() - task_chapter.stime > 7200 then
-        util.removeFile(pid_file)
-        return false
-    end 
-    return task_chapter
+
+    -- 清理超时任务
+    local current_time = os.time()
+    local has_timeout = false
+    for task_id, task_data in pairs(chapters) do
+        if task_data.stime and current_time - task_data.stime > 7200 then
+            chapters[task_id] = nil
+            has_timeout = true
+        end
+    end
+
+    -- 如果有超时任务被清理，更新文件
+    if has_timeout then
+        if next(chapters) == nil then
+            util.removeFile(pid_file)
+            return false
+        else
+            task_pid_info:saveSetting("chapters", chapters):flush()
+        end
+    end
+
+    -- 如果传入了 chapter_info，查询特定任务
+    if chapter_info and chapter_info.book_cache_id and chapter_info.chapters_index then
+        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
+        return chapters[task_id] or false
+    end
+
+    -- 如果没有传入参数，返回所有任务（如果有的话）
+    return next(chapters) ~= nil and chapters or false
 end
 
 function M:after_reader_chapter_show(chapter)
@@ -1869,10 +2335,8 @@ function M:downloadChapter(chapter, message_dialog)
     local chapterIndex = chapter.chapters_index
     local chapterName = chapter.name
 
-    local background_task_info = self:getBackgroundTaskInfo()
-    if H.is_tbl(background_task_info) and background_task_info.book_cache_id == bookCacheId and 
-            background_task_info.chapters_index == chapterIndex then
-            
+    local background_task_info = self:getBackgroundTaskInfo(chapter)
+    if background_task_info ~= false then
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 
