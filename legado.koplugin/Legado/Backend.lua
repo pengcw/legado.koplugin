@@ -23,7 +23,9 @@ local M = {
     settings_data = nil,
     task_pid_file = nil,
     apiClient = nil,
-    httpReq = nil
+    httpReq = nil,
+    -- 会话级别的临时配置
+    temp_disable_multithread = false,  -- 临时禁用多线程（本次会话）
 }
 
 local function wrap_response(data, err_message)
@@ -1402,6 +1404,12 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
     local max_threads = tonumber(settings.download_threads) or 1
     max_threads = math.max(1, math.min(16, max_threads)) -- 限制在1-16之间
 
+    -- 检查是否临时禁用多线程
+    if self.temp_disable_multithread then
+        max_threads = 1
+        logger.info("Multi-threading temporarily disabled for this session")
+    end
+
     -- 判断书籍类型，设置超时时间（漫画120秒，普通书籍20秒）
     local book_cache_id = chapter_down_tasks[1] and chapter_down_tasks[1].book_cache_id
     local is_comic = book_cache_id and self:isBookTypeComic(book_cache_id) or false
@@ -1410,11 +1418,41 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
     -- task mark
     local task_pid_info = self:getLuaConfig(self.task_pid_file)
     local write_to_pid_file = function(chapter_info)
-        task_pid_info:saveSetting("chapter", {
+        -- 生成任务 ID：book_cache_id + chapters_index
+        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
+
+        -- 获取现有任务列表
+        local chapters = task_pid_info:readSetting("chapters") or {}
+
+        -- 添加/更新任务
+        chapters[task_id] = {
             chapters_index = chapter_info.chapters_index,
             book_cache_id = chapter_info.book_cache_id,
             stime = os.time(),
-        }):flush()
+        }
+
+        task_pid_info:saveSetting("chapters", chapters):flush()
+    end
+
+    local remove_from_pid_file = function(chapter_info)
+        -- 生成任务 ID：book_cache_id + chapters_index
+        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
+
+        -- 获取现有任务列表
+        local chapters = task_pid_info:readSetting("chapters") or {}
+
+        -- 移除任务
+        chapters[task_id] = nil
+
+        if next(chapters) == nil then
+            -- 如果没有任务了，删除整个文件
+            task_pid_info:purge()
+            if util.fileExists(self.task_pid_file) then
+                util.removeFile(self.task_pid_file)
+            end
+        else
+            task_pid_info:saveSetting("chapters", chapters):flush()
+        end
     end
 
     local chapter_down_tasks_count = #chapter_down_tasks
@@ -1498,6 +1536,9 @@ function M:preLoadingChapters(chapter, download_chapter_count, result_progress_c
             end, function(status, downloaded_chapter, r2)
                 -- 标记任务完成，取消超时
                 task_completed = true
+
+                -- 从 PID 文件中移除该任务（无论成功失败）
+                remove_from_pid_file(dlChapter)
 
                 -- 任务完成回调
                 running_count = running_count - 1
@@ -1734,6 +1775,33 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
                 end
 
                 UIManager:nextTick(function()
+                    -- 检查是否启用了多线程
+                    local settings = self:getSettings()
+                    local current_threads = tonumber(settings.download_threads) or 1
+                    local has_multithread = current_threads > 1 and not self.temp_disable_multithread
+
+                    -- 构建其他按钮列表
+                    local other_buttons_list = {{
+                        {
+                            text = "查看已缓存",
+                            callback = function()
+                                self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
+                            end
+                        }
+                    }}
+
+                    -- 如果启用了多线程，添加"停用多线程并重试"按钮
+                    if has_multithread then
+                        table.insert(other_buttons_list[1], {
+                            text = "停用多线程并重试",
+                            callback = function()
+                                self.temp_disable_multithread = true
+                                logger.info("User disabled multi-threading for this session")
+                                self:cacheAllChapters(bookinfo)
+                            end
+                        })
+                    end
+
                     -- 所有错误统一提供重试选项
                     MessageBox:confirm(
                         string.format("%s\n\n%s\n\n已自动重试1次仍失败，是否继续重试？", error_title, err_msg),
@@ -1750,14 +1818,7 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
                         {
                             ok_text = "重试",
                             cancel_text = "取消",
-                            other_buttons = {{
-                                {
-                                    text = "查看已缓存",
-                                    callback = function()
-                                        self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
-                                    end
-                                }
-                            }}
+                            other_buttons = other_buttons_list
                         }
                     )
                 end)
@@ -2150,23 +2211,46 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
     end
 end
 
-function M:getBackgroundTaskInfo()
+function M:getBackgroundTaskInfo(chapter_info)
     -- ffiUtil.isSubProcessDone(task_pid)
     local pid_file = self.task_pid_file
     if not util.fileExists(pid_file) then
         return false
     end
     local task_pid_info = self:getLuaConfig(pid_file)
-    local task_chapter = task_pid_info:readSetting("chapter")
-    if not H.is_tbl(task_chapter) then
+    local chapters = task_pid_info:readSetting("chapters")
+    if not H.is_tbl(chapters) then
         return false
     end
-    -- timeout
-    if task_chapter.stime and os.time() - task_chapter.stime > 7200 then
-        util.removeFile(pid_file)
-        return false
-    end 
-    return task_chapter
+
+    -- 清理超时任务
+    local current_time = os.time()
+    local has_timeout = false
+    for task_id, task_data in pairs(chapters) do
+        if task_data.stime and current_time - task_data.stime > 7200 then
+            chapters[task_id] = nil
+            has_timeout = true
+        end
+    end
+
+    -- 如果有超时任务被清理，更新文件
+    if has_timeout then
+        if next(chapters) == nil then
+            util.removeFile(pid_file)
+            return false
+        else
+            task_pid_info:saveSetting("chapters", chapters):flush()
+        end
+    end
+
+    -- 如果传入了 chapter_info，查询特定任务
+    if chapter_info and chapter_info.book_cache_id and chapter_info.chapters_index then
+        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
+        return chapters[task_id] or false
+    end
+
+    -- 如果没有传入参数，返回所有任务（如果有的话）
+    return next(chapters) ~= nil and chapters or false
 end
 
 function M:after_reader_chapter_show(chapter)
@@ -2251,10 +2335,8 @@ function M:downloadChapter(chapter, message_dialog)
     local chapterIndex = chapter.chapters_index
     local chapterName = chapter.name
 
-    local background_task_info = self:getBackgroundTaskInfo()
-    if H.is_tbl(background_task_info) and background_task_info.book_cache_id == bookCacheId and 
-            background_task_info.chapters_index == chapterIndex then
-            
+    local background_task_info = self:getBackgroundTaskInfo(chapter)
+    if background_task_info ~= false then
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 
