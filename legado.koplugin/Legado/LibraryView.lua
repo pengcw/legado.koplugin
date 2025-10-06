@@ -8,6 +8,7 @@ local UIManager = require("ui/uimanager")
 local NetworkMgr = require("ui/network/manager")
 local Menu = require("ui/widget/menu")
 local Device = require("device")
+local ButtonDialog = require("ui/widget/buttondialog")
 local T = ffiUtil.template
 local _ = require("gettext")
 
@@ -352,6 +353,33 @@ function LibraryView:openMenu(dimen)
                 ok_text = "切换",
                 cancel_text = "取消"
             })
+        end,
+        align = unified_align,
+    }}, {{
+        text = string.format("%s 下载线程数: %d", Icons.FA_DOWNLOAD, settings.download_threads or 1),
+        callback = function()
+            UIManager:close(dialog)
+            local SpinWidget = require("ui/widget/spinwidget")
+            local thread_spin = SpinWidget:new{
+                value = settings.download_threads or 1,
+                value_min = 1,
+                value_max = 16,
+                value_step = 1,
+                value_hold_step = 2,
+                ok_text = "确定",
+                title_text = "设置下载线程数",
+                info_text = "建议根据网络状况选择4-8线程",
+                callback = function(spin)
+                    local threads = spin.value
+                    settings.download_threads = threads
+                    Backend:HandleResponse(Backend:saveSettings(settings), function()
+                        MessageBox:notice(string.format("下载线程数已设置为: %d", threads))
+                    end, function(err_msg)
+                        MessageBox:error('设置失败：', tostring(err_msg))
+                    end)
+                end
+            }
+            UIManager:show(thread_spin)
         end,
         align = unified_align,
     }}, {{
@@ -1480,6 +1508,38 @@ local function init_book_menu(parent)
                     MessageBox:notice("已调用生成，请到 Home 目录查看")
                 end
             }}, {{
+                text = '缓存/导出',
+                callback = function()
+                    local is_comic = Backend:isBookTypeComic(bookinfo.cache_id)
+                    local subdialog
+                    local buttons = {
+                        {{
+                            text = Icons.FA_DOWNLOAD .. " 缓存全书",
+                            callback = function()
+                                UIManager:close(subdialog)
+                                self.parent_ref:cacheAllChapters(bookinfo)
+                            end
+                        }},
+                        {{
+                            text = table.concat({Icons.FA_BOOK, (is_comic and ' 导出 CBZ' or ' 导出 EPUB')}),
+                            callback = function()
+                                UIManager:close(subdialog)
+                                if is_comic then
+                                    require("Legado/ExportDialog"):exportBookToCbz(bookinfo)
+                                else
+                                    require("Legado/ExportDialog"):exportBookToEpub(bookinfo)
+                                end
+                            end
+                        }}
+                    }
+                    subdialog = ButtonDialog:new{
+                        title = bookinfo.name or "请选择操作",
+                        title_align = "center",
+                        buttons = buttons,
+                    }
+                    UIManager:show(subdialog)
+                end
+            }}, {{
                 text = '换源',
                 callback = function()
                     NetworkMgr:runWhenOnline(function()
@@ -1760,6 +1820,11 @@ function LibraryView:currentSelectedBook(book)
         self._selected_book = book
     end
     return self._selected_book
+end
+
+-- 缓存全书功能
+function LibraryView:cacheAllChapters(bookinfo)
+    Backend:cacheAllChapters(bookinfo)
 end
 
 return LibraryView
