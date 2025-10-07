@@ -394,7 +394,7 @@ function M:saveBookProgress(chapter, callback)
             index = chapters_index,
             url = bookUrl,
             title = title,
-            pos = 0.1,
+            pos = 0,
         })
     end, callback, {
         timeouts = {3, 5}

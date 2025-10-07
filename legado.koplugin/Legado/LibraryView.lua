@@ -8,7 +8,6 @@ local UIManager = require("ui/uimanager")
 local NetworkMgr = require("ui/network/manager")
 local Menu = require("ui/widget/menu")
 local Device = require("device")
-local ButtonDialog = require("ui/widget/buttondialog")
 local T = ffiUtil.template
 local _ = require("gettext")
 
@@ -1062,7 +1061,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                         reading_chapter.isDownLoaded = true
                         Backend:HandleResponse(Backend:ChangeChapterCache(reading_chapter), function(data)
                             MessageBox:notice("刷新成功")
-                            UIManager:nextChapter(function()
+                            UIManager:nextTick(function()
                                 library_obj:loadAndRenderChapter(reading_chapter)
                             end)
                         end, function(err_msg)
@@ -1508,38 +1507,6 @@ local function init_book_menu(parent)
                     MessageBox:notice("已调用生成，请到 Home 目录查看")
                 end
             }}, {{
-                text = '缓存/导出',
-                callback = function()
-                    local is_comic = Backend:isBookTypeComic(bookinfo.cache_id)
-                    local subdialog
-                    local buttons = {
-                        {{
-                            text = Icons.FA_DOWNLOAD .. " 缓存全书",
-                            callback = function()
-                                UIManager:close(subdialog)
-                                self.parent_ref:cacheAllChapters(bookinfo)
-                            end
-                        }},
-                        {{
-                            text = table.concat({Icons.FA_BOOK, (is_comic and ' 导出 CBZ' or ' 导出 EPUB')}),
-                            callback = function()
-                                UIManager:close(subdialog)
-                                if is_comic then
-                                    require("Legado/ExportDialog"):exportBookToCbz(bookinfo)
-                                else
-                                    require("Legado/ExportDialog"):exportBookToEpub(bookinfo)
-                                end
-                            end
-                        }}
-                    }
-                    subdialog = ButtonDialog:new{
-                        title = bookinfo.name or "请选择操作",
-                        title_align = "center",
-                        buttons = buttons,
-                    }
-                    UIManager:show(subdialog)
-                end
-            }}, {{
                 text = '换源',
                 callback = function()
                     NetworkMgr:runWhenOnline(function()
@@ -1759,7 +1726,7 @@ function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible)
         self.book_toc:updateReturnCallback(onReturnCallBack)
 
         if visible == true then
-            self.book_toc:refreshItems()
+            self.book_toc:refreshItems(nil, true)
             UIManager:show(self.book_toc)
         end
     end
@@ -1820,11 +1787,6 @@ function LibraryView:currentSelectedBook(book)
         self._selected_book = book
     end
     return self._selected_book
-end
-
--- 缓存全书功能
-function LibraryView:cacheAllChapters(bookinfo)
-    Backend:cacheAllChapters(bookinfo)
 end
 
 return LibraryView
