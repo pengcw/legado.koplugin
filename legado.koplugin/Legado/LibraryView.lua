@@ -207,7 +207,7 @@ function LibraryView:openBrowserMenu(file)
                             logger.info("更换封面: 目标路径 =", target_cover)
 
                             -- 删除旧的缓存封面
-                            local extensions = {'jpg', 'jpeg', 'png', 'webp', 'gif'}
+                            local extensions = {'jpg', 'jpeg', 'png', 'webp','bmp', 'tiff'}
                             for _, old_ext in ipairs(extensions) do
                                 local old_cover = string.format("%s.%s", cover_cache_path, old_ext)
                                 if util.fileExists(old_cover) and old_cover ~= target_cover then

@@ -82,7 +82,7 @@ function CbzExporter:package()
         if extension then
             local valid_extensions = {
                 jpg = true, jpeg = true, png = true, 
-                gif = true, webp = true, bmp = true
+                gif = true, webp = true, bmp = true, tiff = true
             }
             if valid_extensions[extension:lower()] then
                 return extension

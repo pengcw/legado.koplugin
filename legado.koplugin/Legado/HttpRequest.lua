@@ -53,6 +53,8 @@ local function get_image_format_head8(image_data)
         return "bmp"
     elseif header:sub(1, 4) == "\x52\x49\x46\x46" then
         return "webp"
+    elseif header:sub(1, 4) == "\x49\x49\x2A\x00" or header:sub(1, 4) == "\x4D\x4D\x00\x2A" then
+        return "tiff"
     end
 end
 
@@ -80,7 +82,7 @@ local function pGetUrlContent(options, is_create)
     local use_custom_create = is_create and parsed and parsed.scheme == "http"
     if is_pic then
          -- Image requests prioritize
-        default_headers["Accept"] = "image/png, image/jpeg, image/bmp, image/webp;q=0.9, image/gif;q=0.8, image/*;q=0.7, */*;q=0.6"
+        default_headers["Accept"] = "image/png, image/jpeg, image/webp, image/bmp;q=0.9, image/tiff;q=0.8, image/*;q=0.7"
     end
     local request = {
         url = url,
