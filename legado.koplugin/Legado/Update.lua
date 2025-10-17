@@ -83,7 +83,7 @@ function M:ota(ok_callback)
                 cancel_text = "稍后"
             })
         elseif H.is_tbl(response) then
-            MessageBox:notice(response.error or "没有新版本")
+            MessageBox:success(response.error or "已是最新版本")
         end
     end)
 end
@@ -185,7 +185,10 @@ function M:_installUpdate(update_zip_path)
     -- zip plugins/xxx
     local target_unzip_dir = H.getKoreaderDirectory()
 
-    local unzip_command = string.format("unzip -qqo '%s' -d '%s'", update_zip_path, target_unzip_dir)
+    local update_zip_path_escaped = update_zip_path:gsub("'", "'\\''")
+    local target_unzip_escaped = target_unzip_dir:gsub("'", "'\\''")
+
+    local unzip_command = string.format("unzip -qqo '%s' -d '%s'", update_zip_path_escaped, target_unzip_escaped)
     logger.dbg("installUpdate - Executing: " .. unzip_command)
     local ret_code, err_code, err_msg_os = os.execute(unzip_command)
     if ret_code ~= 0 then

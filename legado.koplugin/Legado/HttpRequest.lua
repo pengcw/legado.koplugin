@@ -12,7 +12,8 @@ local DEFAULT_BLOCK_TIMEOUT = 60
 local DEFAULT_TOTAL_TIMEOUT = -1   
 
 local default_headers = {
-    ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+    -- Use a modern UA to avoid CDN/WAF blocking outdated or niche devices
+    ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 }
 
 local function get_extension_from_mimetype(content_type)
@@ -75,6 +76,12 @@ local function pGetUrlContent(options, is_create)
     end
 
     local sink = {}
+    -- Only use the custom TCP creator for plain HTTP; leave HTTPS to default so TLS/SNI works properly
+    local use_custom_create = is_create and parsed and parsed.scheme == "http"
+    if is_pic then
+         -- Image requests prioritize
+        default_headers["Accept"] = "image/png, image/jpeg, image/bmp, image/webp;q=0.9, image/gif;q=0.8, image/*;q=0.7, */*;q=0.6"
+    end
     local request = {
         url = url,
         method = options.method or "GET",
@@ -83,8 +90,8 @@ local function pGetUrlContent(options, is_create)
             (maxtime and socketutil.file_sink(file_fp) or ltn12.sink.file(file_fp)),
         source = options.source,
         redirect = options.redirect,
-        -- Strictly customized TCP GitHub API error
-        create = is_create and socketutil.tcp,
+        -- Strictly customized TCP only for HTTP; HTTPS relies on underlying SSL stack for SNI/TLS
+        create = use_custom_create and socketutil.tcp or nil,
     }
 
     socketutil:set_timeout(timeout, maxtime)

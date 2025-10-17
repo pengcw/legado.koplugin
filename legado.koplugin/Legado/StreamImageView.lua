@@ -23,6 +23,12 @@ function M:init()
 end
 
 function M:fetchAndShow(options)
+    if not H.is_tbl(options) or not H.is_tbl(options.chapter) then
+        logger.err("StreamImageView:fetchAndShow - 无效的options或options.chapter")
+        MessageBox:notice("参数错误", "无法打开图片浏览器。")
+        return
+    end
+
     self.chapter = options.chapter
     self.on_return_callback = options.on_return_callback
     self.bookinfo = Backend:getBookInfoCache(self.chapter.book_cache_id)
@@ -74,6 +80,7 @@ local function downloadImage(img_src)
             return
         end
     end, function(err_msg)
+        logger.warn("图片下载失败，错误信息：", err_msg)
         return
     end)
 end
@@ -109,6 +116,7 @@ function M:loadChatperInitImage(chapter)
         return self.image
     else
         logger.err("获取章节图片列表失败 Init", err_msg)
+        -- TODO 非漫画或者加载失败
         MessageBox:notice("内容加载失败", err_msg)
         return RenderImage:renderImageFile("resources/koreader.png", false)
     end
@@ -269,15 +277,14 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
 
     end, function(state, response)
 
-        if state == true then
-
-            if H.is_tbl(response['new_chapter_imglist']) and #response['new_chapter_imglist'] > 0 then
-                self.chapter_imglist = response['new_chapter_imglist']
+        if state == true and H.is_tbl(response) then
+            -- 检查并更新章节图片列表
+            if H.is_tbl(response.new_chapter_imglist) and #response.new_chapter_imglist > 0 then
+                self.chapter_imglist = response.new_chapter_imglist
             end
 
-            self.image = response['self_image']
-
-            if self.image then
+            if response.self_image then
+                self.image = response.self_image
 
                 if not self.images_keep_pan_and_zoom then
                     self._center_x_ratio = 0.5
@@ -286,7 +293,9 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
                 end
 
                 self.image = self:get_image_bb(self.image)
-                self.chapter_imglist_cur = response['chapter_imglist_cur']
+                if response.chapter_imglist_cur then
+                    self.chapter_imglist_cur = response.chapter_imglist_cur
+                end
 
                 self:update()
             else

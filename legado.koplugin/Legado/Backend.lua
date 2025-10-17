@@ -37,24 +37,6 @@ local function wrap_response(data, err_message)
     return response
 end
 
-local function get_img_src(html)
-    if type(html) ~= "string" then
-        return {}
-    end
-
-    local img_sources = {}
-    -- local img_pattern = "<img[^>]*src%s*=%s*([\"']?)([^%s\"'>]+)%1[^>]*>"
-    local img_pattern = '<img[^>]-src%s*=%s*["\']?([^"\'>%s]+)["\']?[^>]*>'
-
-    for src in html:gmatch(img_pattern) do
-        if src and src ~= "" then
-            table.insert(img_sources, src)
-        end
-    end
-
-    return img_sources
-end
-
 local function get_url_extension(url)
     if type(url) ~= "string" or url == "" then
         return ""
@@ -216,12 +198,12 @@ function M:_isLegadoApp() return self.settings_data.data.server_type == 1 end
 
 function M:loadApiProvider()
     local client
-    if self:_isLegadoApp() then
-        client = require("Legado/web_android_app")
-    elseif self:_isReader3() then
+    if self:_isReader3() then
         client = require("Legado/web_reader3")
     elseif self:_isQingread() then
         client = require("Legado/web_qread")
+    else
+        client = require("Legado/web_android_app")
     end
     self.apiClient = client:new{
         settings = self:getSettings()
@@ -234,32 +216,42 @@ function M:initialize()
         return fn and fn() == true and util.removeFile(file_path)
     end)
     if not ok then
-        logger.err("run_once_task loading loading failed", err_msg)
+        logger.err("run_once_task loading loading failed:", err_msg)
     end
 
     self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
-    if self.settings_data and not self.settings_data.data['server_address'] then
+
+    if H.is_tbl(self.settings_data) and not (H.is_tbl(self.settings_data.data) and 
+                self.settings_data.data['current_conf_name']) then
         self.settings_data.data = {
-            chapter_sorting_mode = "chapter_descending",
-            server_address = 'http://127.0.0.1:1122',
-            server_address_md5 = 'f528764d624db129b32c21fbca0cb8d6',
-            server_type = 1,
-            reader3_un = '',
-            reader3_pwd = '',
-            stream_image_view = nil,
-            disable_browser = nil,
-            sync_reading = nil,
-            open_at_last_read = nil,
+                chapter_sorting_mode = "chapter_descending",
+                server_address = "http://127.0.0.1:1122",
+                current_conf_name = "default",
+                web_configs ={
+                    ["default"] = {
+                        url = "http://127.0.0.1:1122",
+                        ["type"] = 1,
+                        desc = "",
+                    },
+                },
+                server_type = 1,
+                reader3_un = '',
+                reader3_pwd = '',
+                stream_image_view = nil,
+                disable_browser = nil,
+                sync_reading = nil,
+                open_at_last_read = nil,
         }
         self.settings_data:flush()
     end
 
-    self:loadApiProvider()
     local BookInfoDB = require("Legado/BookInfoDB")
     self.dbManager = BookInfoDB:new({
         dbPath = H.getTempDirectory() .. "/bookinfo.db"
     })
+    
+    self:loadApiProvider()
 end
 
 function M:installPatches()
@@ -317,7 +309,7 @@ function M:refreshLibraryCache(last_refresh_time)
         return wrap_response(nil, '处理中')
     end
     local ret, err_msg = self.apiClient:getBookshelf(function(response)
-        local bookShelfId = self:getServerPathCode()
+        local bookShelfId = self:getCurrentBookShelfId()
         local status, err = pcall(function()
             return self.dbManager:upsertBooks(bookShelfId, response.data)
         end)
@@ -333,7 +325,7 @@ function M:addBookToLibrary(bookinfo)
     return wrap_response(self.apiClient:saveBook(bookinfo, function(response)
         -- isReader3Only = true
         if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
-            local bookShelfId = self:getServerPathCode()
+            local bookShelfId = self:getCurrentBookShelfId()
             local db_save = {response.data}
             local status, err = pcall(function()
                 return self.dbManager:upsertBooks(bookShelfId, db_save, true)
@@ -413,7 +405,7 @@ end
 function M:changeBookSource(newBookSource)
     return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
         if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
-            local bookShelfId = self:getServerPathCode()
+            local bookShelfId = self:getCurrentBookShelfId()
             local response = {response.data}
             local status, err = pcall(function()
                 return self.dbManager:upsertBooks(bookShelfId, response, true)
@@ -1179,7 +1171,7 @@ function M:_pDownloadChapter(chapter, message_dialog, is_recursive)
     local response = self:pGetChapterContent(chapter)
 
     if is_recursive ~= true and H.is_tbl(response) and response.type == 'ERROR' and 
-            self.apiClient:isNeedLogin(response.message) == true then
+            self.apiClient:isNeedLogin({ data = response.message}) == true then
         self.apiClient:reader3Token(nil)
         return self:_pDownloadChapter(chapter, message_dialog, true)
     end
@@ -1292,6 +1284,24 @@ function M:findNextChapter(current_chapter, is_downloaded)
 
     return next_chapter
 
+end
+
+local function get_img_src(html)
+    if type(html) ~= "string" then
+        return {}
+    end
+
+    local img_sources = {}
+    -- local img_pattern = "<img[^>]*src%s*=%s*([\"']?)([^%s\"'>]+)%1[^>]*>"
+    local img_pattern = '<img[^>]-src%s*=%s*["\']?([^"\'>%s]+)["\']?[^>]*>'
+
+    for src in html:gmatch(img_pattern) do
+        if src and src ~= "" then
+            table.insert(img_sources, src)
+        end
+    end
+
+    return img_sources
 end
 
 function M:getPorxyPicUrls(bookUrl, content)
@@ -1485,9 +1495,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     -- 启动下一个任务
     start_next_task = function()
         -- 如果已经出错，不再启动新任务
-        if has_error then
-            return
-        end
+        if has_error then return end
 
         -- 启动所有可以启动的任务（直到达到最大并发数）
         while running_count < max_threads and current_index < chapter_down_tasks_count do
@@ -1618,42 +1626,55 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     return true
 end
 
--- 缓存全书功能：统计并返回未缓存章节信息
-function M:analyzeCacheStatus(book_cache_id, chapter_count)
-    local cached_count = 0
-    local uncached_chapters = {}
+-- 统计全书章节信息
+function M:analyzeCacheStatus(book_cache_id, chapter_count, stats_only)
+    if not (H.is_num(chapter_count) and chapter_count > 0 ) then
+        chapter_count = self:getChapterCount(book_cache_id)
+    end
+    return self:analyzeCacheStatusForRange(book_cache_id, 0, chapter_count - 1)
+end
 
-    -- 遍历所有章节，统计和收集未缓存章节
-    for i = 0, chapter_count - 1 do
+-- 统计并返回指定范围内的未缓存章节信息
+function M:analyzeCacheStatusForRange(book_cache_id, start_index, end_index, stats_only)
+    local result = { total_count = 0, cached_count = 0, uncached_count = 0, cached_chapters = {}, uncached_chapters = {} }
+    if not (H.is_str(book_cache_id) and H.is_num(start_index) and H.is_num(end_index)) then
+        logger.err("analyzeCacheStatusForRange err - book_cache_id, start_index, end_index: ",book_cache_id, start_index, end_index)
+        return result
+    end
+    if start_index < 0 or end_index < start_index then
+        logger.err("analyzeCacheStatusForRange err - start_index, end_index: ",start_index, end_index)
+        return result
+    end
+    for i = start_index, end_index do
+        -- local all_chapters = self:getBookChapterPlusCache(book_cache_id)
         local chapter = self:getChapterInfoCache(book_cache_id, i)
-        if chapter then
+        if H.is_tbl(chapter) then
             local is_cached = false
-
             -- 快速检查：如果数据库有缓存路径且文件存在
             if chapter.cacheFilePath and util.fileExists(chapter.cacheFilePath) then
                 is_cached = true
-                cached_count = cached_count + 1
             else
                 -- 完整检查并收集未缓存章节
                 local cache_chapter = self:getCacheChapterFilePath(chapter, true)
-                if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
+                if H.is_tbl(cache_chapter) and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
                     is_cached = true
-                    cached_count = cached_count + 1
-                else
-                    -- 未缓存，添加到列表
-                    chapter.call_event = 'next'
-                    table.insert(uncached_chapters, chapter)
                 end
             end
+            if is_cached == true then 
+                result.cached_count = result.cached_count + 1
+                if not stats_only then table.insert(result.cached_chapters, chapter) end
+            else
+                result.uncached_count = result.uncached_count + 1
+                if not stats_only then
+                    chapter.call_event = 'next'
+                    table.insert(result.uncached_chapters, chapter)
+                end
+            end
+            -- 手动计算有效总章数
+            result.total_count = result.total_count + 1
         end
     end
-
-    return {
-        total_count = chapter_count,
-        cached_count = cached_count,
-        uncached_count = #uncached_chapters,
-        uncached_chapters = uncached_chapters
-    }
+    return result
 end
 
 function M:getChapterInfoCache(bookCacheId, chapterIndex)
@@ -1666,7 +1687,7 @@ function M:getChapterCount(bookCacheId)
 end
 
 function M:getBookInfoCache(bookCacheId)
-    local bookShelfId = self:getServerPathCode()
+    local bookShelfId = self:getCurrentBookShelfId()
     return self.dbManager:getBookinfo(bookShelfId, bookCacheId)
 end
 
@@ -1675,7 +1696,7 @@ function M:getcompleteReadAheadChapters(current_chapter)
 end
 
 function M:manuallyPinToTop(bookCacheId, sortOrder)
-    local bookShelfId = self:getServerPathCode()
+    local bookShelfId = self:getCurrentBookShelfId()
     if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
         return wrap_response(nil, '参数错误')
     end
@@ -1686,7 +1707,7 @@ function M:manuallyPinToTop(bookCacheId, sortOrder)
 end
 
 function M:getBookShelfCache()
-    local bookShelfId = self:getServerPathCode()
+    local bookShelfId = self:getCurrentBookShelfId()
     return self.dbManager:getAllBooksByUI(bookShelfId)
 end
 
@@ -1695,7 +1716,7 @@ function M:autoPinToTop(bookCacheId, sortOrder)
         -- If it is manually placed on top
         return wrap_response(true)
     end
-    local bookShelfId = self:getServerPathCode()
+    local bookShelfId = self:getCurrentBookShelfId()
     if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
         return wrap_response(nil, '参数错误')
     end
@@ -1712,7 +1733,7 @@ function M:getChapterLastUpdateTime(bookCacheId)
 end
 
 function M:getBookChapterCache(bookCacheId)
-    local bookShelfId = self:getServerPathCode()
+    local bookShelfId = self:getCurrentBookShelfId()
 
     local is_desc_sort = true
     if self.settings_data.data['chapter_sorting_mode'] == 'chapter_ascending' then
@@ -1723,7 +1744,7 @@ function M:getBookChapterCache(bookCacheId)
 end
 
 function M:getBookChapterPlusCache(bookCacheId)
-    local bookShelfId = self:getServerPathCode()
+    local bookShelfId = self:getCurrentBookShelfId()
     local chapter_data = self.dbManager:getAllChapters(bookCacheId)
     return chapter_data
 end
@@ -1736,7 +1757,7 @@ function M:cleanBookCache(book_cache_id)
     if self:getBackgroundTaskInfo() ~= false then
         return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
     end
-    local bookShelfId = self:getServerPathCode()
+    local bookShelfId = self:getCurrentBookShelfId()
 
     self.dbManager:clearBook(bookShelfId, book_cache_id)
 
@@ -1756,7 +1777,7 @@ function M:cleanAllBookCaches()
         return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
     end
 
-    local bookShelfId = self:getServerPathCode()
+    local bookShelfId = self:getCurrentBookShelfId()
     self.dbManager:clearBooks(bookShelfId)
     self:closeDbManager()
     local books_cache_dir = H.getTempDirectory()
@@ -1883,6 +1904,31 @@ function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
     checkTask()
 end
 
+function M:get_default_cover_cache(book_cache_id)
+    if not (H.is_str(book_cache_id) and book_cache_id ~= "") then
+        return nil
+    end
+    local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
+    local dir, image_filename = util.splitFilePathName(cover_path_no_ext)
+    if not (dir and image_filename) then
+        logger.err(string.format("get_default_cover_cache: invalid name (%s, %s)", tostring(dir), tostring(image_filename)))
+        return nil
+    end
+
+    if not util.pathExists(dir) then
+        return nil
+    end
+
+    local extensions = { "jpg", "jpeg", "png", "webp", "bmp", "tiff" }
+    for _, ext in ipairs(extensions) do
+        local cover_full_path = string.format("%s.%s", cover_path_no_ext, ext)
+        if util.fileExists(cover_full_path) then
+            return cover_full_path
+        end
+    end
+    return nil
+end
+
 function M:download_cover_img(book_cache_id, cover_url, is_force)
      if not (H.is_str(book_cache_id) and book_cache_id ~= "" 
         and H.is_str(cover_url) and cover_url ~= "") then
@@ -1890,29 +1936,10 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
         return nil, nil
     end
     
-    local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
-    local dir, image_filename = util.splitFilePathName(cover_path_no_ext)
-    if not (dir and image_filename) then
-        logger.err(string.format("download_cover_img: invalid name (%s, %s)", tostring(dir), tostring(image_filename)))
-        return nil, nil
-    end
-    H.checkAndCreateFolder(dir)
-
     if not is_force then
-        local function find_cover(base_path)
-            -- 可能的封面图片格式
-            local extensions = { "jpg", "jpeg", "png", "webp", "bmp", "tiff" }
-            for _, ext in ipairs(extensions) do
-                local cover_full_path = string.format("%s.%s", base_path, ext)
-                if util.fileExists(cover_full_path) then
-                    return cover_full_path
-                end
-            end
-            return nil
-        end
-
-        local cover_full_path = find_cover(cover_path_no_ext)
-        if cover_full_path then
+        local cover_full_path = self:get_default_cover_cache(book_cache_id)
+        if H.is_str(cover_full_path) then
+            local dir, image_filename = util.splitFilePathName(cover_full_path)
             return cover_full_path, image_filename
         end
     end
@@ -1926,11 +1953,14 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
                 })
     if ok and resp and resp['data'] then
         local ext = resp.ext or "jpg"
+        local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
         local cover_img_path = string.format("%s.%s", cover_path_no_ext, ext)
+        local dir, image_filename = util.splitFilePathName(cover_img_path)
+        H.checkAndCreateFolder(dir)
         util.writeToFile(resp.data, cover_img_path, true)
         return cover_img_path, image_filename
     else
-        logger.err("download_cover_img: failed", cover_url, resp)
+        logger.err("download_cover_img: failed", img_src, resp)
         return nil, nil
     end
 end
@@ -2002,7 +2032,7 @@ function M:after_reader_chapter_show(chapter)
         if extension and chapter.cacheExt ~= extension then
             local status, err = pcall(function()
 
-                local bookShelfId = self:getServerPathCode()
+                local bookShelfId = self:getCurrentBookShelfId()
                 self.dbManager:transaction(function()
                     return self.dbManager:dynamicUpdateBooks({
                         book_cache_id = book_cache_id,
@@ -2063,13 +2093,13 @@ function M:downloadChapter(chapter, message_dialog)
 
 end
 
-function M:getServerPathCode()
-    if self.settings_data.data['server_address_md5'] == nil then
-        local server_address_md5 = socket_url.parse(self.settings_data.data['server_address']).host
-        self.settings_data.data['server_address_md5'] = md5(server_address_md5)
-        self.saveSettings()
+function M:getCurrentBookShelfId()
+    local current_conf_name = self.settings_data.data.current_conf_name
+    if not (H.is_str(current_conf_name) and current_conf_name ~= "") then
+        logger.err("[Fatal] BookShelfId is null — cannot proceed without a valid BookShelfId")
+        return nil
     end
-    return tostring(self.settings_data.data['server_address_md5'])
+    return tostring(md5(current_conf_name))
 end
 
 local function check_web_conf(url, server_type, user, pwd)
@@ -2121,7 +2151,7 @@ local function check_web_conf(url, server_type, user, pwd)
     return { url = clean_url, type = server_type, user = user, pwd = pwd }
 end
 
-function M:switchWebConfig(conf_name)
+function M:switchWebConfig(conf_name, is_active_item_changed)
     if not (H.is_str(conf_name) and conf_name ~= "") then
         return wrap_response(nil, "参数错误")
     end
@@ -2130,16 +2160,26 @@ function M:switchWebConfig(conf_name)
     if not (H.is_tbl(web_configs) and H.is_tbl(web_configs[conf_name])) then
         return wrap_response(nil, "配置不存在")
     end
-    if settings.current_conf_name == conf_name then
+    if settings.current_conf_name == conf_name and not is_active_item_changed then
         return wrap_response(nil, "已经是当前激活配置")
     end
+
     local config = web_configs[conf_name]
+    local ok, err_msg = check_web_conf(config.url, config.type, config.user, config.pwd)
+    if not ok then
+        return wrap_response(nil, tostring(err_msg))
+    end
+    pcall(function() self.dbManager:disableAllBookShelves() end)
+
     settings.server_address = config.url
     settings.server_type = config.type
     settings.reader3_un = config.user
     settings.reader3_pwd = config.pwd
     settings.current_conf_name = conf_name
-    return self:saveSettings(settings)
+    self:saveSettings(settings)
+
+    self:loadApiProvider()
+    return wrap_response(true)
 end
 
 function M:deleteWebConfig(conf_name)
@@ -2149,15 +2189,20 @@ function M:deleteWebConfig(conf_name)
     end
     local settings = self:getSettings()
     local web_configs = settings.web_configs
-    if not (H.is_tbl(web_configs) and web_configs[conf_name]) then
+    if not (H.is_tbl(web_configs) and H.is_tbl(web_configs[conf_name])) then
         return wrap_response(nil, "配置不存在")
     end
     if settings.current_conf_name == conf_name then
         return wrap_response(nil, "当前激活配置, 不可删除")
     end
 
+    -- Use the config name to generate the bookshelf ID for deletion
+    local book_shelf_id = tostring(md5(conf_name))
+    pcall(function() self.dbManager:removeBookShelf(book_shelf_id) end)
+
     self.settings_data.data.web_configs[conf_name] = nil
     self:saveSettings()
+
     return wrap_response(true)
 end
 
@@ -2191,7 +2236,7 @@ function M:saveWebConfig(conf_name, web_config)
     local user = web_config.user
     local pwd = web_config.pwd
     local desc = web_config.desc
-    
+
     local ok, err_msg = check_web_conf(url, server_type, user, pwd)
     if ok then
         if H.is_tbl(ok) and ok.url then
@@ -2211,8 +2256,10 @@ function M:saveWebConfig(conf_name, web_config)
 
         web_config.edit_name = nil
         self.settings_data.data.web_configs[conf_name] = web_config
+        
         if is_need_switch then
-            return self:switchWebConfig(conf_name)
+            -- 交由switchWebConfig写入，不然可能导致数据不一致
+            return self:switchWebConfig(conf_name, true)
         else
             self:saveSettings()
             return wrap_response(true)
@@ -2223,54 +2270,40 @@ function M:saveWebConfig(conf_name, web_config)
 end
 
 function M:getSettings()
-    return self.settings_data.data
+    local settings = self.settings_data.data
+    if not H.is_str(settings.server_address) then
+        settings.server_address = ""
+    end
+    return settings
 end
 
 function M:saveSettings(settings)
-    if not settings then
+    if not H.is_tbl(settings) then
         self.settings_data:flush()
         self.settings_data = LuaSettings:open(H.getUserSettingsPath())
         return wrap_response(true)
     end
     
-    if not (H.is_tbl(settings) and H.is_str(settings.server_address) and
-           H.is_num(settings.server_type) and H.is_str(settings.chapter_sorting_mode)) then
-            return wrap_response(nil, '参数校检错误，保存失败')
-    end
-
-    -- 一致性检查
-    if H.is_tbl(settings.web_confings) and H.is_str(settings.current_conf_name) then
-        local current_config = settings.web_confings[settings.current_conf_name]
-        if not (H.is_tbl(current_config) and current_config.user == settings.reader3_un and current_config.pwd == settings.reader3_pwd and
-           current_config.type == settings.server_type ) then
-                return wrap_response(nil, 'web_config 数据不一致，保存失败')
+    local validate_config = function(conf)
+        if not H.is_tbl(conf) then return false end
+        local current_conf_name = conf.current_conf_name
+        if not (H.is_str(current_conf_name) and current_conf_name ~= "")then
+            return false
         end
+        if not (H.is_str(conf.server_address) and conf.server_address ~= "") then
+            return false 
+        end
+        if not H.is_num(conf.server_type) then return false end
+        return true
     end
 
-    local new_setting_url = settings.server_address
-    local user, pwd = settings.reader3_un, settings.reader3_pwd
-    local server_type = settings.server_type
-    local ok, err_msg = check_web_conf(new_setting_url, server_type, user, pwd)
-    if not ok then
-        return wrap_response(nil, tostring(err_msg))
-    end
-
-    local clean_url = new_setting_url
-    if H.is_tbl(ok) and H.is_str(ok.url) then
-        clean_url = ok.url
-    end
-    
-    -- -- Changes detected, recalculate MD5
-    if self.settings_data.data.server_address ~= clean_url then
-        settings.server_address_md5 = md5(socket_url.parse(clean_url).host)
+    if not validate_config(settings) then
+        return wrap_response(nil, '参数校检错误，保存失败')
     end
 
     self.settings_data.data = settings
-    self.settings_data.data.server_address = clean_url
     self.settings_data:flush()
     self.settings_data = LuaSettings:open(H.getUserSettingsPath())
-
-    self:loadApiProvider()
     return wrap_response(true)
 end
 
