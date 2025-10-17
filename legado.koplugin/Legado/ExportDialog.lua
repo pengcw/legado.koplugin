@@ -10,27 +10,23 @@ local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
 
-local CbzExporter = {}
+local CbzExporter = {
+    bookinfo = nil,
+    output_path = nil,
+    cache_chapters = nil,
+    reportProgress = nil,
+}
 function CbzExporter:new(o)
     o = o or {}
     setmetatable(o, self)
     self.__index = self
+    if o.init then o:init() end
     return o
-end
-function CbzExporter:init(options)
-    self.bookinfo = options.bookinfo
-    self.output_path = options.output_path
-    self.cache_chapters = options.cache_chapters
-    self.reportProgress = options.reportProgress
-
-    self.bookinfo.name = self.bookinfo.name or "未知书名"
-    self.bookinfo.author = self.bookinfo.author or "未知作者"
-    return self
 end
 function CbzExporter:createMimetype()
     return "application/vnd.comicbook+zip"
 end
-function CbzExporter:createComicInfo(bookinfo, total_pages)
+function CbzExporter:createComicInfo(total_pages)
     local function escape_xml(str)
                 if not str then return "" end
                 return str:gsub("&", "&amp;")
@@ -59,312 +55,404 @@ function CbzExporter:createComicInfo(bookinfo, total_pages)
                 escape_xml(self.bookinfo.intro or "")
             )
 end
-
 function CbzExporter:package()
-            local output_dir = self.output_path or H.getHomeDir()
-            local safe_filename = util.getSafeFilename(string.format("%s-%s",self.bookinfo.name, self.bookinfo.author))
-            local output_path = H.joinPath(output_dir, safe_filename .. ".cbz")
-            local cbz_path_tmp = output_path .. '.tmp'
-            local valid_chapters = self.cache_chapters
+    if not H.is_tbl(self.bookinfo) then
+        return { success = false, error = "无效的书籍信息"}
+    end
+    if not (H.is_tbl(self.cache_chapters) and #self.cache_chapters > 0) then
+        return {success = false, error = "没有可导出的章节"}
+    end
+    self.bookinfo.name = self.bookinfo.name or "未知书名"
+    self.bookinfo.author = self.bookinfo.author or "未知作者"
 
-            if util.fileExists(output_path) then
-                pcall(util.removeFile, output_path)
+    local output_dir = self.output_path or H.getHomeDir()
+    local safe_filename = util.getSafeFilename(string.format("%s-%s",self.bookinfo.name, self.bookinfo.author))
+    local output_path = H.joinPath(output_dir, safe_filename .. ".cbz")
+    local cbz_path_tmp = output_path .. '.tmp'
+
+    if util.fileExists(output_path) then
+        pcall(util.removeFile, output_path)
+    end
+    if util.fileExists(cbz_path_tmp) then
+        pcall(util.removeFile, cbz_path_tmp)
+    end
+
+    local function get_image_ext(filename)
+        local extension = filename:match("%.(%w+)$")
+        if extension then
+            local valid_extensions = {
+                jpg = true, jpeg = true, png = true, 
+                gif = true, webp = true, bmp = true
+            }
+            if valid_extensions[extension:lower()] then
+                return extension
             end
-            if util.fileExists(cbz_path_tmp) then
-                pcall(util.removeFile, cbz_path_tmp)
-            end
+        end
+        return nil
+    end
 
-            local function get_image_ext(filename)
-                local extension = filename:match("%.(%w+)$")
-                if extension then
-                    local valid_extensions = {
-                        jpg = true, jpeg = true, png = true, 
-                        gif = true, webp = true, bmp = true
-                    }
-                    if valid_extensions[extension:lower()] then
-                        return extension
-                    end
-                end
-                return nil
-            end
+    local cbz
+    local cbz_lib
+    local tmp_base
+    local main_temp_dir
+    
+    local use_archiver = true
+    local ok, Archiver = pcall(require, "ffi/archiver")
+    if ok and Archiver then
+        cbz_lib = "archiver"
+        cbz = Archiver.Writer:new{}
+        if not cbz:open(cbz_path_tmp, "epub") then
+            local err_msg = string.format("无法创建 CBZ 文件: %s", tostring(cbz.err))
+            return {
+                success = false,
+                error = err_msg
+            }
+        end
+            cbz:setZipCompression("store")
+            cbz:addFileFromMemory("mimetype", self:createMimetype(), os.time())
+            cbz:setZipCompression("deflate")
+    else
+        use_archiver = false
+    end
 
-            local cbz
-            local cbz_lib
-            local tmp_base
-            local main_temp_dir
-            
-            local use_archiver = true
-            local ok, Archiver = pcall(require, "ffi/archiver")
-            if ok and Archiver then
-                cbz_lib = "archiver"
-                cbz = Archiver.Writer:new{}
-                if not cbz:open(cbz_path_tmp, "epub") then
-                    local err_msg = string.format("无法创建 CBZ 文件: %s", tostring(cbz.err))
-                    return {
-                        success = false,
-                        error = err_msg
-                    }
-                end
-                    cbz:setZipCompression("store")
-                    cbz:addFileFromMemory("mimetype", self:createMimetype(), os.time())
-                    cbz:setZipCompression("deflate")
-            else
-                use_archiver = false
-            end
-
-            if not use_archiver then
-                local ok, ZipWriter = pcall(require, "ffi/zipwriter")
-                if ok and ZipWriter then
-                    cbz_lib = "zipwriter"
-                    cbz = ZipWriter:new{}
-                    if not cbz:open(cbz_path_tmp) then
-                       local err_msg = string.format("无法创建 CBZ 文件: %s", tostring(cbz.err))
-                        return {
-                            success = false,
-                            error = err_msg
-                        }
-                    end
-
-                    tmp_base = H.joinPath(H.getTempDirectory(), ".tmp.sdr")
-                    H.checkAndCreateFolder(tmp_base)
-                    local run_stamp = tostring(os.time()) .. "_" .. tostring(math.floor(math.random() * 100000))
-                    main_temp_dir = H.joinPath(tmp_base, "cbz_temp_" .. run_stamp)
-                    H.checkAndCreateFolder(main_temp_dir)
-
-                    cbz:add("mimetype",  self:createMimetype(), true)
-                else
-                    local err_msg = "无法加载任何压缩库"
-                    return {
-                        success = false,
-                        error = err_msg
-                    }
-                end
+    if not use_archiver then
+        local ok, ZipWriter = pcall(require, "ffi/zipwriter")
+        if ok and ZipWriter then
+            cbz_lib = "zipwriter"
+            cbz = ZipWriter:new{}
+            if not cbz:open(cbz_path_tmp) then
+                local err_msg = string.format("无法创建 CBZ 文件: %s", tostring(cbz.err))
+                return {
+                    success = false,
+                    error = err_msg
+                }
             end
 
-            -- 合并所有章节的图片到一个 CBZ
-            local current_progress = 0
-            local image_index = 1
-            local total_pages = 0
+            tmp_base = H.joinPath(H.getTempDirectory(), ".tmp.sdr")
+            H.checkAndCreateFolder(tmp_base)
+            local run_stamp = tostring(os.time()) .. "_" .. tostring(math.floor(math.random() * 100000))
+            main_temp_dir = H.joinPath(tmp_base, "cbz_temp_" .. run_stamp)
+            H.checkAndCreateFolder(main_temp_dir)
 
-            for _, cache_chapter in ipairs(valid_chapters) do
+            cbz:add("mimetype",  self:createMimetype(), true)
+        else
+            local err_msg = "无法加载任何压缩库"
+            return {
+                success = false,
+                error = err_msg
+            }
+        end
+    end
 
-                if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
-                   -- 如果是 CBZ 文件，需要解压并提取图片
-                   if cache_chapter.cacheFilePath:match("%.cbz$") then
-                    -- 根据已有库选择使用处理方式
-                        if cbz_lib == "archiver" then
-                                    local chapter_cbz
-                                    chapter_cbz = Archiver.Reader:new()
-                                    chapter_cbz:open(cache_chapter.cacheFilePath) 
-                                        
-                                    for entry in chapter_cbz:iterate() do
-                                            
-                                        local ext = get_image_ext(entry.path)
-                                        if entry.mode == "file" and ext then
-                                            
-                                            local img_data = chapter_cbz:extractToMemory(entry.path)
-                                            if img_data then
-                                                local new_name = string.format("%04d.%s", image_index, ext)
-                                                
-                                                cbz:addFileFromMemory(new_name, img_data, os.time())
-                                                
-                                                image_index = image_index + 1
-                                                total_pages = total_pages + 1
-                                            end
-                                        end
-                                    end
+    -- 合并所有章节的图片到一个 CBZ
+    local current_progress = 0
+    local image_index = 1
+    local total_pages = 0
+
+    for _, cache_chapter in ipairs(self.cache_chapters) do
+
+        if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
+            -- 如果是 CBZ 文件，需要解压并提取图片
+            if cache_chapter.cacheFilePath:match("%.cbz$") then
+            -- 根据已有库选择使用处理方式
+                if cbz_lib == "archiver" then
+                            local chapter_cbz
+                            chapter_cbz = Archiver.Reader:new()
+                            chapter_cbz:open(cache_chapter.cacheFilePath) 
                                 
-                                    chapter_cbz:close()
-                                else
-                                    -- 兼容旧版本处理压缩文件
-                                    -- 为每个章节创建独立的临时目录
-                                    local chapter_temp_dir = H.joinPath(main_temp_dir, "chapter_" .. current_progress)
-                                    -- logger.info(chapter_temp_dir)
-                                    H.checkAndCreateFolder(chapter_temp_dir)
+                            for entry in chapter_cbz:iterate() do
                                     
-                                    -- 解压 CBZ 到临时目录
-                                    local cache_path_escaped = cache_chapter.cacheFilePath:gsub("'", "'\\''")
-                                    local target_escaped = chapter_temp_dir:gsub("'", "'\\''")
-                                    local unzip_cmd = string.format("unzip -qqo '%s' -d '%s'", 
-                                        cache_path_escaped, target_escaped)
-                                    local result = os.execute(unzip_cmd)
+                                local ext = get_image_ext(entry.path)
+                                if entry.mode == "file" and ext then
                                     
-                                    if result == 0 then
+                                    local img_data = chapter_cbz:extractToMemory(entry.path)
+                                    if img_data then
+                                        local new_name = string.format("%04d.%s", image_index, ext)
                                         
-                                        local image_files = {}
+                                        cbz:addFileFromMemory(new_name, img_data, os.time())
                                         
-                                        -- 先收集所有图片文件
-                                        util.findFiles(chapter_temp_dir, function(path, fname, attr)
-                                            if get_image_ext(fname) then
-                                                table.insert(image_files, {
-                                                    path = path,
-                                                    name = fname
-                                                })
-                                            end
-                                        end, false)
-                                        
-                                        -- 按文件名排序
-                                        table.sort(image_files, function(a, b)
-                                            local num_a = tonumber(a.name:match("^(%d+)")) or 0
-                                            local num_b = tonumber(b.name:match("^(%d+)")) or 0
-                                            return num_a < num_b
-                                        end)
-                                        
-                                        -- 将图片添加到 CBZ
-                                        for _, file in ipairs(image_files) do
-                                            local file_path = H.joinPath(chapter_temp_dir, file.path)
-                                            
-                                            local img_data = util.readFromFile(file_path, "rb")
-                                            if img_data then
-                                                    local ext = get_image_ext(file.name) or "jpg"
-                                                    local new_name = string.format("%04d.%s", image_index, ext:lower())
-                                                    
-                                                    -- 使用 zipwriter 添加图片（启用压缩）
-                                                    cbz:add(new_name, img_data, false) -- false = 使用压缩
-
-                                                    --logger.info("添加图片:", new_name, "来自:", file)
-                                                    image_index = image_index + 1
-                                                    total_pages = total_pages + 1
-                                            end
-                                        end
-                                        
-                                        if util.directoryExists(chapter_temp_dir) then
-                                            ffiUtil.purgeDir(chapter_temp_dir)
-                                            util.removePath(chapter_temp_dir)
-                                        end
-                                else
-                                        logger.warn("解压失败:", cache_path_escaped)
-                                        if util.directoryExists(chapter_temp_dir) then
-                                            ffiUtil.purgeDir(chapter_temp_dir)
-                                            util.removePath(chapter_temp_dir)
-                                        end
+                                        image_index = image_index + 1
+                                        total_pages = total_pages + 1
                                     end
                                 end
-                        end
-                    
-                    -- 章节也可能是单图片
-                    else
-                        local img_ext = get_image_ext(cache_chapter.cacheFilePath)
-                        if H.is_str(img_ext) and util.fileExists(cache_chapter.cacheFilePath) then
-                            local img_data = util.readFromFile(cache_chapter.cacheFilePath, "rb")
-                            if img_data then
-                                local new_name = string.format("%04d.%s", image_index, img_ext:lower())
-                                if cbz_lib == "archiver" then
-                                    cbz:addFileFromMemory(new_name, img_data, os.time())
-                                else
-                                    cbz:add(new_name, img_data, false)
+                            end
+                        
+                            chapter_cbz:close()
+                        else
+                            -- 兼容旧版本处理压缩文件
+                            -- 为每个章节创建独立的临时目录
+                            local chapter_temp_dir = H.joinPath(main_temp_dir, "chapter_" .. current_progress)
+                            -- logger.info(chapter_temp_dir)
+                            H.checkAndCreateFolder(chapter_temp_dir)
+                            
+                            -- 解压 CBZ 到临时目录
+                            local cache_path_escaped = cache_chapter.cacheFilePath:gsub("'", "'\\''")
+                            local target_escaped = chapter_temp_dir:gsub("'", "'\\''")
+                            local unzip_cmd = string.format("unzip -qqo '%s' -d '%s'", 
+                                cache_path_escaped, target_escaped)
+                            local result = os.execute(unzip_cmd)
+                            
+                            if result == 0 then
+                                
+                                local image_files = {}
+                                
+                                -- 先收集所有图片文件
+                                util.findFiles(chapter_temp_dir, function(path, fname, attr)
+                                    if get_image_ext(fname) then
+                                        table.insert(image_files, {
+                                            path = path,
+                                            name = fname
+                                        })
+                                    end
+                                end, false)
+                                
+                                -- 按文件名排序
+                                table.sort(image_files, function(a, b)
+                                    local num_a = tonumber(a.name:match("^(%d+)")) or 0
+                                    local num_b = tonumber(b.name:match("^(%d+)")) or 0
+                                    return num_a < num_b
+                                end)
+                                
+                                -- 将图片添加到 CBZ
+                                for _, file in ipairs(image_files) do
+                                    local file_path = H.joinPath(chapter_temp_dir, file.path)
+                                    
+                                    local img_data = util.readFromFile(file_path, "rb")
+                                    if img_data then
+                                            local ext = get_image_ext(file.name) or "jpg"
+                                            local new_name = string.format("%04d.%s", image_index, ext:lower())
+                                            
+                                            -- 使用 zipwriter 添加图片（启用压缩）
+                                            cbz:add(new_name, img_data, false) -- false = 使用压缩
+
+                                            --logger.info("添加图片:", new_name, "来自:", file)
+                                            image_index = image_index + 1
+                                            total_pages = total_pages + 1
+                                    end
                                 end
-                                image_index = image_index + 1
-                                total_pages = total_pages + 1
+                                
+                                if util.directoryExists(chapter_temp_dir) then
+                                    ffiUtil.purgeDir(chapter_temp_dir)
+                                    util.removePath(chapter_temp_dir)
+                                end
+                        else
+                                logger.warn("解压失败:", cache_path_escaped)
+                                if util.directoryExists(chapter_temp_dir) then
+                                    ffiUtil.purgeDir(chapter_temp_dir)
+                                    util.removePath(chapter_temp_dir)
+                                end
                             end
                         end
+                end
+            
+            -- 章节也可能是单图片
+            else
+                local img_ext = get_image_ext(cache_chapter.cacheFilePath)
+                if H.is_str(img_ext) and util.fileExists(cache_chapter.cacheFilePath) then
+                    local img_data = util.readFromFile(cache_chapter.cacheFilePath, "rb")
+                    if img_data then
+                        local new_name = string.format("%04d.%s", image_index, img_ext:lower())
+                        if cbz_lib == "archiver" then
+                            cbz:addFileFromMemory(new_name, img_data, os.time())
+                        else
+                            cbz:add(new_name, img_data, false)
+                        end
+                        image_index = image_index + 1
+                        total_pages = total_pages + 1
                     end
-
-                current_progress = current_progress + 1
-                if H.is_func(self.reportProgress) then
-                    self.reportProgress(current_progress)
                 end
             end
 
-            local comic_info = self:createComicInfo(self.bookinfo, total_pages)
-            if cbz_lib == "zipwriter" then
-                cbz:add("ComicInfo.xml", comic_info, true)
-            else
-                cbz:addFileFromMemory("ComicInfo.xml", comic_info, os.time())
-            end
+        current_progress = current_progress + 1
+        if H.is_func(self.reportProgress) then
+            self.reportProgress(current_progress)
+        end
+    end
 
-            if cbz and cbz.close then
-                cbz:close()
-            end
+    local comic_info = self:createComicInfo(total_pages)
+    if cbz_lib == "zipwriter" then
+        cbz:add("ComicInfo.xml", comic_info, true)
+    else
+        cbz:addFileFromMemory("ComicInfo.xml", comic_info, os.time())
+    end
 
-            if util.fileExists(output_path) then
-                util.removeFile(output_path)
-            end
+    if cbz and cbz.close then
+        cbz:close()
+    end
 
-            if cbz_lib == "zipwriter" and util.directoryExists(tmp_base) then
-                ffiUtil.purgeDir(tmp_base)
-                util.removePath(tmp_base)
-            end
-            
-            os.rename(cbz_path_tmp, output_path)
+    if util.fileExists(output_path) then
+        util.removeFile(output_path)
+    end
 
-            return {
-                success = true,
-                path = output_path
-            }
+    if cbz_lib == "zipwriter" and util.directoryExists(tmp_base) then
+        ffiUtil.purgeDir(tmp_base)
+        util.removePath(tmp_base)
+    end
+    
+    if util.fileExists(cbz_path_tmp) then
+        os.rename(cbz_path_tmp, output_path)
+    end
+
+    return {
+        success = true,
+        path = output_path
+    }
 end
 
 local M = {
     bookinfo = nil,
     chapter_count = nil,
-    only_cached = nil,
+    chapter_cache_status = nil,
     -- 临时禁用多线程（本次会话）
     temp_disable_multithread = nil,
 }
 
-function M:init(bookinfo)
-    self.bookinfo = bookinfo
-    return self
+function M:new(o)
+    o = o or {}
+    setmetatable(o, self)
+    self.__index = self
+    if o.init then o:init() end
+    return o
 end
 
--- 缓存全书功能
+function M:_getChapterCount(book_cache_id)
+    if not (H.is_str(book_cache_id) and book_cache_id ~= "") then
+        logger.err("getChapterCount err - book_cache_id ->", tostring(book_cache_id))
+        return 0
+    end
+    if H.is_num(self.chapter_count) and self.chapter_count >= 0 then
+        return self.chapter_count
+    end
+    self.chapter_count = Backend:getChapterCount(book_cache_id)
+    return self.chapter_count
+end
+function M:showExportSuccessDialog(result, open_callback)
+    local filename = result.path and result.path:match("([^/\\]+)$") or "未知"
+    local output_dir = result.path and result.path:match("(.+)[/\\]") or H.getHomeDir()
+    
+    MessageBox:confirm(
+        string.format("导出成功！\n\n文件：%s\n位置：%s", filename, output_dir),
+        function(open_file)
+            if open_file and result.path and H.is_func(open_callback) then
+                UIManager:nextTick(function()
+                    open_callback(result.path)
+                end)
+            end
+        end,
+        {
+            ok_text = "打开",
+            cancel_text = "完成"
+        }
+    )
+end
+
+function M:showExportErrorDialog(error_info, retry_callback)
+    local error_msg = "导出失败"
+    if H.is_tbl(error_info) then
+        error_msg = error_info.error or "未知错误"
+    elseif H.is_str(error_info) then
+        error_msg = error_info
+    end
+    MessageBox:confirm(
+        error_msg,
+        function(retry)
+            if retry and H.is_func(retry_callback) then
+                retry_callback()
+            end
+        end,
+        {
+            ok_text = "重试",
+            cancel_text = "完成"
+        }
+    )
+end
+
+-- 回调函数：准备需要的章节缓存
+function M:prepareChaptersForExport(bookinfo, only_cached, completion_callback)
+    if not H.is_func(completion_callback) then
+        completion_callback = function(success, result) end
+    end
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
+        return completion_callback(false, { error = "书籍信息错误" })
+    end
+
+    local book_cache_id = bookinfo.cache_id
+    local chapter_count = self:_getChapterCount(book_cache_id)
+    
+    if not chapter_count or chapter_count == 0 then
+        return completion_callback(false, { error = "该书没有章节, 请刷新目录" })
+    end
+
+    -- 检查缓存状态
+    -- { total_count = 0, cached_count = 0, uncached_count = 0, cached_chapters = {}, uncached_chapters = {} }
+    local cache_status
+    if H.is_tbl(self.chapter_cache_status) then
+        cache_status = self.chapter_cache_status
+    else
+        cache_status = Backend:analyzeCacheStatus(book_cache_id)
+        if not (H.is_tbl(cache_status) and H.is_tbl(cache_status.cached_chapters) and H.is_tbl(cache_status.uncached_chapters)) then
+            return completion_callback(false, { error = "查询章节缓存状态出错" })
+        end
+    end
+
+    -- 如果只需要缓存的章节，直接返回
+    if only_cached then
+        return completion_callback(true, { chapters = cache_status.cached_chapters, total_count = chapter_count })
+    end
+
+    -- 如果没有缺失的章节，直接返回
+    if cache_status.uncached_count == 0 then
+        return completion_callback(true, { chapters = cache_status.cached_chapters, total_count = chapter_count })
+    end
+
+    local down_completion_callback = function(is_complete)
+        if is_complete == true then
+            -- 重新获取所有章节（包含新缓存的）
+            local final_chapters = Backend:getBookChapterPlusCache(book_cache_id)
+            completion_callback(true, { chapters = final_chapters, total_count = chapter_count })
+        else
+            completion_callback(false, { error = "缓存章节失败: "})
+        end
+    end
+
+    self:startCacheChapters(bookinfo, cache_status.uncached_chapters or {}, chapter_count, nil, down_completion_callback)
+end
+
 function M:cacheAllChapters(completion_callback)
     local bookinfo = self.bookinfo
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
-        MessageBox:error("书籍信息错误")
-        return
+        return MessageBox:error("书籍信息错误")
     end
-
-    -- 获取章节总数
-    local chapter_count = Backend:getChapterCount(bookinfo.cache_id)
-    if not chapter_count or chapter_count == 0 then
-        MessageBox:error("该书章节列表为空，请手动刷新目录后再缓存")
-        return
+    if not H.is_func(completion_callback) then
+        completion_callback = function(success) end
     end
+    local book_cache_id = bookinfo.cache_id
 
-    -- 显示统计进度
-    local loading_msg = MessageBox:showloadingMessage("正在统计章节...")
-
-    UIManager:nextTick(function()
-        -- 使用Backend的统计功能
-        local cache_status = Backend:analyzeCacheStatus(bookinfo.cache_id, chapter_count)
-
-        if loading_msg then
-            if loading_msg.close then
-                loading_msg:close()
-            else
-                UIManager:close(loading_msg)
-            end
+    MessageBox:loading("正在统计已缓存章节", function()
+        return Backend:analyzeCacheStatus(book_cache_id)
+    end, function(state, response)
+        if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
+            return MessageBox:error("查询章节缓存状态出错")
         end
 
-        if cache_status.uncached_count == 0 then
-            MessageBox:notice(string.format("全书已缓存完毕！\n总章节：%d", chapter_count))
-            -- 即使已全部缓存，也调用完成回调
-            if H.is_func(completion_callback) then
-                completion_callback(true)
-            end
-            return
+        local chapter_count = response.total_count
+        local cached_count = response.cached_count
+        local uncached_count = response.uncached_count
+    
+        if uncached_count == 0 then
+            return MessageBox:success(string.format("%s 个章节已全部缓存！",chapter_count))
         end
-
-        -- 确认是否开始缓存
+    
         MessageBox:confirm(string.format(
             "书名：<<%s>>\n作者：%s\n\n总章节：%d\n已缓存：%d\n待缓存：%d\n\n是否开始缓存全书？",
             bookinfo.name or "未命名",
             bookinfo.author or "未知作者",
             chapter_count,
-            cache_status.cached_count,
-            cache_status.uncached_count
+            cached_count,
+            uncached_count
         ), function(result)
-            if not result then
-                -- 用户取消，调用完成回调
-                if H.is_func(completion_callback) then
-                    completion_callback(false)
-                end
-                return
-            end
-
-            -- 直接开始缓存，使用已统计的未缓存章节列表，传递completion_callback
-            self:startCacheChapters(bookinfo, cache_status.uncached_chapters, chapter_count, nil, completion_callback)
+            if not result then return completion_callback(false) end -- 用户点击取消
+            self:startCacheChapters(bookinfo, response.uncached_chapters or {}, chapter_count, nil, completion_callback)
         end, {
             ok_text = "开始缓存",
             cancel_text = "取消"
@@ -372,110 +460,222 @@ function M:cacheAllChapters(completion_callback)
     end)
 end
 
--- 开始缓存章节（统一所有下载功能）
-function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_count, completion_callback)
+function M:cacheSelectedChapters(start_chapter_index, down_chapter_count, completion_callback)
+    local bookinfo = self.bookinfo
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id and H.is_num(start_chapter_index)) then
+        return MessageBox:error("书籍信息错误")
+    end
+    if not H.is_func(completion_callback) then
+        completion_callback = function(success) end
+    end
+
+    local book_cache_id = bookinfo.cache_id
+    local start_index = tonumber(start_chapter_index)
+    local actual_chapter_count = self:_getChapterCount(book_cache_id )
+    
+    if start_index < 0 then start_index = 0 end
+    if not (H.is_num(actual_chapter_count) and actual_chapter_count > 0) then
+        return MessageBox:error("该书章节列表为空，请手动刷新目录后再缓存")
+    end
+
+    if start_index >= actual_chapter_count then
+        return MessageBox:notice("已经是最后一章")
+    end
+
+    -- 确定目标章节数
+    local target_chapter_count
+    if H.is_num(down_chapter_count) then
+        -- start_chapter_index 从0开始，所以 +1
+        target_chapter_count = start_index + down_chapter_count + 1
+        -- 处理超出总章数的情况
+        if target_chapter_count > actual_chapter_count then
+            target_chapter_count = actual_chapter_count
+            MessageBox:notice(string.format("超出书籍总章数，将缓存至最后一章。实际缓存章节数：%d", target_chapter_count - start_index))
+        end
+    else
+        -- 如果没有指定下载章数，则缓存到最后一章
+        target_chapter_count = actual_chapter_count
+    end
+
+    MessageBox:loading("正在统计已缓存章节", function()
+        return Backend:analyzeCacheStatusForRange(book_cache_id , start_index, target_chapter_count - 1)
+    end, function(state, response)
+        if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
+            return MessageBox:error("查询章节缓存状态出错")
+        end
+        
+        -- 筛选出从当前章节到目标章节的未缓存章节
+        local uncached_in_range = {}
+        local total_in_range = target_chapter_count - start_index
+        local cached_in_range = 0
+
+        for _, chapter in ipairs(response.uncached_chapters) do
+            local chapter_index = tonumber(chapter.chapters_index)
+            if chapter_index and chapter_index >= start_index and chapter_index < target_chapter_count then
+                table.insert(uncached_in_range, chapter)
+            end
+        end
+
+        -- 计算范围内已缓存数量
+        cached_in_range = total_in_range - #uncached_in_range
+        if #uncached_in_range == 0 then
+            return MessageBox:success(string.format("选定章节已全部缓存！\n选定章节：%d", total_in_range))
+        end
+
+        MessageBox:confirm(string.format(
+            "书名：<<%s>>\n起始章节：第%d章\n\n选定章节：%d\n已缓存：%d\n待缓存：%d\n\n是否开始缓存？",
+            bookinfo.name or "未命名",
+            start_index + 1,
+            total_in_range,
+            cached_in_range,
+            #uncached_in_range
+        ), function(result)
+            if result then
+                self:startCacheChapters(nil, uncached_in_range, target_chapter_count, nil, completion_callback, true)
+            end
+        end, {
+            ok_text = "开始缓存",
+            cancel_text = "取消"
+        })
+    end)   
+end
+
+function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_count, completion_callback, skip_cache_integrity_check)
     bookinfo = bookinfo or self.bookinfo
     retry_count = retry_count or 0
+
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+        return MessageBox:error("书籍信息错误")
+    end
+    if not H.is_func(completion_callback) then
+        completion_callback = function() end
+    end
+
+    if not H.is_tbl(uncached_chapters) or #uncached_chapters == 0 then
+        MessageBox:error("没有需要缓存的章节")
+        return completion_callback(false)
+    end
+
     local uncached_count = #uncached_chapters
 
-    -- 显示缓存进度
     local title_text = string.format("%s - 正在缓存 %d/%d 章节", bookinfo.name, uncached_count, chapter_count)
     if retry_count > 0 then
         title_text = title_text .. string.format(" (重试 %d)", retry_count)
     end
-
     local cache_msg = MessageBox:progressBar("缓存进度", {
         title = title_text,
         max = uncached_count
-    })
+    }) or MessageBox:showloadingMessage("正在缓存章节...")
 
-    if not cache_msg then
-        cache_msg = MessageBox:showloadingMessage("正在缓存章节...")
+    if not retry_count then retry_count = 0 end
+    local retry_func = function()
+        retry_count = retry_count + 1
+        self:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_count, completion_callback, skip_cache_integrity_check)
     end
 
     local cache_complete = false
+    local handleCacheSuccess = function()
+        if cache_msg and cache_msg.close then
+            cache_msg:close()
+        end
+        cache_complete = true
 
-    -- 缓存进度回调
+        if not skip_cache_integrity_check then
+            self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, function()
+                retry_func()
+            end)
+        else
+            if H.is_func(completion_callback) then
+                completion_callback(true)
+            end
+            MessageBox:success("缓存完成")
+        end
+    end
+
+    local showRetryDialog = function(err_msg)
+        local error_title = "⚠ 缓存出错"
+        local is_timeout = err_msg:find("超时")
+        local is_toc_empty = err_msg:find("目录为空") or err_msg:find("TOC") or err_msg:find("章节列表")
+
+        if is_timeout then
+            error_title = "⚠ 下载超时"
+        elseif is_toc_empty then
+            error_title = "⚠ 目录为空"
+        end
+
+            -- 检查是否启用了多线程
+            local settings = Backend:getSettings()
+            local current_threads = tonumber(settings.download_threads) or 1
+            local has_multithread = current_threads > 1 and not self.temp_disable_multithread
+
+            local other_buttons_list = {{
+                {
+                    text = "查看已缓存",
+                    callback = function()
+                        self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, function()
+                            retry_func()
+                        end)
+                    end
+                }
+            }}
+
+            -- 如果启用了多线程，添加"停用多线程并重试"按钮
+            if has_multithread then
+                table.insert(other_buttons_list[1], {
+                    text = "停用多线程并重试",
+                    callback = function()
+                        self.temp_disable_multithread = true
+                        logger.info("User disabled multi-threading for this session")
+                        retry_func()
+                    end
+                })
+            end
+
+            -- 所有错误统一提供重试选项
+            MessageBox:confirm(
+                string.format("%s\n\n%s\n\n已自动重试%s次仍失败，是否继续重试？", error_title, err_msg, retry_count),
+                function(result)
+                    if result then
+                        retry_func()
+                    else
+                        -- 用户取消重试，调用完成回调
+                        if H.is_func(completion_callback) then
+                            completion_callback(false)
+                        end
+                    end
+                end,
+                {
+                    ok_text = "重试",
+                    cancel_text = "取消",
+                    other_buttons_first = true,
+                    other_buttons = other_buttons_list
+                })
+    end
+
+    local handleCacheError = function(err_msg)
+        if cache_msg and cache_msg.close then
+            cache_msg:close()
+        end
+        cache_complete = true
+
+        -- 首次出错自动重试一次
+        if retry_count == 0 then
+            UIManager:scheduleIn(1, function()
+                self:startCacheChapters(bookinfo, uncached_chapters, chapter_count, 1, completion_callback, skip_cache_integrity_check)
+            end)
+            return
+        end
+
+        -- 重试后仍失败，显示重试对话框
+        showRetryDialog(err_msg)
+    end
+
     local cache_progress_callback = function(progress, err_msg)
         if progress == false or progress == true then
-            if cache_msg and cache_msg.close then
-                cache_msg:close()
-            end
-            cache_complete = true
-
             if progress == true then
-                -- 缓存完成，检查完整性
-                UIManager:nextTick(function()
-                    self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
-                end)
+                handleCacheSuccess()
             elseif err_msg then
-                -- 首次出错自动重试一次
-                if retry_count == 0 then
-                    UIManager:scheduleIn(1, function()
-                        self:startCacheChapters(bookinfo, uncached_chapters, chapter_count, 1, completion_callback)
-                    end)
-                    return
-                end
-
-                -- 重试后仍失败，显示重试对话框
-                local error_title = "⚠ 缓存出错"
-                local is_timeout = err_msg:find("超时")
-                local is_toc_empty = err_msg:find("目录为空") or err_msg:find("TOC") or err_msg:find("章节列表")
-
-                if is_timeout then
-                    error_title = "⚠ 下载超时"
-                elseif is_toc_empty then
-                    error_title = "⚠ 目录为空"
-                end
-
-                UIManager:nextTick(function()
-                    -- 检查是否启用了多线程
-                    local settings = Backend:getSettings()
-                    local current_threads = tonumber(settings.download_threads) or 1
-                    local has_multithread = current_threads > 1 and not self.temp_disable_multithread
-
-                    -- 构建其他按钮列表
-                    local other_buttons_list = {{
-                        {
-                            text = "查看已缓存",
-                            callback = function()
-                                self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
-                            end
-                        }
-                    }}
-
-                    -- 如果启用了多线程，添加"停用多线程并重试"按钮
-                    if has_multithread then
-                        table.insert(other_buttons_list[1], {
-                            text = "停用多线程并重试",
-                            callback = function()
-                                self.temp_disable_multithread = true
-                                logger.info("User disabled multi-threading for this session")
-                                self:cacheAllChapters(bookinfo)
-                            end
-                        })
-                    end
-
-                    -- 所有错误统一提供重试选项
-                    MessageBox:confirm(
-                        string.format("%s\n\n%s\n\n已自动重试1次仍失败，是否继续重试？", error_title, err_msg),
-                        function(result)
-                            if result then
-                                self:cacheAllChapters(bookinfo)
-                            else
-                                -- 用户取消重试，调用完成回调
-                                if H.is_func(completion_callback) then
-                                    completion_callback(false)
-                                end
-                            end
-                        end,
-                        {
-                            ok_text = "重试",
-                            cancel_text = "取消",
-                            other_buttons = other_buttons_list
-                        }
-                    )
-                end)
+                handleCacheError(err_msg)
             end
         elseif H.is_num(progress) then
             if cache_msg and cache_msg.reportProgress then
@@ -484,81 +684,49 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
         end
     end
 
-    -- 开始缓存
     Backend:preLoadingChapters(uncached_chapters, nil, cache_progress_callback, self.temp_disable_multithread)
 end
 
--- 检查缓存完整性
-function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
-    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
-        return
-    end
+function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, retry_callback)
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then return end
 
-    local checking_msg = MessageBox:showloadingMessage("正在检查缓存完整性...")
+    local book_cache_id = bookinfo.cache_id
 
-    UIManager:nextTick(function()
-        local book_cache_id = bookinfo.cache_id
-        local missing_chapters = {}
-        local cached_count = 0
-
-        -- 检查每个章节
-        for i = 0, chapter_count - 1 do
-            local chapter = Backend:getChapterInfoCache(book_cache_id, i)
-            if chapter then
-                local cache_chapter = Backend:getCacheChapterFilePath(chapter, true)
-                local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
-
-                if is_cached then
-                    cached_count = cached_count + 1
-                else
-                    table.insert(missing_chapters, {
-                        index = i,
-                        title = chapter.title or string.format("第%d章", i + 1)
-                    })
-                end
-            end
+    MessageBox:loading("正在检查缓存完整性", function()
+        return Backend:analyzeCacheStatusForRange(book_cache_id, 0, chapter_count - 1, true)
+    end, function(state, cache_status)
+        if not (state == true and H.is_tbl(cache_status) and H.is_tbl(cache_status.cached_chapters) and H.is_tbl(cache_status.uncached_chapters)) then
+            return MessageBox:error("查询章节缓存状态出错")
         end
-
-        if checking_msg then
-            if checking_msg.close then
-                checking_msg:close()
-            else
-                UIManager:close(checking_msg)
-            end
-        end
-
-        local missing_count = #missing_chapters
+        
+        local cached_count = cache_status.cached_count
+        local missing_count = cache_status.uncached_count
 
         if missing_count == 0 then
-            -- 缓存完整，使用MessageBox:confirm提示
-            UIManager:nextTick(function()
-                MessageBox:confirm(
-                    string.format("✓ 缓存完成\n\n书名：%s\n总章节：%d\n已缓存：%d",
-                        bookinfo.name or "未命名",
-                        chapter_count,
-                        cached_count),
-                    function()
-                        -- 用户点击确定后，调用完成回调
-                        if H.is_func(completion_callback) then
-                            completion_callback(true)
-                        end
-                    end,
-                    {
-                        no_ok_button = true,
-                        cancel_text = "确定"
-                    }
-                )
-            end)
+            MessageBox:confirm(
+                string.format("✓ 缓存完成\n\n书名：%s\n总章节：%d\n已缓存：%d",
+                    bookinfo.name or "未命名",
+                    chapter_count,
+                    cached_count),
+                function()
+                    -- 用户点击确定后，调用完成回调
+                    if H.is_func(completion_callback) then completion_callback(true) end
+                end,
+                {
+                    no_ok_button = true,
+                    cancel_text = "确定"
+                }
+            )
         else
             -- 构建缺失章节列表文本
             local missing_text = ""
             local max_display = 10
-            for i, missing in ipairs(missing_chapters) do
+            for i, missing in ipairs(cache_status.uncached_chapters) do
                 if i > max_display then
                     missing_text = missing_text .. string.format("\n...还有 %d 章未缓存", missing_count - max_display)
                     break
                 end
-                missing_text = missing_text .. string.format("\n第 %d 章: %s", missing.index + 1, missing.title)
+                missing_text = missing_text .. string.format("\n第 %d 章: %s", missing.chapters_index + 1, missing.title or "")
             end
 
             MessageBox:confirm(string.format(
@@ -570,524 +738,198 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback)
                 missing_text
             ), function(result)
                 if result then
-                    -- 重新缓存缺失章节
-                    self:cacheAllChapters(bookinfo)
+                    if H.is_func(retry_callback) then retry_callback() end
                 else
-                    -- 用户取消重新缓存，调用完成回调
-                    if H.is_func(completion_callback) then
-                        completion_callback(false)
-                    end
+                    if H.is_func(completion_callback) then completion_callback(false) end
                 end
             end, {
                 ok_text = "重新缓存",
-                cancel_text = "完成"
+                cancel_text = "取消"
             })
         end
     end)
 end
 
-function M:startCbzExport(bookinfo, chapter_count, only_cached)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
-        MessageBox:error("书籍信息错误")
-        return
-    end
-
-    local book_cache_id = bookinfo.cache_id
-
-    local check_loading_msg = MessageBox:showloadingMessage("正在统计章节...")
-
-    local all_chapters = Backend:getBookChapterPlusCache(book_cache_id)
-    local cached_chapters = {}
-    local missing_count = 0
-
-    for i, chapter in ipairs(all_chapters) do
-        local cache_chapter = Backend:getCacheChapterFilePath(chapter, true)
-        local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
-
-        if is_cached then
-            table.insert(cached_chapters, cache_chapter)
-        else
-            missing_count = missing_count + 1
-        end
-    end
-
-    if check_loading_msg then
-        if check_loading_msg.close then
-            check_loading_msg:close()
-        else
-            UIManager:close(check_loading_msg)
-        end
-    end
-
-    if only_cached then
-        MessageBox:notice(string.format('跳过 %d 个未缓存章节，开始生成 CBZ', missing_count))
-        self:generateCbzFile(bookinfo, chapter_count, cached_chapters)
-        return
-    end
-
-    if missing_count == 0 then
-        MessageBox:notice('所有章节已缓存，开始生成 CBZ')
-        self:generateCbzFile(bookinfo, chapter_count, cached_chapters)
-        return
-    end
-
-    local dialog_title = string.format("缓存书籍 %d/%d 章", missing_count, chapter_count)
-    local loading_msg = missing_count > 10 and
-        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max = missing_count}) or
-        MessageBox:showloadingMessage(dialog_title, {progress_max = missing_count})
-
-    if not (loading_msg and loading_msg.reportProgress and loading_msg.close) then
-        MessageBox:error("进度显示控件生成失败")
-        return
-    end
-
-    local cache_complete = false
-    local cache_cancelled = false
-
-    local cache_progress_callback = function(progress, err_msg)
-        if progress == false or progress == true then
-            loading_msg:close()
-            cache_complete = true
-
-            if progress == true and not cache_cancelled then
-                -- 缓存完成，开始生成CBZ
-                self:generateCbzFile(bookinfo, chapter_count)
-            elseif err_msg then
-                MessageBox:error('缓存章节出错：', tostring(err_msg))
-            elseif cache_cancelled then
-                MessageBox:notice('已取消导出')
-            end
-        elseif H.is_num(progress) then
-            loading_msg:reportProgress(progress)
-        end
-    end
-
-    Backend:preLoadingChapters(all_chapters, nil, cache_progress_callback)
-
-    -- TODO 添加取消按钮
-    if loading_msg.cancel then
-        loading_msg:setCancelCallback(function()
-            cache_cancelled = true
-            if not cache_complete then
-                loading_msg:close()
-                MessageBox:notice('已取消缓存')
-            end
-        end)
-    end
-end
-
-function M:generateCbzFile(bookinfo, chapter_count, cached_chapters_param)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
-        MessageBox:error("书籍信息错误")
-        return
-    end
-
-    local book_cache_id = bookinfo.cache_id
-
-    local valid_chapters = cached_chapters_param or {}
-
-    if not cached_chapters_param then
-        for i = 0, chapter_count - 1 do
-            local chapter = Backend:getChapterInfoCache(book_cache_id, i)
-            if chapter then
-                local cache_chapter = Backend:getCacheChapterFilePath(chapter)
-                if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
-                    table.insert(valid_chapters, cache_chapter)
-                end
-            end
-        end
-    end
-
-    local actual_chapter_count = #valid_chapters
-
-    if actual_chapter_count == 0 then
-        MessageBox:error("没有可导出的章节")
-        return
-    end
-
-    local export_msg = MessageBox:progressBar("正在生成 CBZ 文件", {
-        title = "导出进度",
-        max = actual_chapter_count
-    })
-
-    if not export_msg then
-        export_msg = MessageBox:showloadingMessage("正在生成 CBZ 文件")
-    end
-
-    local export_settings = self:getEpubExportSettings()
-    
-    local EpubHelper = require("Legado/EpubHelper")
-    local exporter = CbzExporter:new():init({
-        bookinfo = bookinfo,
-        output_path = export_settings.output_path,
-        cache_chapters = valid_chapters,
-        reportProgress = function(current_progress)
-            export_msg:reportProgress(current_progress)
-        end,
-    })
-
-    UIManager:nextTick(function()
-        local success, result = pcall(function()
-            return exporter:package()
-        end)
-
-        if export_msg then
-            if export_msg.close then
-                export_msg:close()
-            else
-                UIManager:close(export_msg)
-            end
-        end
-
-        if success and result then
-            if result.success then
-                local filename = result.path and result.path:match("([^/\\]+)$") or "未知"
-                local output_dir = result.path and result.path:match("(.+)[/\\]") or H.getHomeDir()
-                MessageBox:confirm(
-                    string.format("CBZ 导出成功！\n\n文件：%s\n位置：%s", filename, output_dir),
-                    function(open_file)
-                        if open_file and result.path then
-                            UIManager:nextTick(function()
-                                self:showReaderUI(result.path)
-                            end)
-                        end
-                    end,
-                    {
-                        ok_text = "打开",
-                        cancel_text = "完成"
-                    }
-                )
-            else
-                MessageBox:confirm(
-                    "CBZ 导出失败：" .. (result.error or "未知错误"),
-                    function(retry)
-                        if retry then
-                            self:exportBookToCbz(bookinfo)
-                        end
-                    end,
-                    {
-                        ok_text = "重试",
-                        cancel_text = "完成"
-                    }
-                )
-            end
-        else
-            MessageBox:confirm(
-                "CBZ 导出失败：" .. tostring(result),
-                function(retry)
-                    if retry then
-                        self:exportBookToCbz(bookinfo)
-                    end
-                end,
-                {
-                    ok_text = "重试",
-                    cancel_text = "完成"
-                }
-            )
-        end
-    end)
-end
-
-function M:startEpubExport(bookinfo, chapter_count, only_cached)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
-        MessageBox:error("书籍信息错误")
-        return
-    end
-
-    local book_cache_id = bookinfo.cache_id
-
-    local check_loading_msg = MessageBox:showloadingMessage("正在统计章节...")
-    -- 生成全书章节列表，检查缓存是否存在
-    local all_chapters = {}
-    local missing_count = 0
-    local cached_chapters = {}  -- 保存已缓存章节信息
-
-    for i = 0, chapter_count - 1 do
-        local chapter = Backend:getChapterInfoCache(book_cache_id, i)
-        if chapter then
-            -- 检查缓存文件是否实际存在（不依赖数据库标志）
-            local cache_chapter = Backend:getCacheChapterFilePath(chapter, true)
-            local is_cached = cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath)
-
-            if not is_cached then
-                -- 添加到待下载列表
-                chapter.call_event = 'next'
-                table.insert(all_chapters, chapter)
-                missing_count = missing_count + 1
-            else
-                -- 保存已缓存章节信息
-                table.insert(cached_chapters, cache_chapter)
-            end
-        end
-    end
-
-    if check_loading_msg then
-        if check_loading_msg.close then
-            check_loading_msg:close()
-        else
-            UIManager:close(check_loading_msg)
-        end
-    end
-
-    if only_cached then
-        MessageBox:notice(string.format('跳过 %d 个未缓存章节，开始生成 EPUB', missing_count))
-        self:generateEpubFile(bookinfo, chapter_count, cached_chapters)
-        return
-    end
-
-    if missing_count == 0 then
-        MessageBox:notice('所有章节已缓存，开始生成 EPUB')
-        self:generateEpubFile(bookinfo, chapter_count, cached_chapters)
-        return
-    end
-
-    -- 缓存缺失的章节
-    local dialog_title = string.format("缓存书籍 %d/%d 章", missing_count, chapter_count)
-    local loading_msg = missing_count > 10 and
-        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max = missing_count}) or
-        MessageBox:showloadingMessage(dialog_title, {progress_max = missing_count})
-
-    if not (loading_msg and loading_msg.reportProgress and loading_msg.close) then
-        return MessageBox:error("进度显示控件生成失败")
-    end
-
-    local cache_cancelled = false
-    local cache_complete = false
-
-    local cache_progress_callback = function(progress, err_msg)
-        if progress == false or progress == true then
-            loading_msg:close()
-            cache_complete = true
-
-            if progress == true and not cache_cancelled then
-                UIManager:nextTick(function()
-                    self:generateEpubFile(bookinfo, chapter_count)
-                end)
-            elseif err_msg then
-                MessageBox:error('缓存章节出错：', tostring(err_msg))
-            elseif cache_cancelled then
-                MessageBox:notice('已取消导出')
-            end
-        end
-        if H.is_num(progress) then
-            loading_msg:reportProgress(progress)
-        end
-    end
-
-    -- 第一个参数支持传入待下载章节列表
-    Backend:preLoadingChapters(all_chapters, nil, cache_progress_callback)
-
-    if loading_msg.cancel then
-        loading_msg:setCancelCallback(function()
-            cache_cancelled = true
-            if not cache_complete then
-                loading_msg:close()
-                MessageBox:notice('已取消缓存')
-            end
-        end)
-    end
-end
-
--- 将已缓存章节生成 epub
-function M:generateEpubFile(bookinfo, chapter_count, cached_chapters_param)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
-        MessageBox:error("书籍信息错误")
-        return
+function M:_buildEpubFile(bookinfo, chapters, export_settings)
+    if not (H.is_tbl(bookinfo) and H.is_tbl(chapters) and #chapters > 0) then
+        return {success = false, error = "无效的书籍信息或章节列表" }
     end
 
     local book_cache_id = bookinfo.cache_id
     bookinfo.name = bookinfo.name or "未知书名"
     bookinfo.author = bookinfo.author or "未知作者"
-    
-    -- 准备章节数据（如果传入了缓存章节列表，直接使用, 否则重新检测收集）
-    local valid_chapters = cached_chapters_param or {}
 
-    if not cached_chapters_param then
-        for i = 0, chapter_count - 1 do
-            local chapter = Backend:getChapterInfoCache(book_cache_id, i)
-            if chapter then
-                local cache_chapter = Backend:getCacheChapterFilePath(chapter)
-                if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
-                    table.insert(valid_chapters, cache_chapter)
-                end
-            end
+    local epub_chapters = {}
+    for _, cache_chapter in ipairs(chapters) do
+        if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) and util.fileExists(cache_chapter.cacheFilePath) then
+            local file_ext = cache_chapter.cacheFilePath:match("%.([^.]+)$")
+            local chapters_index = cache_chapter.chapters_index
+            table.insert(epub_chapters, {
+                chapters_index = chapters_index,
+                title = cache_chapter.title or string.format("第%d章", chapters_index + 1),
+                cache_ext = file_ext,
+                cache_path = cache_chapter.cacheFilePath,
+            })
         end
     end
 
-    local actual_chapter_count = #valid_chapters
+    if #epub_chapters == 0 then
+        return {success = false, error = "没有可导出的章节" }
+    end
 
-    if actual_chapter_count == 0 then
-        MessageBox:error("没有可导出的章节")
+    local output_dir = export_settings.output_path or H.getHomeDir()
+    local safe_filename = util.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author))
+    local output_path = H.joinPath(output_dir, safe_filename .. ".epub")
+
+    if util.fileExists(output_path) then pcall(util.removeFile, output_path) end
+
+    local cover_path
+    if bookinfo.coverUrl then
+        local ok
+        ok, cover_path = pcall(function()
+            return Backend:download_cover_img(book_cache_id, bookinfo.coverUrl)
+        end)
+        if not (H.is_str(cover_path) and util.fileExists(cover_path)) then
+            logger.warn("EPUB导出: 封面下载失败", cover_path)
+            cover_path = nil
+        end
+    end
+
+    local custom_css = nil
+    if H.is_str(export_settings.custom_css_path) and util.fileExists(export_settings.custom_css_path) then
+        custom_css = util.readFromFile(export_settings.custom_css_path, "r")
+    end
+
+    local EpubHelper = require("Legado/EpubHelper")
+    local exporter = EpubHelper.EpubExporter:new():init({
+        title = bookinfo.name,
+        author = bookinfo.author,
+        description = bookinfo.intro,
+        cover_path = cover_path,
+        custom_css = custom_css,
+        chapters = epub_chapters,
+        output_path = output_path,
+        book_cache_id = book_cache_id
+    })
+    
+    local ok, build_result = pcall(function()
+        return exporter:build()
+    end)
+
+    return build_result
+end
+
+function M:_processEpubExport(bookinfo, chapters, only_cached)
+    local export_settings = self:getEpubExportSettings()
+    MessageBox:loading("正在统计已缓存章节", function()
+        return self:_buildEpubFile(bookinfo, chapters, export_settings)
+    end, function(state, build_result)
+        if state == true and H.is_tbl(build_result) and build_result.success then
+            self:showExportSuccessDialog(build_result, function(path)
+                self:showReaderUI(path)
+            end)
+        else
+            self:showExportErrorDialog(H.is_tbl(build_result) and build_result.error or "EPUB构建失败", function()
+                self:_generateBookFile(bookinfo, only_cached, false)
+            end)
+        end
+    end)
+end
+
+function M:_processCbzExport(bookinfo, chapters, only_cached)
+    local export_settings = self:getEpubExportSettings()
+
+    local cache_msg = MessageBox:progressBar("缓存进度", {
+        title = "导出进度",
+        max = #chapters
+    })
+
+    local exporter = CbzExporter:new({
+        bookinfo = bookinfo,
+        output_path = export_settings.output_path,
+        cache_chapters = chapters,
+        reportProgress = function(current_progress)
+            if H.is_num(current_progress) and cache_msg and cache_msg.reportProgress then
+                cache_msg:reportProgress(current_progress)
+            end
+        end,
+    })
+
+    local success, result = pcall(function()
+        return exporter:package()
+    end)
+
+    if cache_msg and cache_msg.close then cache_msg:close() end
+    if success and H.is_tbl(result) and result.success then
+        self:showExportSuccessDialog(result, function(path)
+            self:showReaderUI(path)
+        end)
+    else
+        self:showExportErrorDialog(H.is_tbl(result) and tosring(result.error) or tostring(result), function()
+            self:_generateBookFile(bookinfo, only_cached, true)
+        end)
+    end
+end
+
+function M:_generateBookFile(bookinfo, only_cached, is_comic)
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
+        self:showExportErrorDialog("书籍信息错误")
         return
     end
-
-    local export_settings = self:getEpubExportSettings()
-    local function build_epub()
-
-            local chapters = {}
-            for _, cache_chapter in ipairs(valid_chapters) do
-                if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) and util.fileExists(cache_chapter.cacheFilePath) then
-                    local file_ext = cache_chapter.cacheFilePath:match("%.([^.]+)$")
-                    local chapters_index = cache_chapter.chapters_index
-                    -- 当仅缓存的时候, 这里章节不一定是连续的
-                    table.insert(chapters, {
-                        chapters_index = chapters_index,
-                        title = cache_chapter.title or string.format("第%d章", chapters_index + 1),
-                        cache_ext = file_ext,
-                        cache_path = cache_chapter.cacheFilePath,
-                    })
-                end
-            end
-
-            local output_dir = export_settings.output_path or H.getHomeDir()
-            local safe_filename = util.getSafeFilename(string.format("%s-%s",bookinfo.name, bookinfo.author))
-            local output_path = H.joinPath(output_dir, safe_filename .. ".epub")
-
-            if util.fileExists(output_path) then
-                pcall(util.removeFile, output_path)
-            end
-
-            local cover_path
-            if bookinfo.coverUrl then
-                --logger.info("EPUB导出: 从网络下载封面 -", bookinfo.coverUrl)
-                local ok
-                ok, cover_path = pcall(function()
-                    return Backend:download_cover_img(book_cache_id, bookinfo.coverUrl)
-                end)
-                if not (H.is_str(cover_path) and util.fileExists(cover_path)) then
-                    logger.warn("EPUB导出: 封面下载失败", cover_path)
-                else
-                    -- logger.info("EPUB导出: 封面下载成功 -", cover_path)
-                end
-            else
-                logger.warn("EPUB导出: 无封面URL，跳过封面")
-            end
-
-            --logger.info("EPUB导出: 最终封面路径 -", cover_path or "无")
-
-            local custom_css = nil
-            local use_custom_css = false
-            if H.is_str(export_settings.custom_css_path) and util.fileExists(export_settings.custom_css_path) then
-                custom_css = util.readFromFile(export_settings.custom_css_path, "r")
-                use_custom_css = true
-            end
-
-            local EpubHelper = require("Legado/EpubHelper")
-            local exporter = EpubHelper.EpubExporter:new():init({
-                title = bookinfo.name,
-                author = bookinfo.author,
-                description = bookinfo.intro,
-                cover_path = cover_path,
-                custom_css = custom_css,
-                chapters = chapters,
-                output_path = output_path,
-                book_cache_id = book_cache_id
-            })
-            
-            local build_result = exporter:build()
-            return build_result
+    local callback = function(chapters)
+        if not is_comic then
+            self:_processEpubExport(bookinfo, chapters, only_cached)
+        else
+            self:_processCbzExport(bookinfo, chapters, only_cached)
+        end
     end
-
-    MessageBox:loading("正在生成 EPUB 文件", function()
-            return build_epub()
-        end, function(state, result)
-            if state == true and H.is_tbl(result) then
-                if result.success then
-                    local filename = result.path and result.path:match("([^/\\]+)$") or "未知"
-                    local output_dir = result.path and result.path:match("(.+)[/\\]") or H.getHomeDir()
-                    MessageBox:confirm(
-                        string.format("EPUB 导出成功！\n\n文件：%s\n位置：%s", filename, output_dir),
-                        function(open_file)
-                            if open_file and result.path then
-                                UIManager:nextTick(function()
-                                    self:showReaderUI(result.path)
-                                end)
-                            end
-                        end,
-                        {
-                            ok_text = "打开",
-                            cancel_text = "完成"
-                        }
-                    )
-                else
-                    MessageBox:confirm(
-                        "EPUB 导出失败：" .. (H.is_tbl(result) and result.error or "未知错误"),
-                        function(retry)
-                            if retry then
-                                -- 重试导出
-                                self:exportBookToEpub(bookinfo)
-                            end
-                        end,
-                        {
-                            ok_text = "重试",
-                            cancel_text = "完成"
-                        }
-                    )
-                end
-            else
-                 MessageBox:confirm(
-                    string.format("EPUB 导出失败：build 过程错误: %s", tostring(result)),
-                    function(retry)
-                        if retry then
-                            self:exportBookToEpub(bookinfo)
-                        end
-                    end,
-                    {
-                        ok_text = "重试",
-                        cancel_text = "完成"
-                    }
-                )
-            end
+    self:prepareChaptersForExport(bookinfo, only_cached, function(success, result)
+        if success and H.is_tbl(result) and H.is_tbl(result.chapters) then
+            callback(result.chapters)
+        else
+            self:showExportErrorDialog(H.is_tbl(result) and result.error or "准备章节失败")
+        end
     end)
 end
 
 function M:exportBook()
     local bookinfo = self.bookinfo
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
-        MessageBox:error("书籍信息错误")
+        self:showExportErrorDialog("书籍信息错误")
         return
     end
 
-    local chapter_count = Backend:getChapterCount(bookinfo.cache_id)
+    local book_cache_id = bookinfo.cache_id
+    local chapter_count = self:_getChapterCount(book_cache_id)
     if not chapter_count or chapter_count == 0 then
-        MessageBox:error("该书没有章节")
+        self:showExportErrorDialog("该书没有章节,请刷新")
         return
     end
 
-    local is_comic = Backend:isBookTypeComic(bookinfo.cache_id)
-    local export_type = is_comic and "CBZ" or "EPUB"
-
-    -- 显示加载提示（统计章节可能需要时间）
-    local loading_msg
-    if chapter_count > 100 then
-        loading_msg = MessageBox:showloadingMessage("正在统计已缓存章节...")
-    end
-
-    UIManager:nextTick(function()
-        local cached_count = 0
-
-        local book_cache_id = bookinfo.cache_id
-        local book_cache_path = H.getBookCachePath(book_cache_id)
-
-        for i = 0, chapter_count - 1 do
-            local chapter = Backend:getChapterInfoCache(book_cache_id, i)
-            if chapter and chapter.cacheFilePath then
-                if util.fileExists(chapter.cacheFilePath) then
-                    cached_count = cached_count + 1
-                end
-            end
+    MessageBox:loading("正在统计已缓存章节", function()
+        return Backend:analyzeCacheStatus(book_cache_id)
+    end, function(state, response)
+        if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
+            return self:showExportErrorDialog("查询章节缓存状态出错")
         end
 
-        if loading_msg then
-            if loading_msg.close then
-                loading_msg:close()
-            else
-                UIManager:close(loading_msg)
+        self.chapter_cache_status = response
+        local cached_count = self.chapter_cache_status.cached_count
+        local is_comic = Backend:isBookTypeComic(book_cache_id)
+        local export_type = is_comic and "CBZ" or "EPUB"
+    
+        local export_select_callback = function(only_cached)
+            if only_cached and cached_count == 0 then
+                self:showExportErrorDialog("没有已缓存的章节")
+                return
             end
+            UIManager:nextTick(function()
+                self:_generateBookFile(bookinfo, only_cached, is_comic)
+            end)
         end
-
+    
         MessageBox:confirm(string.format(
-            "是否导出 <<%s>> 为 %s 文件？\n\n作者：%s\n总章节数：%d\n已缓存章节：%d\n\n全部导出需要下载所有章节，可能需要一些时间",
+            "是否导出 <<%s>> 为 %s 文件？\n\n作者：%s\n总章节数：%d\n已缓存章节：%d\n\n全书导出需要下载所有章节，可能需要一些时间",
             bookinfo.name or "未命名",
             export_type,
             bookinfo.author or "未知作者",
@@ -1095,38 +937,21 @@ function M:exportBook()
             cached_count
         ), function(result)
             if not result then return end
-            -- 开始导出流程（下载缺失章节）
-            if not is_comic then
-                self:startEpubExport(bookinfo, chapter_count, false)
-            else
-                self:startCbzExport(bookinfo, chapter_count, false)
-            end
+            export_select_callback(true)
         end, {
-            ok_text = "全部导出",
+            ok_text = "仅已缓存",
             cancel_text = "取消",
+            other_buttons_first = true,
             other_buttons = {{
                 {
-                    text = "仅已缓存",
+                    text = "自定义设置",
                     callback = function()
-                        if cached_count == 0 then
-                            MessageBox:error("没有已缓存的章节")
-                            return
-                        end
-                        UIManager:nextTick(function()
-                            if not is_comic then
-                                self:startEpubExport(bookinfo, chapter_count, true)
-                            else
-                                self:startCbzExport(bookinfo, chapter_count, true)
-                            end
-                        end)
+                        self:showEpubExportSettings()
                     end
-                },
-                {
-                    text = "设置",
+                }, {
+                    text = "全书导出",
                     callback = function()
-                        UIManager:nextTick(function()
-                            self:showEpubExportSettings()
-                        end)
+                        export_select_callback(false)
                     end
                 }
             }}
@@ -1164,8 +989,8 @@ function M:saveEpubExportSettings(export_settings)
 end
 
 function M:showEpubExportSettings()
-    local export_settings = self:getEpubExportSettings()
     local dialog
+    local export_settings = self:getEpubExportSettings()
 
     local function getOutputPathText()
         if export_settings.output_path then
@@ -1195,7 +1020,7 @@ function M:showEpubExportSettings()
                 onConfirm = function(output_dir)
                     export_settings.output_path = output_dir
                     Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
-                        MessageBox:notice("输出路径已设置为：" .. output_dir)
+                        MessageBox:success("输出路径已设置为：" .. output_dir)
                     end, function(err)
                         MessageBox:error("设置失败：" .. tostring(err))
                     end)
@@ -1224,7 +1049,7 @@ function M:showEpubExportSettings()
                         onConfirm = function(css_file)
                             export_settings.custom_css_path = css_file
                             Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
-                                MessageBox:notice("CSS 文件已设置：" .. css_file)
+                                MessageBox:success("CSS 文件已设置：" .. css_file)
                             end, function(err)
                                 MessageBox:error("设置失败：" .. tostring(err))
                             end)
@@ -1239,7 +1064,7 @@ function M:showEpubExportSettings()
                     UIManager:close(css_dialog)
                     export_settings.custom_css_path = nil
                     Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
-                        MessageBox:notice("已移除自定义 CSS，将使用默认样式")
+                        MessageBox:success("已移除自定义 CSS，将使用默认样式")
                     end, function(err)
                         MessageBox:error("设置失败：" .. tostring(err))
                     end)
@@ -1262,7 +1087,7 @@ function M:showEpubExportSettings()
                     export_settings.output_path = nil
                     export_settings.custom_css_path = nil
                     Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
-                        MessageBox:notice("已重置为默认设置")
+                        MessageBox:success("已重置为默认设置")
                     end, function(err)
                         MessageBox:error("设置失败：" .. tostring(err))
                     end)

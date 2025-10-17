@@ -29,11 +29,13 @@ M.install = function()
         end
         return type(file_path) == 'string' and file_path:lower():find('/cache/legado.cache/', 1, true) or false
     end
-    local is_legado_browser_path = function(file_path, instance)
+    local is_legado_browser_book = function(file_path, instance)
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
         end
-        return type(file_path) == 'string' and file_path:find("/Legado\u{200B}书目/", 1, true) or false
+        return type(file_path) == "string"
+                and file_path:find("/Legado\u{200B}书目/", 1, true)
+                and file_path:find("\u{200B}.html", 1, true)
     end
     local ReaderRolling = require("apps/reader/modules/readerrolling")
     local onGotoViewRel_original = ReaderRolling.onGotoViewRel
@@ -81,7 +83,7 @@ M.install = function()
     local ReadHistory = require("readhistory")
     local original_addItem = ReadHistory.addItem
     function ReadHistory:addItem(file, ts, no_flush)
-        if is_legado_path(file) or is_legado_browser_path(file) then
+        if is_legado_path(file) or is_legado_browser_book(file) then
             return
         end
         return original_addItem(self, file, ts, no_flush)
@@ -105,7 +107,7 @@ M.install = function()
     local FileManager = require("apps/filemanager/filemanager")
     local original_showOpenWithDialog = FileManager.showOpenWithDialog
     function FileManager:showOpenWithDialog(file)
-        if file and is_legado_browser_path(file) then
+        if file and is_legado_browser_book(file) then
             self:handleEvent(Event:new("ShowLegadoLibraryView"))
         else
             original_showOpenWithDialog(self, file)
@@ -131,7 +133,7 @@ M.install = function()
     local filemanagerutil = require("apps/filemanager/filemanagerutil")
     local original_genBookCoverButton = filemanagerutil.genBookCoverButton
     function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
-        if file and is_legado_browser_path(file) then
+        if file and is_legado_browser_book(file) then
             return {
                 text = "legado 书籍",
                 enabled = true,

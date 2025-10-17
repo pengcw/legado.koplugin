@@ -215,46 +215,26 @@ function M:changeSourceDialog(bookinfo, onReturnCallback)
 end
 
 function M:showBookInfo(bookinfo)
-    if not H.is_tbl(bookinfo) then
-        return MessageBox:error("参数错误")
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and bookinfo.name ~= "") then 
+        return MessageBox:error("书籍信息错误")
     end
 
-    local msginfo = [[
-书名: <<%1>>
-作者: %2
-分类: %3
-书源名称: %4
-书源地址: %5
-总章数：%6
-总字数：%7
-简介：%8
-]]
+    local button_text = (self.call_mode == "SEARCH") and '添加' or '换源'
 
-    -- 限制简介长度，避免字体过小
-    local intro = bookinfo.intro or ''
-    local max_intro_length = 200
-    if #intro > max_intro_length then
-        intro = intro:sub(1, max_intro_length) .. "..."
-    end
-
-    msginfo = T(msginfo, bookinfo.name or '', bookinfo.author or '', bookinfo.kind or '', bookinfo.originName or '',
-        bookinfo.origin or '', bookinfo.totalChapterNum or '', bookinfo.wordCount or '', intro)
-
-    MessageBox:confirm(msginfo, nil, {
-        icon = "notice-info",
-        no_ok_button = true,
-        other_buttons_first = true,
-        other_buttons = {{{
-            text = (self.call_mode == "SEARCH") and '添加' or '换源',
-            callback = function()
+    local BookDetailsDialog = require("Legado/BookDetailsDialog")
+    local dialog = BookDetailsDialog:new{
+        bookinfo = bookinfo,
+        callbacks = {
+            [button_text] = function()
                 if self.call_mode == "SEARCH" then
                     self:addBookToLibrary(bookinfo)
                 else
                     self:changeBookSource(bookinfo)
                 end
-            end
-        }}}
-    })
+            end,
+        },
+    }
+    UIManager:show(dialog)
 end
 
 local function validateInput(text)
@@ -533,19 +513,18 @@ function M:changeBookSource(bookinfo)
         MessageBox:notice('参数错误')
         return
     end
+    -- fix legado app 只支持 save
+    local new_bookinfo = self.bookinfo
+    new_bookinfo.bookSourceUrl = bookinfo.origin
+    new_bookinfo.newUrl = bookinfo.bookUrl
 
-    local old_bookUrl = self.bookinfo.bookUrl
-    if not (self.call_mode ~= "SEARCH" and H.is_str(old_bookUrl) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.origin)) then
+    if not (self.call_mode ~= "SEARCH" and H.is_str(self.bookinfo.bookUrl) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.origin)) then
         MessageBox:notice('参数错误')
         return
     end
     Backend:closeDbManager()
     MessageBox:loading("更换中 ", function()
-        return Backend:changeBookSource({
-            bookUrl = old_bookUrl,
-            bookSourceUrl = bookinfo.origin,
-            newUrl = bookinfo.bookUrl
-        })
+        return Backend:changeBookSource(new_bookinfo)
     end, function(state, response)
         if state == true then
             Backend:HandleResponse(response, function(data)

@@ -137,30 +137,42 @@ end
 function LibraryView:openBrowserMenu(file)
     self:getInstance()
     self:getBrowserWidget()
+
+    local book_cache_id
+    local ui = FileManager.instance or ReaderUI.instance
+    if file and ui and ui.bookinfo then
+        -- 获取书籍缓存ID，优先从DocSettings读取，如果没有则从.lua配置文件读取
+        local doc_settings = DocSettings:open(file)
+        book_cache_id = doc_settings:readSetting("book_cache_id")
+
+        if not book_cache_id then
+            local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, file)
+            if ok and lnk_config then
+                book_cache_id = lnk_config:readSetting("book_cache_id")
+                -- 同步到DocSettings以便下次直接读取
+                if book_cache_id then
+                    doc_settings:saveSetting("book_cache_id", book_cache_id):flush()
+                end
+            end
+        end
+    else
+        return MessageBox:error("获取书籍信息出错")
+    end
+
     local dialog
     local buttons = { {{
+        text = "更多设置",
+        callback = function()
+            UIManager:close(dialog)
+            UIManager:nextTick(function()
+                self:openMenu()
+            end)
+        end
+    }},{{
         text = "更换书籍封面",
         callback = function()
-            local ui = FileManager.instance or ReaderUI.instance
-            if file and ui and ui.bookinfo then
+            if book_cache_id then
                 UIManager:close(dialog)
-
-                logger.info("更换封面: 快捷方式文件 =", file)
-
-                -- 获取书籍缓存ID，优先从DocSettings读取，如果没有则从.lua配置文件读取
-                local doc_settings = DocSettings:open(file)
-                local book_cache_id = doc_settings:readSetting("book_cache_id")
-
-                if not book_cache_id then
-                    local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, file)
-                    if ok and lnk_config then
-                        book_cache_id = lnk_config:readSetting("book_cache_id")
-                        -- 同步到DocSettings以便下次直接读取
-                        if book_cache_id then
-                            doc_settings:saveSetting("book_cache_id", book_cache_id):flush()
-                        end
-                    end
-                end
 
                 logger.info("更换封面: 获取到的 book_cache_id =", book_cache_id or "无")
 
@@ -223,12 +235,22 @@ function LibraryView:openBrowserMenu(file)
             end
         end
     }, {
-        text = "更多设置",
+        text = "显示书籍详情",
         callback = function()
-            UIManager:close(dialog)
-            UIManager:nextTick(function()
-                self:openMenu()
-            end)
+            if book_cache_id then
+                local bookinfo = Backend:getBookInfoCache(book_cache_id)
+                if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
+                    MessageBox:error('书籍不存在于当前激活书架或已被删除')
+                    return
+                end
+                UIManager:close(dialog)
+                UIManager:nextTick(function()
+                    UIManager:show(require("Legado/BookDetailsDialog"):new{
+                        bookinfo = bookinfo,
+                        has_reload_btn = true,
+                    })
+                end)
+            end
         end
     }}, {{
         text = "清空书籍快捷方式",
@@ -246,7 +268,7 @@ function LibraryView:openBrowserMenu(file)
                 cancel_text = "取消"
             })
         end
-    }}, {{
+    }, {
         text = "修复书籍快捷方式",
         callback = function()
             UIManager:close(dialog)
@@ -367,7 +389,7 @@ function LibraryView:openMenu(dimen)
                 value_hold_step = 2,
                 ok_text = "确定",
                 title_text = "设置下载线程数",
-                info_text = "建议根据网络状况选择4-8线程",
+                info_text = "建议根据网络状况选择 4–8 线程\n（如下载异常，可尝试调为 1）",
                 callback = function(spin)
                     local threads = spin.value
                     settings.download_threads = threads
@@ -514,7 +536,7 @@ end
 
 function LibraryView:loadAndRenderChapter(chapter)
     if not (H.is_tbl(chapter) and chapter.book_cache_id) then 
-        logger.err("loadAndRenderChapter  parameter error")
+        logger.err("loadAndRenderChapter: chapter parameter is invalid")
         return 
     end
     if chapter.cacheExt == 'cbz' and Backend:getSettings().stream_image_view == true then
@@ -564,8 +586,14 @@ function LibraryView:loadAndRenderChapter(chapter)
 end
 
 function LibraryView:ReaderUIEventCallback(chapter_direction)
+    if not H.is_str(chapter_direction) then
+        logger.err("ReaderUIEventCallback: chapter_direction parameter is invalid")
+        return
+    end
+
     local chapter = self:readingChapter()
-    if not (H.is_str(chapter_direction) and H.is_tbl(chapter)) then
+    if not (H.is_tbl(chapter) and chapter.book_cache_id) then
+        logger.err("ReaderUIEventCallback: current reading chapter is invalid")
         return
     end
 
@@ -669,11 +697,13 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
         return type(file_path) == 'string' and file_path:lower():find('/cache/legado.cache/', 1, true) or false
     end
-    local is_legado_browser_path = function(file_path, instance)
+    local is_legado_browser_book = function(file_path, instance)
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
         end
-        return type(file_path) == 'string' and file_path:find("/Legado\u{200B}书目/", 1, true) or false
+        return type(file_path) == "string"
+                and file_path:find("/Legado\u{200B}书目/", 1, true)
+                and file_path:find("\u{200B}.html", 1, true)
     end
 
     function parent_ref:onShowLegadoLibraryView()
@@ -834,7 +864,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 doc_settings.data.last_page = page_number
             end
 
-        elseif is_legado_browser_path(document.file) and doc_settings.data then
+        elseif is_legado_browser_book(document.file) and doc_settings.data then
             doc_settings.data.provider = "legado"
         end
     end
@@ -869,7 +899,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     book_defaults:flush()
                 end
             end
-        elseif is_legado_browser_path(nil, self.ui) and self.ui.doc_settings then
+        elseif is_legado_browser_book(nil, self.ui) and self.ui.doc_settings then
             self.ui.doc_settings.data.provider = "legado"
         end
     end
@@ -1002,7 +1032,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             UIManager:broadcastEvent(Event:new("SetupShowReader"))
             ReaderUI:showReader(file, nil, true)
         end
-        if not (is_legado_browser_path(file) and file:find("\u{200B}.html", 1, true)) then
+        if not is_legado_browser_book(file) then
             open_regular_file(file)
             return
         end
@@ -1455,71 +1485,27 @@ local function init_book_menu(parent)
             return
         end
         local bookinfo = Backend:getBookInfoCache(item.cache_id)
+        if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then return end
 
-        -- 构建信息文本，当字段为空时显示空
-        local msginfo = [[
-书名： <<%1>>
-作者： %2
-分类： %3
-书源： %4
-总章数：%5
-总字数：%6
-    ]]
-
-        msginfo = T(msginfo,
-            bookinfo.name or '',
-            bookinfo.author or '',
-            bookinfo.kind or '',
-            bookinfo.originName or '',
-            bookinfo.totalChapterNum or '',
-            bookinfo.wordCount or '')
-
-        MessageBox:confirm(msginfo, nil, {
-            icon = "notice-info",
-            no_ok_button = true,
-            other_buttons_first = true,
-            other_buttons = {{{
-                text = "简介",
-                callback = function()
-                    local intro_text
-                    if bookinfo.intro and bookinfo.intro ~= '' then
-                        intro_text = string.format("《%s》\n\n%s", bookinfo.name or "未命名", bookinfo.intro)
-                    else
-                        intro_text = "暂无简介"
-                    end
-                    MessageBox:custom({
-                        text = intro_text,
-                        alignment = "left"
-                    })
-                end
-            }}, {{
-                text = (bookinfo.sortOrder > 0) and '置顶书籍' or '取消置顶',
-                callback = function()
+        local pin_top_text = (H.is_num(bookinfo.sortOrder) and bookinfo.sortOrder > 0) and '置顶' or '取消置顶'
+        local BookDetailsDialog = require("Legado/BookDetailsDialog")
+        local dialog = BookDetailsDialog:new{
+            bookinfo = bookinfo,
+            has_reload_btn = true,
+            callbacks = {
+                [pin_top_text] = function()
                     Backend:manuallyPinToTop(item.cache_id, bookinfo.sortOrder)
                     self:refreshItems(true)
-                end
-            }}, {{
-                text = "快捷方式",
-                callback = function()
+                end,
+                ["快捷方式"] = function()
                     UIManager:nextTick(function()
                         self.parent_ref:addBkShortcut(bookinfo, true)
                     end)
                     MessageBox:notice("已调用生成，请到 Home 目录查看")
-                end
-            }}, {{
-                text = '换源',
-                callback = function()
-                    NetworkMgr:runWhenOnline(function()
-                        require("Legado/BookSourceResults"):changeSourceDialog(bookinfo, function()
-                            self:onRefreshLibrary()
-                        end)
-                    end)
-                end
-            }}, {{
-                text = '删除',
-                callback = function()
+                end,
+                ["删除"] = function()
                     MessageBox:confirm(string.format(
-                        "是否删除 <<%s>>？\r\n删除后关联记录会隐藏，重新添加可恢复",
+                        "是否从书架删除 <<%s>>？\r\n删除后关联记录会隐藏，重新添加可恢复",
                         bookinfo.name), function(result)
                         if result then
                             Backend:closeDbManager()
@@ -1541,11 +1527,10 @@ local function init_book_menu(parent)
                         ok_text = "删除",
                         cancel_text = "取消"
                     })
-
-                end
-            }}}
-        })
-
+                end,
+            }
+        }
+        UIManager:show(dialog)
     end
 
     function book_menu:onMenuSelect(entry, pos)

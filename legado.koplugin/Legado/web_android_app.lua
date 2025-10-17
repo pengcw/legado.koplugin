@@ -41,12 +41,13 @@ function M:init()
  
     -- fix koreader ver 2024.05
     package.loaded["Spore.Middleware.ForceJSON"] = {}
-    require("Spore.Middleware.ForceJSON").call = function(args, req)
+    require("Spore.Middleware.ForceJSON").call = function(_, req)
         -- req.env.HTTP_USER_AGENT = ""
         req.headers = req.headers or {}
         req.headers["user-agent"] =
-            "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         return function(res)
+            if type(res) ~= "table" then res = {} end
             res.headers = res.headers or {}
             res.headers["content-type"] = 'application/json'
             return res
@@ -76,7 +77,7 @@ function M:init()
 
         return function(res)
             if type(res) == 'table' and type(res.body) == 'table' and 
-                res.body.isSuccess == false and self:isNeedLogin(res.body.data) then
+                res.body.isSuccess == false and self:isNeedLogin(res.body) then
                 self:reader3Token(nil)
             end
             return res
@@ -88,9 +89,12 @@ function M:getLuaConfig(path)
     return LuaSettings:open(path)
 end
 
-function M:isNeedLogin(err_msg)
-    if self._need_login == true and 
-        string.find(tostring(err_msg), 'NEED_LOGIN', 1, true) then
+function M:isNeedLogin(response)
+    if not ( self._need_login == true and H.is_tbl(response)) then return false end
+    -- reader3 res.body.data
+    -- qread res.body.errorMsg
+    local err_msg = response.data or response.errorMsg
+    if H.is_str(err_msg) and string.find(tostring(err_msg), 'NEED_LOGIN', 1, true) then
         return true
     end
     return false
@@ -149,7 +153,7 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
         return nil, string.format("Web 服务: %s", err_msg)
     end
   
-    if isRetry ~= true and res.body.isSuccess == false and self:isNeedLogin(res.body.data) then
+    if isRetry ~= true and res.body.isSuccess == false and self:isNeedLogin(res.body) then
         self:reader3Token(nil)
         self:_reader3Login()
         logger.err("Need login, refreshed session and retrying")
@@ -157,7 +161,7 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
     end
 
     if res.body.isSuccess == true then
-          -- fix isSuccess == true 但是没有 data 的情况, 如 saveBookProgress
+          -- fix qread isSuccess == true 但是没有 data 或 data 为 字符的情况, 如 saveBookProgress
           if not res.body.data then res.body.data = {} end
           if H.is_func(callback)  then
               return callback(res.body) 
@@ -369,7 +373,7 @@ function M:changeBookSource(new_book_source, callback)
     return self:saveBook(new_book_source, callback)
 end
 
--- { errmsg = "", list = err, lastIndex = 1}
+-- { errorMsg = "", list = err, lastIndex = 1}
 function M:searchBookMulti(options, callback)
     local search_text = options.search_text
     local ret, err_msg = self:_searchBookSocket(search_text)
@@ -387,10 +391,10 @@ function M:_searchBookSocket(search_text, filter, timeout)
 
   timeout = timeout or 60
 
-  local is_precise = false
+  local is_exact_search = false
   if string.sub(search_text, 1, 1) == '=' then
       search_text = string.sub(search_text, 2)
-      is_precise = true
+      is_exact_search = true
   end
 
   local JSON = require("json")
@@ -429,28 +433,34 @@ function M:_searchBookSocket(search_text, filter, timeout)
       return nil, "请求失败：" .. tostring(err)
   end
 
-  local filterEven
-  if H.is_tbl(filter) and filter.name then
-      filterEven = function(line)
-          if H.is_tbl(line) and (filter.name == nil or line.name == filter.name) and
-              (filter.author == nil or line.author == filter.author) and
-              (filter.origin == nil or line.origin == filter.origin) then
-              return line
-          end
-      end
-  elseif is_precise == true then
-      filterEven = function(line)
-          if H.is_tbl(line) and line.name and (line.name == search_text or line.author == search_text) then
-              return line
-          end
-      end
-  else
-      filterEven = function(line)
-          if H.is_tbl(line) then
-              return line
-          end
-      end
-  end
+    local function filter_even(book)
+        if not H.is_tbl(book) then return false end
+
+        local has_name_filter = H.is_str(filter and filter.name) and filter.name   ~= ""
+        local has_author_filter = H.is_str(filter and filter.author) and filter.author ~= ""
+        local has_origin_filter = H.is_str(filter and filter.origin) and filter.origin ~= ""
+
+        if has_name_filter or has_author_filter or has_origin_filter then
+            local match_name = has_name_filter and H.is_str(book.name) and book.name == filter.name
+            local match_author = has_author_filter and H.is_str(book.author) and book.author == filter.author
+            local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == filter.origin
+
+            if has_name_filter and not match_name then return false end
+            if has_author_filter and not match_author then return false end
+            if has_origin_filter and not match_origin then return false end
+
+            return true
+        end
+
+        -- 否则走精确匹配逻辑
+        if is_exact_search then
+            return (H.is_str(book.name) and book.name == search_text)
+                or (H.is_str(book.author) and book.author == search_text)
+        end
+
+        -- 默认保留
+        return true
+    end
 
   client:send(key_json)
   ok, err = H.pcall(function()
@@ -460,37 +470,27 @@ function M:_searchBookSocket(search_text, filter, timeout)
 
       while true do
           local response_body = client:receive()
-          if not response_body then
-              break
-          end
+          if not response_body then break end
 
           if os.time() - start_time > timeout then
               logger.err("ws receive 超时")
               break
           end
 
-          local _, parsed_body = pcall(JSON.decode, response_body)
-          if type(parsed_body) ~= 'table' or #parsed_body == 0 then
-              -- pong
-              goto continue
-          end
-
-          local start_idx = #response + 1
-          for i, v in ipairs(parsed_body) do
-
-              local deduplication_key = table.concat({v.name, v.author or "", v.originOrder or 1})
-              if not deduplication[deduplication_key] and filterEven(v) then
-                  response[start_idx] = v
-                  start_idx = start_idx + 1
-                  deduplication[deduplication_key] = true
+          local ok_decode, parsed_body = pcall(JSON.decode, response_body)
+          if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
+              for i, v in ipairs(parsed_body) do
+                if H.is_tbl(v) and H.is_str(v.name) and v.name ~= "" and H.is_str(v.bookUrl) and v.bookUrl ~= "" then
+                    local deduplication_key = table.concat({v.name, v.author or "", v.originOrder or 1})
+                    if not deduplication[deduplication_key] and filter_even(v) then
+                        table.insert(response, v)
+                        deduplication[deduplication_key] = true
+                    end
+                 end
               end
           end
-
-          ::continue::
       end
       deduplication = nil
-      collectgarbage()
-      collectgarbage()
       return response
   end)
 

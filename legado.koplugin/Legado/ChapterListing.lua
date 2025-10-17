@@ -281,90 +281,20 @@ function ChapterListing:onMenuHold(item)
                 value_hold_step = 5,
                 ok_text = "下载",
                 title_text = "请选择需下载的章数：",
-                info_text = "( 默认跳过已读和已下载, 点击中间数字可直接输入)",
+                info_text = "(点击中间数字可直接输入)",
                 extra_text = Icons.FA_DOWNLOAD .. " 下载本章后全部",
                 callback = function(autoturn_spin)
-
-                    local status, err = pcall(function()
-                        self:ChapterDownManager(tonumber(chapters_index), 'next', autoturn_spin.value)
+                    require("Legado/ExportDialog"):new({
+                        bookinfo = self.bookinfo
+                    }):cacheSelectedChapters(tonumber(chapters_index), autoturn_spin.value, function(success)
+                        self:refreshItems(true)
                     end)
-                    if not status and err then
-                        dbg.log('向后下载出错：', err)
-                    end
                 end,
                 extra_callback = function()
-                    -- 获取章节总数，如果未初始化则从Backend获取
-                    if not self.all_chapters_count then
-                        self.all_chapters_count = Backend:getChapterCount(self.bookinfo.cache_id)
-                    end
-
-                    local chapter_count = tonumber(self.all_chapters_count)
-                    local start_index = tonumber(chapters_index)
-
-                    if not chapter_count or chapter_count == 0 then
-                        MessageBox:error("该书章节列表为空，请手动刷新目录后再缓存")
-                        return
-                    end
-
-                    if start_index >= chapter_count then
-                        MessageBox:notice("已经是最后一章")
-                        return
-                    end
-
-                    local loading_msg = MessageBox:showloadingMessage("正在统计章节...")
-
-                    UIManager:nextTick(function()
-                        -- 统计从当前章节到末尾的缓存状态
-                        local cache_status = Backend:analyzeCacheStatus(self.bookinfo.cache_id, chapter_count)
-
-                        if loading_msg then
-                            if loading_msg.close then
-                                loading_msg:close()
-                            else
-                                UIManager:close(loading_msg)
-                            end
-                        end
-
-                        -- 筛选出从当前章节开始的未缓存章节
-                        local remaining_uncached = {}
-                        local remaining_total = chapter_count - start_index
-                        local remaining_cached = 0
-
-                        for _, chapter in ipairs(cache_status.uncached_chapters) do
-                            if tonumber(chapter.chapters_index) >= start_index then
-                                table.insert(remaining_uncached, chapter)
-                            end
-                        end
-
-                        -- 计算剩余已缓存数量
-                        remaining_cached = remaining_total - #remaining_uncached
-
-                        if #remaining_uncached == 0 then
-                            MessageBox:notice(string.format("本章及后续章节已全部缓存！\n剩余章节：%d", remaining_total))
-                            return
-                        end
-
-                        MessageBox:confirm(string.format(
-                            "书名：<<%s>>\n起始章节：第%d章\n\n剩余章节：%d\n已缓存：%d\n待缓存：%d\n\n是否开始缓存？",
-                            self.bookinfo.name or "未命名",
-                            start_index + 1,
-                            remaining_total,
-                            remaining_cached,
-                            #remaining_uncached
-                        ), function(result)
-                            if result then
-                                -- 使用Backend统一的缓存函数，支持自动重试和错误处理
-                                -- 传递刷新回调，在缓存完成后刷新章节列表
-                                require("Legado/ExportDialog"):init(self.bookinfo):startCacheChapters(nil, remaining_uncached, chapter_count, nil, function(success)
-                                    if success then
-                                        self:refreshItems(true, true)
-                                    end
-                                end)
-                            end
-                        end, {
-                            ok_text = "开始缓存",
-                            cancel_text = "取消"
-                        })
+                    require("Legado/ExportDialog"):new({
+                        bookinfo = self.bookinfo
+                    }):cacheSelectedChapters(tonumber(chapters_index), nil, function(success)
+                        self:refreshItems(true)
                     end)
                 end
             }
@@ -430,64 +360,6 @@ function ChapterListing:showReaderUI(chapter)
     end
 end
 
-function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, down_chapters_count, dismiss_callback,
-    cancel_callback)
-    if not H.is_num(begin_chapters_index) then
-        MessageBox:error('下载参数错误')
-        return
-    end
-
-    local book_cache_id = self.bookinfo.cache_id
-
-    call_event = call_event and call_event or 'next'
-
-    local begin_chapter = Backend:getChapterInfoCache(book_cache_id, begin_chapters_index)
-    begin_chapter.call_event = call_event
-
-    if not (H.is_tbl(begin_chapter) and begin_chapter.chapters_index ~= nil) then
-        MessageBox:error('没有可下载章节')
-        return
-    end
-
-    if down_chapters_count == nil then
-        down_chapters_count = Backend:getChapterCount(book_cache_id)
-    end
-    down_chapters_count = tonumber(down_chapters_count)
-
-    if not (down_chapters_count and down_chapters_count > 0) then
-        MessageBox:error('没有查询到可下载章节')
-        return
-    end
-
-    -- down_chapters_count > 10 call progressBar
-    local dialog_title = string.format("缓存书籍共%s章", down_chapters_count)
-    local loading_msg = down_chapters_count > 10 and 
-        MessageBox:progressBar(dialog_title, {title = "正在下载章节", max =  down_chapters_count}) or 
-        MessageBox:showloadingMessage(dialog_title, {progress_max = down_chapters_count})
-
-    if not (loading_msg and loading_msg.reportProgress and loading_msg.close) then
-        return MessageBox:error("进度显示控件生成失败")
-    end
-
-    local result_progress_callback = function(progress, err_msg)
-        if progress == false or progress == true then
-            loading_msg:close()
-            if progress == true then
-                MessageBox:notice('下载完成')
-                self:refreshItems(true)
-            elseif err_msg then
-                MessageBox:error('后台下载任务出错:', tostring(err_msg))
-            end
-        end
-        if H.is_num(progress) then
-            loading_msg:reportProgress(progress)
-        end
-         logger.dbg("result_progress_callback:", progress, err_msg)
-    end
-
-    Backend:preLoadingChapters(begin_chapter, down_chapters_count, result_progress_callback)
-end
-
 function ChapterListing:syncProgressShow(chapter)
     Backend:closeDbManager()
     MessageBox:loading("同步中 ", function()
@@ -535,13 +407,17 @@ function ChapterListing:openMenu()
     local buttons = {{},{{
         text = Icons.FA_GLOBE .. " 切换书源",
         callback = function()
-            UIManager:close(dialog)
-            NetworkMgr:runWhenOnline(function()
+            if NetworkMgr:isConnected() then
+                UIManager:close(dialog)
                 -- autoChangeSource
-                require("Legado/BookSourceResults"):changeSourceDialog(self.bookinfo, function()
-                    self:onReturn()
+                UIManager:nextTick(function()
+                    require("Legado/BookSourceResults"):changeSourceDialog(self.bookinfo, function()
+                        self:onReturn()
+                    end)
                 end)
-            end)
+            else
+                MessageBox:notice("操作失败，请检查网络")
+            end
         end,
         align = "left",
     }}, {{
@@ -573,44 +449,54 @@ function ChapterListing:openMenu()
         end,
         align = "left",
     }}, {{
-        text = Icons.FA_TRASH .. " 清空缓存",
+        text = Icons.FA_DOWNLOAD .. " 缓存管理",
         callback = function()
             UIManager:close(dialog)
-            Backend:closeDbManager()
-            MessageBox:loading("清理中 ", function()
-                return Backend:cleanBookCache(self.bookinfo.cache_id)
-            end, function(state, response)
-                if state == true then
-                    Backend:HandleResponse(response, function(data)
-                        MessageBox:notice("已清理，刷新重新可添加")
-                        self:onReturn()
-
-                    end, function(err_msg)
-                        MessageBox:error('操作失败：', err_msg)
-                    end)
-
-                end
-
-            end)
-
-        end,
-        align = "left",
-    }}, {{
-        text = Icons.FA_DOWNLOAD .. " 缓存全书",
-        callback = function()
-            UIManager:close(dialog)
-            require("Legado/ExportDialog"):init(self.bookinfo):cacheAllChapters(function(success)
-                    if success then
-                        self:refreshItems(true)
-                    end
-            end)
-        end,
-        align = "left",
-    }}, {{
-        text = Icons.FA_BOOK .. " 导出书籍",
-        callback = function()
-            UIManager:close(dialog)
-            require("Legado/ExportDialog"):init(self.bookinfo):exportBook()
+            MessageBox:confirm(
+                    string.format("《%s》: \n\n (部分书源存在访问频率限制，如遇章节缺失或内容不完整，可尝试: \n  长按章节分章下载、调低并发下载数)", self.bookinfo.name),
+                    function(result)
+                        if result then
+                            require("Legado/ExportDialog"):new({
+                                bookinfo = self.bookinfo
+                            }):cacheAllChapters(function(success)
+                                self:refreshItems(true)
+                            end)
+                        end
+                    end,
+                    {
+                        ok_text = "缓存全书",
+                        cancel_text = "取消",
+                        other_buttons_first = true,
+                        other_buttons = {{{
+                            text = "导出书籍",
+                            callback = function()
+                                require("Legado/ExportDialog"):new({ bookinfo = self.bookinfo }):exportBook()
+                            end,
+                        }, {
+                            text = "清除缓存",
+                            callback = function()
+                                MessageBox:confirm(
+                                    "请确认清除本书缓存：\n",
+                                    function(result)
+                                        if not result then return end
+                                        Backend:closeDbManager()
+                                        MessageBox:loading("清理中 ", function()
+                                            return Backend:cleanBookCache(self.bookinfo.cache_id)
+                                        end, function(state, response)
+                                            if state == true then
+                                                Backend:HandleResponse(response, function(data)
+                                                    MessageBox:success("已清理，刷新重新可添加")
+                                                    self:onReturn()
+                                                end, function(err_msg)
+                                                    MessageBox:error('请稍后重试：', err_msg)
+                                                end)
+                                            end
+                                        end)
+                                end)
+                            end,
+                        }}},
+                    }
+                )
         end,
         align = "left",
     }}, {{
