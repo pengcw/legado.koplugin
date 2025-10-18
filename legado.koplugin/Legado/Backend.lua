@@ -225,7 +225,6 @@ function M:initialize()
     if H.is_tbl(self.settings_data) and not (H.is_tbl(self.settings_data.data) and 
                 self.settings_data.data['current_conf_name']) then
         self.settings_data.data = {
-                chapter_sorting_mode = "chapter_descending",
                 server_address = "http://127.0.0.1:1122",
                 current_conf_name = "default",
                 web_configs ={
@@ -238,7 +237,6 @@ function M:initialize()
                 server_type = 1,
                 reader3_un = '',
                 reader3_pwd = '',
-                stream_image_view = nil,
                 disable_browser = nil,
                 sync_reading = nil,
                 open_at_last_read = nil,
@@ -297,6 +295,11 @@ function M:backgroundCacheConfig()
     return self:getLuaConfig(H.getTempDirectory() .. '/cache.lua')
 end
 
+function M:sharedChapterMetadata(book_cache_dir)
+    if not (H.is_str(book_cache_dir) and util.pathExists(book_cache_dir)) then return {} end
+    local book_defaults_path = H.joinPath(book_cache_dir, "book_defaults.lua")
+    return self:getLuaConfig(book_defaults_path)
+end
 function M:isBookTypeComic(book_cache_id)
     if not H.is_str(book_cache_id) then return false end
     local chapter = self:getChapterInfoCache(book_cache_id, 1)
@@ -321,6 +324,23 @@ function M:refreshLibraryCache(last_refresh_time)
     end)
     return wrap_response(ret, err_msg)
 end
+
+function M:syncAndResortBooks()
+    local wrapped_response = self:refreshLibraryCache()
+    return self:HandleResponse(wrapped_response, function(data)
+        local bookShelfId = self:getCurrentBookShelfId()
+        local status, err = pcall(function()
+            return self.dbManager:resortBooksByLastRead(bookShelfId)
+        end)
+        if not status then
+            return wrap_response(nil, "排序失败: " .. tostring(err))
+        end
+        return wrap_response(true)
+    end, function(err_msg)
+        return wrap_response(nil, err_msg)
+    end)
+end
+
 function M:addBookToLibrary(bookinfo)
     return wrap_response(self.apiClient:saveBook(bookinfo, function(response)
         -- isReader3Only = true
@@ -1700,9 +1720,7 @@ function M:manuallyPinToTop(bookCacheId, sortOrder)
     if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
         return wrap_response(nil, '参数错误')
     end
-    self.dbManager:transaction(function()
-        return self.dbManager:setBooksTopStatus(bookShelfId, bookCacheId, sortOrder)
-    end)()
+    self.dbManager:setBooksTopStatus(bookShelfId, bookCacheId, sortOrder)
     return wrap_response(true)
 end
 
@@ -1720,7 +1738,7 @@ function M:autoPinToTop(bookCacheId, sortOrder)
     if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
         return wrap_response(nil, '参数错误')
     end
-    self.dbManager:setBooksTopStatus(bookShelfId, bookCacheId, nil, 0)
+    self.dbManager:setBooksTopStatus(bookShelfId, bookCacheId, nil, true)
     return wrap_response(true)
 end
 
@@ -1732,11 +1750,37 @@ function M:getChapterLastUpdateTime(bookCacheId)
     return self.dbManager:getChapterLastUpdateTime(bookCacheId)
 end
 
-function M:getBookChapterCache(bookCacheId)
+function M:getBookExtras(book_cache_id)
+    local book_cache_dir = H.getBookCachePath(book_cache_id)
+    return self:getLuaConfig(H.joinPath(book_cache_dir, "cache.lua"))
+end
+
+function M:chapterSortingMode(bookCacheId, mode)
+    if not H.is_str(bookCacheId) then
+        return wrap_response(nil, 'bookCacheId 参数错误')
+    end
+    local extras_settings = self:getBookExtras(bookCacheId)
+    if mode then
+        if not (H.is_str(mode) and (mode == 'ASC' or mode == 'DESC')) then
+            return wrap_response(nil, 'mode 参数错误，必须是 "ASC" 或 "DESC"')
+        end
+        extras_settings:saveSetting("chapter_sorting_mode", mode):flush()
+        return wrap_response(true)
+    else
+        local chapter_sorting_mode = "ASC"
+        if H.is_tbl(extras_settings.data) and H.is_str(extras_settings.data.chapter_sorting_mode) then
+            chapter_sorting_mode = extras_settings.data.chapter_sorting_mode
+        end
+        return chapter_sorting_mode
+    end
+end
+
+function M:getAllChaptersByUI(bookCacheId)
     local bookShelfId = self:getCurrentBookShelfId()
 
+    local chapter_sorting_mode = self:chapterSortingMode(bookCacheId)
     local is_desc_sort = true
-    if self.settings_data.data['chapter_sorting_mode'] == 'chapter_ascending' then
+    if chapter_sorting_mode == 'ASC' then
         is_desc_sort = false
     end
     local chapter_data = self.dbManager:getAllChaptersByUI(bookCacheId, is_desc_sort)
@@ -2017,7 +2061,18 @@ function M:after_reader_chapter_show(chapter)
             }
         end
 
-        self.dbManager:dynamicUpdateChapters(chapter, update_state)
+        local bookShelfId = self:getCurrentBookShelfId()
+        self.dbManager:transaction(function()
+            self.dbManager:dynamicUpdateChapters(chapter, update_state)        
+            return self.dbManager:dynamicUpdate('books', {
+                sortOrder = {
+                    _set = "= CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER)"
+                }
+            }, {
+                bookCacheId = book_cache_id,
+                bookShelfId = bookShelfId
+            })
+        end)()
     end)
 
     if not status then

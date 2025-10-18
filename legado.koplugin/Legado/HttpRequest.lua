@@ -47,12 +47,12 @@ local function get_image_format_head8(image_data)
         return "jpg"
     elseif header:sub(1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then
         return "png"
-    elseif header:sub(1, 4) == "\x47\x49\x46\x38" then
-        return "gif"
-    elseif header:sub(1, 2) == "\x42\x4D" then
-        return "bmp"
     elseif header:sub(1, 4) == "\x52\x49\x46\x46" then
         return "webp"
+    elseif header:sub(1, 2) == "\x42\x4D" then
+        return "bmp"
+    elseif header:sub(1, 4) == "\x47\x49\x46\x38" then
+        return "gif"
     elseif header:sub(1, 4) == "\x49\x49\x2A\x00" or header:sub(1, 4) == "\x4D\x4D\x00\x2A" then
         return "tiff"
     end
