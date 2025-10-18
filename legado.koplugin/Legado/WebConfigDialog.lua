@@ -155,7 +155,7 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
         })
         table.insert(fields, {
             text = password_input,
-            hint = string.format("用户名 (%s)", hint_info),
+            hint = string.format("口令 (%s)", hint_info),
             text_type = "password",
         })
     end

@@ -35,6 +35,8 @@ local LibraryView = {
     -- file browser mode
     book_browser = nil,
     book_browser_homedir = nil,
+    shared_meta_data = nil,
+    shared_meta_data_directory = nil,
 }
 
 function LibraryView:init()
@@ -299,26 +301,6 @@ local function switch_sync_reading(settings)
     return settings
 end
 
-local function switch_stream_mode(settings, callback)
-    settings = H.is_tbl(settings) and settings or Backend:getSettings()
-    MessageBox:confirm(string.format(
-        "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
-        (settings.stream_image_view and '[流式]' or '[缓存]')), function(result)
-        if result then
-            settings.stream_image_view = not settings.stream_image_view or nil
-            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-                MessageBox:notice("设置成功")
-                if H.is_func(callback) then callback() end
-            end, function(err_msg)
-                MessageBox:error('设置失败:', err_msg)
-            end)
-        end
-    end, {
-        ok_text = "切换",
-        cancel_text = "取消"
-    })
-end
-
 function LibraryView:openMenu(dimen)
     local dialog
     self:getInstance()
@@ -332,14 +314,6 @@ function LibraryView:openMenu(dimen)
                 self:clearMenuItems()
                 self:onRefreshLibrary()
             end)
-        end,
-        align = unified_align,
-    }}, {{
-        text = string.format("%s 流式漫画模式  %s", Icons.FA_BOOK,
-            (settings.stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
-        callback = function()
-            UIManager:close(dialog)
-            switch_stream_mode(settings)
         end,
         align = unified_align,
     }}, {{
@@ -372,6 +346,35 @@ function LibraryView:openMenu(dimen)
                 end
             end, {
                 ok_text = "切换",
+                cancel_text = "取消"
+            })
+        end,
+        align = unified_align,
+    }}, {{
+        text = Icons.FA_REFRESH .. " 拉取远端排序",
+        callback = function()
+            UIManager:close(dialog)
+            MessageBox:confirm("即将同步远端书架，按最后阅读时间排序。此操作将覆盖本地书架排序（手动置顶的书籍不受影响)\n是否继续？", function(result)
+                if result then
+                    MessageBox:loading("同步中...", function()
+                        return Backend:syncAndResortBooks()
+                    end, function(state, response)
+                        if state == true then
+                            Backend:HandleResponse(response, function(data)
+                                MessageBox:notice("同步并排序成功")
+                                if self.book_menu then
+                                    self.book_menu:refreshItems(true)
+                                end
+                            end, function(err_msg)
+                                MessageBox:error('操作失败: ', tostring(err_msg))
+                            end)
+                        else
+                            MessageBox:error('操作失败', '未知错误')
+                        end
+                    end)
+                end
+            end, {
+                ok_text = "确定",
                 cancel_text = "取消"
             })
         end,
@@ -539,24 +542,28 @@ function LibraryView:loadAndRenderChapter(chapter)
         logger.err("loadAndRenderChapter: chapter parameter is invalid")
         return 
     end
-    if chapter.cacheExt == 'cbz' and Backend:getSettings().stream_image_view == true then
-        MessageBox:notice("流式漫画开启")
-        if not NetworkMgr:isConnected() then
-            MessageBox:error("需要网络连接")
-            return
+    if chapter.cacheExt == 'cbz' then
+        local book_cache_id = chapter.book_cache_id
+        local extras_settings = Backend:getBookExtras(book_cache_id)
+        if H.is_tbl(extras_settings.data) and extras_settings.data.stream_image_view == true then
+            MessageBox:notice("流式漫画开启")
+            if not NetworkMgr:isConnected() then
+                MessageBox:error("需要网络连接")
+                return
+            end
+             self:afterCloseReaderUi(function()
+                local ex_chapter = chapter
+                self.stream_view = require("Legado/StreamImageView"):fetchAndShow({
+                    chapter = ex_chapter,
+                    on_return_callback = function()
+                        local bookinfo = Backend:getBookInfoCache(ex_chapter.book_cache_id)
+                        --self:openLastReadChapter(bookinfo)
+                        self:showBookTocDialog(bookinfo)
+                    end,
+                })   
+            end)
+            return 
         end
-         self:afterCloseReaderUi(function()
-            local ex_chapter = chapter
-            self.stream_view = require("Legado/StreamImageView"):fetchAndShow({
-                chapter = ex_chapter,
-                on_return_callback = function()
-                    local bookinfo = Backend:getBookInfoCache(ex_chapter.book_cache_id)
-                    --self:openLastReadChapter(bookinfo)
-                    self:showBookTocDialog(bookinfo)
-                end,
-            })   
-        end)
-        return 
     end
 
     local cache_chapter = Backend:getCacheChapterFilePath(chapter)
@@ -676,6 +683,16 @@ function LibraryView:openLastReadChapter(bookinfo)
     end 
 end
 
+function LibraryView:getSharedMetaData(dir)
+    if H.is_str(self.shared_meta_data_directory) and self.shared_meta_data_directory == dir and 
+            H.is_tbl(self.shared_meta_data) then
+        return self.shared_meta_data
+    end
+    self.shared_meta_data = Backend:sharedChapterMetadata(dir)
+    self.shared_meta_data_directory = dir
+    return self.shared_meta_data
+end
+
 function LibraryView:initializeRegisterEvent(parent_ref)
     local DocSettings = require("docsettings")
     local FileManager = require("apps/filemanager/filemanager")
@@ -689,7 +706,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
     local library_ref = self
     local ext_switch_sync_reading = switch_sync_reading
-    local ext_switch_stream_mode = switch_stream_mode
 
     local is_legado_path = function(file_path, instance)
         if instance and instance.document and instance.document.file then
@@ -811,25 +827,25 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 return
             end
 
-            local book_defaults_path = H.joinPath(directory, "book_defaults.lua")
             -- document.is_new = nil ? at readerui
             local document_is_new = (document.is_new == true) or doc_settings:readSetting("doc_props") == nil
             if document_is_new then
                 doc_settings:saveSetting("legado_doc_is_new", true)
             end
 
-            if util.fileExists(book_defaults_path) then
-                local book_defaults = Backend:getLuaConfig(book_defaults_path)
-                if book_defaults and H.is_tbl(book_defaults.data) then
-                    local summary = doc_settings.data.summary -- keep status
-                    local book_defaults_data = util.tableDeepCopy(book_defaults.data)
-                    for k, v in pairs(book_defaults_data) do
-                        doc_settings.data[k] = v
-                    end
-                    doc_settings.data.doc_path = document.file
-                    doc_settings.data.summary = doc_settings.data.summary or summary
+            local library_obj = library_ref:getInstance()
+            local shared_meta_data = library_obj:getSharedMetaData(directory)
+
+            if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
+                local summary = doc_settings.data.summary -- keep status
+                local book_defaults_data = util.tableDeepCopy(shared_meta_data.data)
+                for k, v in pairs(book_defaults_data) do
+                    doc_settings.data[k] = v
                 end
+                doc_settings.data.doc_path = document.file
+                doc_settings.data.summary = doc_settings.data.summary or summary
             end
+            
 
             if extension == 'txt' then
                 doc_settings.data.txt_preformatted = 0
@@ -855,7 +871,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
             -- current_page == nil
             -- self.ui.document:getPageCount() unreliable, sometimes equal to 0
-            local library_obj = library_ref:getInstance()
             local chapter_direction = library_obj:chapterDirection()
             local page_count = doc_settings:readSetting("doc_pages") or 99999
             -- koreader some cases is goto last_page
@@ -883,20 +898,22 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             -- logger.dbg("Legado: Saving reader settings...")
             if self.ui.doc_settings and type(self.ui.doc_settings.data) == 'table' then
                 local persisted_settings_keys = require("Legado/BookMetaData")
-                local book_defaults_path = H.joinPath(directory, "book_defaults.lua")
-                local book_defaults = Backend:getLuaConfig(book_defaults_path)
-                local doc_settings_data = util.tableDeepCopy(self.ui.doc_settings.data)
-                local is_updated
-
-                for k, v in pairs(doc_settings_data) do
-                    if persisted_settings_keys[k] and not H.deep_equal(book_defaults.data[k], v) then
-                        book_defaults.data[k] = v
-                        is_updated = true
-                        -- logger.info("onSaveSettings save k v", k, v)
+                local library_obj = library_ref:getInstance()
+                local shared_meta_data = library_obj:getSharedMetaData(directory)
+               
+                if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
+                    local is_updated
+                    local doc_settings_data = util.tableDeepCopy(self.ui.doc_settings.data)
+                    for k, v in pairs(doc_settings_data) do
+                        if persisted_settings_keys[k] and not H.deep_equal(shared_meta_data.data[k], v) then
+                            shared_meta_data.data[k] = v
+                            is_updated = true
+                            -- logger.info("onSaveSettings save k v", k, v)
+                        end
                     end
-                end
-                if is_updated == true then
-                    book_defaults:flush()
+                    if is_updated == true and H.is_func(shared_meta_data.flush) then
+                        shared_meta_data:flush()
+                    end
                 end
             end
         elseif is_legado_browser_book(nil, self.ui) and self.ui.doc_settings then
@@ -1069,17 +1086,30 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             sub_item_table = {{
                 text = "流式漫画模式",
                 keep_menu_open = true,
-                help_text = "阅读时，自动上传阅读进度",
-                checked_func = function() return settings.stream_image_view == true end,
+                help_text = "在线获取内容",
+                checked_func = function()
+                    local library_obj = library_ref:getInstance()
+                    local book_cache_id = library_obj:getReadingBookId()
+                    if book_cache_id then
+                        local extras_settings = Backend:getBookExtras(book_cache_id)
+                        return H.is_tbl(extras_settings.data) and extras_settings.data.stream_image_view == true
+                    end
+                    return false
+                end,
                 callback = function() 
                     local library_obj = library_ref:getInstance()
                     local reading_chapter = library_obj:readingChapter()
-                    if reading_chapter.cacheExt ~= 'cbz'  then
-                        return MessageBox:error("当前阅读不是漫画类型, 设置无效")
+                    local toc_obj = library_obj:getBookTocWidget()
+                    if reading_chapter and toc_obj then
+                        local stream_mode_item = toc_obj:getStreamModeItem(nil, function()
+                            library_obj:loadAndRenderChapter(reading_chapter)
+                        end)
+                        if H.is_tbl(stream_mode_item) and H.is_tbl(stream_mode_item[1]) and H.is_func(stream_mode_item[1].callback) then
+                            stream_mode_item[1].callback()
+                        else
+                            return MessageBox:error("当前阅读不是漫画类型, 设置无效")
+                        end
                     end
-                    switch_stream_mode(settings, function()
-                        library_obj:loadAndRenderChapter(reading_chapter)
-                    end)
                 end,
             }, {
                 text = "强制刷新本章",
@@ -1451,7 +1481,7 @@ local function init_book_menu(parent)
         local update_toc_visibility = function()
             self.parent_ref:refreshBookTocWidget(bookinfo, onReturnCallBack, true)
         end
-
+        
         update_toc_visibility()
         self:onClose()
         

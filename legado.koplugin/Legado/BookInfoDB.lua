@@ -1315,53 +1315,72 @@ function M:dynamicUpdate(tableName, updateData, conditions)
     return self:execute(sql_stmt, params)
 end
 
-function M:setBooksTopStatus(bookShelfId, book_cache_id, isPinnedManually, isPinnedByTime)
+function M:resortBooksByLastRead(bookShelfId)
+    if not H.is_str(bookShelfId) then
+        dbg.log('DB resortBooksByLastRead error: invalid bookShelfId')
+        return false
+    end
+    -- app unread books durChapterTime = 0
+    local sql_stmt = [[
+        UPDATE books
+        SET sortOrder = durChapterTime
+        WHERE bookShelfId = ? AND sortOrder != 0 AND isEnabled = 1 AND durChapterTime > 1000000000;
+    ]]
+    return self:execute(sql_stmt, {bookShelfId})
+end
+
+function M:setBooksTopStatus(bookShelfId, book_cache_id, current_sort_order, isPinnedByTime)
     if not (H.is_str(bookShelfId) and H.is_str(book_cache_id)) then
-        dbg.log('DB setBooksTopStatus error')
+        dbg.log('DB setBooksTopStatus error: invalid parameters')
         return false
     end
 
-    local set_sortorder = 0
-    local where_sortorder = {
-        _where = ' > 0'
-    }
-    if 0 == isPinnedByTime then
-        local sql_stmt = [[
-        SELECT bookCacheId FROM books 
-        WHERE isEnabled = 1 AND bookShelfId = ? AND sortOrder != 0 
-        ORDER BY sortOrder DESC LIMIT 1;
-    ]]
-        local result = self:execute(sql_stmt, {bookShelfId})
-        local firstBookCacheId
-        if result and result[1] and result[1][1] then
-            firstBookCacheId = result[1][1]
+     -- 手动置顶 (优先)
+    if current_sort_order ~= nil then
+        if current_sort_order ~= 0 then
+            return self:dynamicUpdate('books', {
+                sortOrder = 0
+            }, {
+                bookCacheId = book_cache_id,
+                bookShelfId = bookShelfId
+            })
+        else
+            -- 如果当前排序是 0, 则取消手动置顶
+            return self:dynamicUpdate('books', {
+                sortOrder = {
+                    _set = "= durChapterTime"
+                }
+            }, {
+                bookCacheId = book_cache_id,
+                bookShelfId = bookShelfId,
+                -- 只对当前被置顶的书籍（手动或按时间）进行操作
+                sortOrder = {
+                    _where = '!= durChapterTime'
+                }
+            })
         end
-
-        if firstBookCacheId and firstBookCacheId == book_cache_id then
-            -- logger.info(book_cache_id, "it's the first, don't update it anymore")
+    elseif isPinnedByTime == true then
+         -- 按打开书籍目录时间置顶, 无需取消 
+         -- 检查是否已经是最新阅读的书，避免不必要的写入
+        local sql_stmt = [[
+            SELECT bookCacheId FROM books 
+            WHERE isEnabled = 1 AND bookShelfId = ? AND sortOrder > 0 
+            ORDER BY sortOrder DESC LIMIT 1;
+        ]]
+        local result = self:execute(sql_stmt, {bookShelfId})
+        if result and result[1] and result[1][1] and result[1][1] == book_cache_id then
+            -- 如果已经是第一本
             return true
         end
-
-        set_sortorder = {
-            _set = "= strftime('%s', 'now')"
-        }
-        where_sortorder = {
-            _where = ' > 0'
-        }
-    elseif 0 == isPinnedManually then 
-        set_sortorder = {
-            _set = "= strftime('%s', 'now')"
-        }
-        where_sortorder = 0
+        return self:dynamicUpdate('books', {
+            sortOrder = {
+                _set = "= CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER)"
+            }
+        }, {
+            bookCacheId = book_cache_id,
+            bookShelfId = bookShelfId
+        })
     end
-
-    return self:dynamicUpdate('books', {
-        sortOrder = set_sortorder
-    }, {
-        bookCacheId = book_cache_id,
-        bookShelfId = bookShelfId,
-        sortOrder = where_sortorder
-    })
 end
 
 function M:disableAllBookShelves()

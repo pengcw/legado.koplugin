@@ -8,11 +8,12 @@ local md5 = require("ffi/sha2").md5
 return function()
     local settings_data = LuaSettings:open(H.getUserSettingsPath())
     local settings = settings_data.data
+    local is_changed = false
 
     -- <1.0.9 清空配置
     if settings.setting_url or settings_data.data.legado_server then
-        settings_data.data = {}
-        settings_data:flush()
+        settings = {}
+        is_changed = true
     end
     -- 1.0.9
     if not H.is_tbl(settings.web_configs) and H.is_str(settings.server_address) then
@@ -27,7 +28,7 @@ return function()
             pwd = settings.reader3_pwd or "",
         }
          settings.current_conf_name = default_conf_name
-         settings_data:flush()
+         is_changed = true
     end
     -- 1.1.1 去除 server_address_md5 并更改 bookShelfId 规则
     if H.is_tbl(settings.web_configs) and H.is_str(settings.server_address_md5) then
@@ -65,9 +66,20 @@ return function()
         if settings.server_address_md5 then
             settings.server_address_md5 = nil
         end
-        settings_data:flush()
+        is_changed = true
         logger.info("Database bookShelfId upgrade completed")
     end
 
+    -- 1.1.2 
+    if H.is_str(settings.chapter_sorting_mode) or settings.stream_image_view then
+        settings.chapter_sorting_mode = nil
+        settings.stream_image_view = nil
+        is_changed = true
+    end
+
+    if is_changed == true then
+        settings_data.data = settings
+        settings_data:flush()
+    end
     return true
 end

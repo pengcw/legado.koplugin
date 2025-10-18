@@ -37,7 +37,6 @@ local ChapterListing = Menu:extend{
     title_bar_fm_style = true,
 
     bookinfo = nil,
-    chapter_sorting_mode = nil,
     all_chapters_count = nil,
     on_return_callback = nil,
     on_show_chapter_callback = nil,
@@ -73,7 +72,7 @@ end
 function ChapterListing:refreshItems(no_recalculate_dimen, go_last_read)
 
     local book_cache_id = self.bookinfo.cache_id
-    local chapter_cache_data = Backend:getBookChapterCache(book_cache_id)
+    local chapter_cache_data = Backend:getAllChaptersByUI(book_cache_id)
 
     if H.is_tbl(chapter_cache_data) and #chapter_cache_data > 0 then
         self.item_table = self:generateItemTableFromChapters(chapter_cache_data)
@@ -171,9 +170,16 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
     local items_font_size = G_reader_settings:readSetting("toc_items_font_size") or Menu.getItemFontSize(items_per_page)
     local items_with_dots = G_reader_settings:nilOrTrue("toc_items_with_dots")
 
+    local is_stream_image_mode = false
+    if bookinfo.cacheExt == 'cbz' then
+        local extras_settings = Backend:getBookExtras(bookinfo.cache_id)
+        if H.is_tbl(extras_settings) and H.is_tbl(extras_settings.data) then
+            is_stream_image_mode = extras_settings.data.stream_image_view == true
+        end
+    end
+
     local chapter_listing = ChapterListing:new{
         bookinfo = bookinfo,
-        chapter_sorting_mode = settings.chapter_sorting_mode,
         on_return_callback = onReturnCallBack,
         on_show_chapter_callback = showChapterCallBack,
 
@@ -181,8 +187,7 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
         with_dots = items_with_dots,
         items_per_page = items_per_page,
         items_font_size = items_font_size,
-        subtitle = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
-            Backend:getSettings().stream_image_view == true) and "[流式]" or "")
+        subtitle = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, is_stream_image_mode and "[流式]" or "")
     }
     if visible == true then
         UIManager:show(chapter_listing)
@@ -424,17 +429,7 @@ function ChapterListing:openMenu()
         text = Icons.FA_EXCHANGE .. " 排序反转",
         callback = function()
             UIManager:close(dialog)
-            local settings = Backend:getSettings()
-            if settings.chapter_sorting_mode == 'chapter_ascending' then
-                settings.chapter_sorting_mode = 'chapter_descending'
-            else
-                settings.chapter_sorting_mode = 'chapter_ascending'
-            end
-            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-                self:refreshItems(true, true)
-            end, function(err_msg)
-                MessageBox:error('设置失败:', err_msg)
-            end)
+            self:toggleSortMode()
         end,
         align = "left",
     }}, {{
@@ -499,7 +494,27 @@ function ChapterListing:openMenu()
                 )
         end,
         align = "left",
-    }}, {{
+    }},}
+    
+    local stream_mode_item =self:getStreamModeItem(function()
+        if dialog then UIManager:close(dialog) end
+    end)
+    if H.is_tbl(stream_mode_item) then
+        table.insert(buttons, stream_mode_item)
+    end
+
+    if not Device:isTouchDevice() then
+        table.insert(buttons, {{
+            text = Icons.FA_REFRESH .. ' ' .. "刷新目录",
+            callback = function()
+                UIManager:close(dialog)
+                self:onRefreshChapters()
+            end,
+            align = "left",
+        }})
+    end
+
+    table.insert(buttons, {{
         text = Icons.FA_SHARE .. " 跳转到指定章节",
         callback = function()
             UIManager:close(dialog)
@@ -532,21 +547,12 @@ function ChapterListing:openMenu()
 
         end,
         align = "left",
-    }}}
+    }})
 
-    if not Device:isTouchDevice() then
-        table.insert(buttons, #buttons, {{
-            text = Icons.FA_REFRESH .. ' ' .. "刷新目录",
-            callback = function()
-                UIManager:close(dialog)
-                self:onRefreshChapters()
-            end,
-            align = "left",
-        }})
-    end
     local book_cache_id = self.bookinfo.cache_id
     local lastUpdated = Backend:getChapterLastUpdateTime(book_cache_id)
     lastUpdated = tonumber(lastUpdated)
+
     local dimen
     if self.title_bar and self.title_bar.left_button and self.title_bar.left_button.image then
         dimen = self.title_bar.left_button.image.dimen
@@ -565,4 +571,58 @@ function ChapterListing:openMenu()
 
     UIManager:show(dialog)
 end
+
+function ChapterListing:toggleSortMode()
+    local book_cache_id = self.bookinfo.cache_id  
+    local current_sorting_mode = Backend:chapterSortingMode(book_cache_id)
+    local new_sorting_mode = (current_sorting_mode == 'ASC') and 'DESC' or 'ASC'
+    
+    Backend:HandleResponse(Backend:chapterSortingMode(book_cache_id, new_sorting_mode),
+        function(data) self:refreshItems(true) end,
+        function(err_msg)
+            MessageBox:error('切换排序模式失败: ', err_msg)
+        end
+    )
+end
+
+function ChapterListing:getStreamModeItem(close_dialog, callback)
+    local book_cache_id = self.bookinfo.cache_id
+    local is_comic = Backend:isBookTypeComic(book_cache_id)
+    if is_comic then
+        local extras_settings = Backend:getBookExtras(book_cache_id)
+        if H.is_tbl(extras_settings.data) then
+            local stream_image_view = extras_settings.data.stream_image_view
+            return {{
+                text = string.format("%s 流式漫画模式  %s", Icons.FA_BOOK,
+                    (stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+                callback = function()
+                    if H.is_func(close_dialog) then close_dialog() end
+                    UIManager:nextTick(function()
+                        self:switchStreamMode(extras_settings, callback)
+                    end)
+                end,
+                align = "left",
+            }}
+        end
+    end
+end
+
+function ChapterListing:switchStreamMode(settings, callback)
+    local extras_settings = H.is_tbl(settings) and settings or Backend:getBookExtras(self.bookinfo.cache_id)
+    local stream_image_view = extras_settings.data.stream_image_view
+    MessageBox:confirm(string.format(
+        "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
+        (stream_image_view and '[流式]' or '[缓存]')), function(result)
+        if result then
+            stream_image_view = not stream_image_view or nil
+            extras_settings:saveSetting("stream_image_view", stream_image_view):flush()
+            MessageBox:notice("设置成功")
+            if H.is_func(callback) then callback() end
+        end
+    end, {
+        ok_text = "切换",
+        cancel_text = "取消"
+    })
+end
+
 return ChapterListing
