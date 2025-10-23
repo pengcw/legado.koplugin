@@ -220,10 +220,20 @@ local reader3 = {
             required_params = {"v"},
             expected_status = {200}
         },
-        getSystemInfo = {
-            path = "/getSystemInfo",
-            method = "GET",
-            required_params = {"v"},
+        exploreBook =  {
+            path = "/exploreBook",
+            method = "POST",
+            required_params = {"bookSourceUrl", "ruleFindUrl", "page"},
+            payload = {"bookSourceUrl", "ruleFindUrl", "page"},
+            optional_params = {"v"},
+            expected_status = {200}
+        },
+        getBookSource = {
+            path = "/getBookSource",
+            method = "POST",
+            required_params = {"bookSourceUrl"},
+            payload = {"bookSourceUrl"},
+            optional_params = {"v"},
             expected_status = {200}
         },
     }
@@ -382,6 +392,23 @@ local qread = {
             path = "/getBookinfo2",
             method = "POST",
             required_params = {"url"},
+            expected_status = {200}
+        },
+        exploreBook =  {
+            path = "/exploreBook",
+            method = "POST",
+            required_params = {"bookSourceUrl", "ruleFindUrl", "page"},
+            payload = {"bookSourceUrl", "ruleFindUrl", "page"},
+            optional_params = {"v"},
+            expected_status = {200}
+        },
+        getBookSourcesExploreUrl = {
+            path = "/getBookSourcesExploreUrl",
+            method = "POST",
+            -- need = 1 刷新?
+            required_params = {"bookSourceUrl"},
+            payload = {"bookSourceUrl","need"},
+            optional_params = {"v", "need"},
             expected_status = {200}
         },
     }

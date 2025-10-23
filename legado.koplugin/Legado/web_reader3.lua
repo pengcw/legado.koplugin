@@ -303,8 +303,57 @@ function M:getBookSourcesList(callback)
             v = os.time()
         })
     end, callback, {
-        timeouts = {15, 20},
+        timeouts = {20, 30},
     }, 'getBookSourcesList')
+end
+
+function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
+    local ret, err_msg = self:_getBookSource({
+        bookSourceUrl = bookSourceUrl,
+    })
+    if not (H.is_tbl(ret) and H.is_str(ret.exploreUrl)) then
+        return nil, err_msg and tostring(err_msg) or "源探索未设置"
+    end
+    local explore_url = {
+        exploreUrl = ret.exploreUrl,
+        BookSourceUrl = bookSourceUrl,
+    }
+    if H.is_func(callback) then
+        return callback(explore_url)
+    end
+    return explore_url
+end
+
+function M:_getBookSource(options, callback)
+    if not (H.is_tbl(options) and H.is_str(options.bookSourceUrl)) then
+        return nil, '获取书源详情参数错误'
+    end
+    return self:handleResponse(function()
+        return self.client:getBookSource({
+            bookSourceUrl = options.bookSourceUrl,
+            v = os.time()
+        })
+    end, callback, {
+        timeouts = {10, 15},
+    }, 'getBookSource')
+end
+
+function M:exploreBook(options, callback)
+    if not (H.is_tbl(options) and H.is_str(options.ruleFindUrl) and H.is_str(options.bookSourceUrl)) then
+        return nil, "书源发现参数错误"
+    end
+
+    local page = options.page or 1
+
+    return self:handleResponse(function()
+        return self.client:exploreBook({
+            ruleFindUrl = options.ruleFindUrl,
+            page = page,
+            bookSourceUrl = options.bookSourceUrl,
+        })
+    end, callback, {
+        timeouts = {18, 30},
+    }, 'exploreBook')
 end
 
 function M:getAvailableBookSource(options, callback)

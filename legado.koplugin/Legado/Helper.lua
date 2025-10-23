@@ -199,41 +199,6 @@ M.mapv = function(t, f)
     return _t
 end
 
-M.tbl_extend = (function()
-    local run_behavior = setmetatable({
-        ["error"] = function(_, k, _)
-            error("Key already exists: ", k)
-        end,
-        ["keep"] = function()
-        end,
-        ["force"] = function(t, k, v)
-            t[k] = v
-        end
-    }, {
-        __index = function(_, k)
-            error(k .. " is not a valid behavior")
-        end
-    })
-
-    return function(behavior, ...)
-        local new_table = {}
-        local tables = {...}
-        for i = 1, #tables do
-            local b = tables[i]
-            for k, v in pairs(b) do
-                if v then
-                    if new_table[k] then
-                        run_behavior[behavior](new_table, k, v)
-                    else
-                        new_table[k] = v
-                    end
-                end
-            end
-        end
-        return new_table
-    end
-end)()
-
 M.flatten = function(tbl)
     local result = {}
     local function flatten(arr)
@@ -376,7 +341,11 @@ M.joinPath = function(path1, path2)
     end
     return path1 .. path2
 end
-
+M.getSafeFilename = function(str, path, limit, limit_ext)
+    local safe_name = util.getSafeFilename(str, path, limit, limit_ext)
+    -- fix util.getSafeFilename < 2025.11
+    return safe_name:gsub("[\r\n]", " "):gsub("\t", " ")
+end
 M.checkAndCreateFolder = function(d_path)
     if not util.directoryExists(d_path) then
         util.makePath(d_path)
@@ -419,7 +388,7 @@ M.getCoverCacheFilePath = function(book_cache_id)
     return M.joinPath(book_cache_path, 'cover')
 end
 M.getChapterCacheFilePath = function(book_cache_id, chapters_index, book_name)
-    book_name = util.getSafeFilename(book_name)
+    book_name = M.getSafeFilename(book_name)
     local book_cache_path = M.getBookCachePath(book_cache_id)
     local chapter_cache_name = string.format("%s-%s", book_name or "", chapters_index)
     return M.joinPath(book_cache_path, chapter_cache_name)

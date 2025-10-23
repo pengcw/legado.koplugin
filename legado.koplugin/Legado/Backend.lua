@@ -408,9 +408,15 @@ end
 function M:getBookSourcesList(callback)
     return wrap_response(self.apiClient:getBookSourcesList(callback))
 end
+function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
+    return wrap_response(self.apiClient:getBookSourcesExploreUrl(bookSourceUrl, callback))
+end
 --- return list lastIndex
 function M:getAvailableBookSource(options, callback)
     return wrap_response(self.apiClient:getAvailableBookSource(options, callback))
+end
+function M:exploreBook(options, callback)
+    return wrap_response(self.apiClient:exploreBook(options, callback))
 end
 function M:autoChangeBookSource(bookinfo, callback)
     return wrap_response(self.apiClient:autoChangeBookSource(bookinfo, callback))

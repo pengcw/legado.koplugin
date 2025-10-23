@@ -295,8 +295,30 @@ function M:getBookSourcesList(callback)
             isall = 0,
         })
     end, callback, {
-        timeouts = {15, 20},
+        timeouts = {20, 30},
     }, 'getBookSourcesList')
+end
+
+function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
+    local ret, err_msg = self:handleResponse(function()
+        return self.client:getBookSourcesExploreUrl({
+            bookSourceUrl = bookSourceUrl,
+            need = nil,
+        })
+    end, nil, {
+        timeouts = {12, 18},
+    }, 'getBookSourcesExploreUrl')
+    if not (H.is_tbl(ret) and H.is_str(ret.found)) then
+        return nil, err_msg and tostring(err_msg) or "源探索未设置"
+    end
+    local explore_url = {
+        exploreUrl = ret.found,
+        bookSourceUrl = bookSourceUrl,
+    }
+    if H.is_func(callback) then
+        return callback(explore_url)
+    end
+    return explore_url
 end
 
 function M:getAvailableBookSource2(options, callback)
@@ -308,7 +330,7 @@ function M:getAvailableBookSource2(options, callback)
         return self.client:urlsaveBook({
             url = bookUrl,
         })
-    end, callback, {
+    end, nil, {
         timeouts = {15, 20},
     }, 'getAvailableBookSource')
 
@@ -440,9 +462,14 @@ function M:getProxyCoverUrl(coverUrl)
     return res_cover_src
 end
 function M:getProxyImageUrl(bookUrl, img_src)
-    local res_img_src = img_src
+    local res_img_src
     local server_address = self.settings.server_address
-    local res_img_src = table.concat({server_address, '/proxypng?url=', util.urlEncode(res_img_src)})
+    if string.sub(img_src, 1, 8) == "baseurl/" then
+        local url_path = string.sub(img_src, 8)
+        res_img_src = table.concat({server_address, url_path})
+    else
+        res_img_src = table.concat({server_address, '/proxypng?url=', util.urlEncode(res_img_src)})
+    end
     return res_img_src
 end
 
@@ -541,6 +568,24 @@ function M:searchBookMulti(options, callback)
     else
         return {list = all_results}
     end
+end
+
+function M:exploreBook(options, callback)
+    if not (H.is_tbl(options) and H.is_str(options.ruleFindUrl) and H.is_str(options.bookSourceUrl)) then
+        return nil, "发现书籍参数错误"
+    end
+
+    local page = options.page or 1
+
+    return self:handleResponse(function()
+        return self.client:exploreBook({
+            ruleFindUrl = options.ruleFindUrl,
+            page = page,
+            bookSourceUrl = options.bookSourceUrl,
+        })
+    end, callback, {
+        timeouts = {18, 30},
+    }, 'exploreBook')
 end
 
 return M

@@ -66,7 +66,7 @@ function CbzExporter:package()
     self.bookinfo.author = self.bookinfo.author or "未知作者"
 
     local output_dir = self.output_path or H.getHomeDir()
-    local safe_filename = util.getSafeFilename(string.format("%s-%s",self.bookinfo.name, self.bookinfo.author))
+    local safe_filename = H.getSafeFilename(string.format("%s-%s",self.bookinfo.name, self.bookinfo.author))
     local output_path = H.joinPath(output_dir, safe_filename .. ".cbz")
     local cbz_path_tmp = output_path .. '.tmp'
 
@@ -778,7 +778,7 @@ function M:_buildEpubFile(bookinfo, chapters, export_settings)
     end
 
     local output_dir = export_settings.output_path or H.getHomeDir()
-    local safe_filename = util.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author))
+    local safe_filename = H.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author))
     local output_path = H.joinPath(output_dir, safe_filename .. ".epub")
 
     if util.fileExists(output_path) then pcall(util.removeFile, output_path) end
