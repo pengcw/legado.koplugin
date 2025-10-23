@@ -1251,7 +1251,7 @@ local function init_book_browser(parent)
         local book_author = bookinfo.author or "未知作者"
 
         local book_lnk_name = string.format("%s-%s\u{200B}.html", book_name, book_author)
-        book_lnk_name = util.getSafeFilename(book_lnk_name)
+        book_lnk_name = H.getSafeFilename(book_lnk_name)
         if not book_lnk_name then
             logger.err("book_browser.wirteLnk: getSafeFilename error")
             return

@@ -24,8 +24,13 @@ local M = {
     -- "CHANGE_SOURCE"
     -- "SEARCH"
     -- "AUTO_CHANGE_SOURCE"
+    -- "EXPLORE"
     call_mode = nil,
     is_single_source_search = nil,
+
+    explore_url = nil,
+    explore_page = nil,
+    selected_source = nil,
 
     last_index = nil,
     has_more_api_results = nil,
@@ -50,6 +55,8 @@ function M:getApiMoreRresults()
         self:handleMultiSourceSearch(self.search_text, true)  
     elseif self.call_mode == "CHANGE_SOURCE" then
         self:handleAvailableBookSource(self.bookinfo, true)
+    elseif self.call_mode == "EXPLORE" then
+        self:handleExploreBook(self.selected_source, self.explore_url, true)
     end
 end
 
@@ -97,6 +104,11 @@ function M:onCloseMenu()
     self.call_mode = nil
     self.last_index = nil
     self.is_single_source_search = nil
+
+    self.explore_url = nil
+    self.explore_page = nil
+    self.selected_source = nil
+    
     if self.results_menu and self.results_menu._container then
         UIManager:close(self.results_menu._container)
         self.results_menu._container = nil
@@ -122,6 +134,7 @@ function M:createBookSourceMenu(option)
         onMenuSelect = function(self_menu, item)
             local source_index = item and item.source_index
             if not H.is_num(source_index) then return true end
+
             if source_index > 0 and H.is_tbl(self.results) then
                 local bookinfo = self.results[source_index]
                 self:showBookInfo(bookinfo)
@@ -219,14 +232,14 @@ function M:showBookInfo(bookinfo)
         return MessageBox:error("书籍信息错误")
     end
 
-    local button_text = (self.call_mode == "SEARCH") and '添加' or '换源'
+    local button_text = (self.call_mode == "SEARCH" or self.call_mode == "EXPLORE") and '添加' or '换源'
 
     local BookDetailsDialog = require("Legado/BookDetailsDialog")
     local dialog = BookDetailsDialog:new{
         bookinfo = bookinfo,
         callbacks = {
             [button_text] = function()
-                if self.call_mode == "SEARCH" then
+                if self.call_mode == "SEARCH" or self.call_mode == "EXPLORE" then
                     self:addBookToLibrary(bookinfo)
                 else
                     self:changeBookSource(bookinfo)
@@ -260,6 +273,12 @@ function M:searchBookDialog(onReturnCallback, def_input)
             input_hint = "如：剑来",
             input = def_input,
             buttons = {{{
+                text = "书源发现",
+                callback = function()
+                    UIManager:close(dialog)
+                    self:exploreBookDialog()
+                end
+            }, {
                 text = "单源搜索",
                 callback = function()
                     inputText = dialog:getInputText()
@@ -456,6 +475,7 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
 end
 
 function M:selectBookSource(selectCallback)
+    
     MessageBox:loading("获取源列表 ", function()
         return Backend:getBookSourcesList()
     end, function(state, response)
@@ -470,18 +490,31 @@ function M:selectBookSource(selectCallback)
 
                 local source_list_menu_table = {}
                 local source_list_container
+                local with_explore_url = self.call_mode == "EXPLORE"
+
                 for _, v in ipairs(data) do
-                    if H.is_tbl(v) and H.is_str(v.bookSourceName) and H.is_str(v.bookSourceUrl) then
+                    -- reader3 has no "enabled" field
+                    if H.is_tbl(v) and H.is_str(v.bookSourceName) and H.is_str(v.bookSourceUrl) and (not v.enabled or v.enabled == true) then
+                        -- reader3 enabledExplore
+                        if with_explore_url and (not v.enabledExplore and not v.exploreUrl) then
+                            -- skip
+                            goto continue
+                        end
                         table.insert(source_list_menu_table, {
                             text = string.format("%s [%s]", v.bookSourceName, v.bookSourceGroup or ""),
                             url = v.bookSourceUrl,
-                            name = v.bookSourceName
+                            name = v.bookSourceName,
                         })
+                        ::continue::
                     end
                 end
 
+                if #source_list_menu_table == 0 and with_explore_url then
+                    return MessageBox:notice("没有找到支持探索功能的书源")
+                end
+
                 source_list_container = self:menuCenterShow(Menu:new{
-                    title = "请指定要搜索的源",
+                    title = "请指定要操作的源",
                     subtitle = string.format("key: %s", self.search_text or ""),
                     item_table = source_list_menu_table,
                     items_per_page = 15,
@@ -537,7 +570,7 @@ function M:changeBookSource(bookinfo)
 end
 
 function M:addBookToLibrary(bookinfo)
-    if self.call_mode ~= "SEARCH" then
+    if self.call_mode ~= "SEARCH" and self.call_mode ~= "EXPLORE" then
         return MessageBox:notice('参数错误')
     end
     Backend:closeDbManager()
@@ -550,6 +583,173 @@ function M:addBookToLibrary(bookinfo)
                 self:modifySuccessCallback(true)
             end, function(err_msg)
                 MessageBox:error(err_msg or '操作失败')
+            end)
+        end
+    end)
+end
+
+function M:exploreBookDialog(onReturnCallback)
+    self:init()
+    self.on_success_callback = onReturnCallback
+    self.call_mode = "EXPLORE"
+    self.search_text = "书源探索"
+    
+    self:selectBookSource(function(item, sourceMenu)
+        if not (H.is_tbl(item) and H.is_str(item.url)) then return end
+        local bookSourceUrl = item.url
+
+        local selected_source = {
+                bookSourceName = item.name,
+                bookSourceUrl = item.url,
+        }
+        self.selected_source = selected_source
+        self:selectExploreCategory(selected_source)
+    end)
+end
+
+function M:selectExploreCategory(source)
+    if not ( H.is_tbl(source) and H.is_str(source.bookSourceUrl) and source.bookSourceUrl ~= "") then
+        return MessageBox:error("书源参数缺失")
+    end
+
+    local bookSourceUrl = source.bookSourceUrl
+    local bookSourceName = source.bookSourceName
+
+    local decode_explore_url = function(explore_url)
+        if not (H.is_str(explore_url) and explore_url ~= "") then
+            return MessageBox:info("书源没有探索选项")
+        end
+
+        local json = require("json")
+        local success, categories = pcall(json.decode, explore_url, json.decode.simple)
+        if not (success and H.is_tbl(categories)) then
+            
+            categories = {}
+            local normalized = explore_url
+                :gsub("&&", "\n")
+                :gsub("\r", "\n")
+                :gsub("\n+", "\n")
+
+            for title, url in normalized:gmatch("([^%c]+)::%s*([^\n]+)") do
+                title = title:match("^%s*(.-)%s*$")
+                url = url:match("^%s*(.-)%s*$")
+                -- url 可能为空
+                table.insert(categories, { title = title, url = url })
+            end
+        end
+    
+        if not (H.is_tbl(categories) and #categories > 0) then
+            return MessageBox:error("此源没有有效探索配置")
+        end
+
+        local category_dialog
+        local category_buttons = {}
+        local row = {}
+        local is_title_line
+        local has_valid_line
+
+        for i, category in ipairs(categories) do
+            if H.is_str(category.title) and category.title ~= "" then
+                
+                is_title_line = not (H.is_str(category.url) and category.url ~= "")
+                if not is_title_line then
+                    table.insert(row, {
+                        text = category.title,
+                        callback = function()
+                            self:handleExploreBook(source, category.url)
+                        end,
+                    })
+                end
+                if #row == 4 or (i == #categories and #row > 0) then
+                    table.insert(category_buttons, row)
+                    row = {}
+                    has_valid_line = true
+                end
+                if is_title_line then
+                    table.insert(category_buttons, {{
+                        text = category.title,
+                        callback = function() end,
+                        enabled = false,
+                    }})
+                end   
+            end
+        end
+
+        if #category_buttons == 0 or has_valid_line ~= true then
+            return MessageBox:error("无有效探索分类")
+        end
+
+        local Font = require("ui/font")
+        category_dialog = require("ui/widget/buttondialog"):new{
+            title = string.format("探索 - %s", bookSourceName or ""),
+            title_align = "center",
+            title_face = Font:getFace("smallffont"),
+            info_face = Font:getFace("ffont"),
+            buttons = category_buttons,
+            dismissable = true,
+            width_factor = 0.8,
+        }
+
+        UIManager:show(category_dialog)
+    end
+
+    MessageBox:loading("正在获取探索信息...", function()
+            return Backend:getBookSourcesExploreUrl(bookSourceUrl)
+    end, function(state, response)
+            if state == true then
+                Backend:HandleResponse(response, function(data)
+                    if not (H.is_tbl(data) and H.is_str(data.exploreUrl) )then
+                        return MessageBox:notice('服务器返回数据异常')
+                    end
+                    decode_explore_url(data.exploreUrl)
+                end, function(err_msg)
+                    MessageBox:notice(err_msg or '加载失败')
+                end)
+            end
+    end)
+end
+
+function M:handleExploreBook(source_info, url, is_more_call)
+    if not( H.is_tbl(source_info) and H.is_str(url) ) then
+        return MessageBox:error("参数错误")
+    end
+
+    self.explore_page = is_more_call and (self.explore_page + 1) or 1
+    
+    local options = {
+        bookSourceUrl = source_info.bookSourceUrl,
+        ruleFindUrl = url,
+        page = self.explore_page,
+    }
+  
+    MessageBox:loading("正在加载书籍...", function()
+       return Backend:exploreBook(options)
+    end, function(state, response)
+        if state == true then
+            Backend:HandleResponse(response, function(data)
+                if not H.is_tbl(data) then
+                    return MessageBox:notice('服务器返回数据错误')
+                end
+                self.has_more_api_results = #data > 0
+
+                if #data == 0 and not is_more_call then
+                   return MessageBox:notice('没有更多书籍')
+                end
+                
+                -- /exploreBook 返回标准 bookinfo, 不需要添加 origin originName
+                if is_more_call ~= true then
+                    self.results = data
+                    self.explore_url = url
+                    self:createBookSourceMenu({
+                        title = string.format("探索 - %s", source_info.bookSourceName or ""),
+                        subtitle = url,
+                    })
+                else
+                    self:refreshItems(false, data)
+                end
+            end, function(err_msg)
+                if err_msg == "没有更多了" then self.has_more_api_results = nil end
+                MessageBox:notice(err_msg or '加载失败')
             end)
         end
     end)

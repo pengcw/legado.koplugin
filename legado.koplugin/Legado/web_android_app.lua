@@ -522,5 +522,10 @@ end
 function M:getBookSourcesList(callback)
     return self:unsupportedMethod()
 end
-
+function M:exploreBook(options, callback)
+    return self:unsupportedMethod()
+end
+function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
+    return self:unsupportedMethod()
+end
 return M
