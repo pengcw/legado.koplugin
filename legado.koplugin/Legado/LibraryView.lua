@@ -775,6 +775,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             -- library_ref:openLegadoFolder(dir)
         end
 
+        library_obj:chapterDirection("nil")
         library_obj:refreshBookTocWidget(bookinfo, onReturnCallBack)
         library_obj:currentSelectedBook({cache_id = book_cache_id})
 
@@ -808,13 +809,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
-    local calculate_goto_page = function(chapter_direction, page_count)
-        if chapter_direction == "next" then
-            return 1
-        elseif page_count and chapter_direction == "prev" then
-            return page_count
-        end
-    end
     function parent_ref:onDocSettingsLoad(doc_settings, document)
         if not (doc_settings and doc_settings.data and document) then
             return
@@ -871,14 +865,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
             -- current_page == nil
             -- self.ui.document:getPageCount() unreliable, sometimes equal to 0
-            local chapter_direction = library_obj:chapterDirection()
-            local page_count = doc_settings:readSetting("doc_pages") or 99999
-            -- koreader some cases is goto last_page
-            local page_number = calculate_goto_page(chapter_direction, page_count)
-            if H.is_num(page_number) then
-                doc_settings.data.last_page = page_number
-            end
-
         elseif is_legado_browser_book(document.file) and doc_settings.data then
             doc_settings.data.provider = "legado"
         end
@@ -921,14 +907,13 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
     end
 
-    -- .cbz call twice ?
+    -- TODO onReaderReady call twice ?
     function parent_ref:onReaderReady(doc_settings)
         -- logger.dbg("document.is_pic",self.ui.document.is_pic)
         -- logger.dbg(doc_settings.data.summary.status)
-        if not (doc_settings and doc_settings.data and self.ui) then
+        if not (doc_settings and doc_settings.data and self.ui and self.view) then
             return
         end
-
         local library_obj = library_ref:getInstance()
         if not is_legado_path(nil, self.ui) then
             if library_obj then library_obj:readerUiVisible(false) end
@@ -936,42 +921,61 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         elseif self.ui.link and self.ui.document then
             if library_obj then library_obj:readerUiVisible(true) end
             local chapter_direction = library_obj:chapterDirection()
-            if not chapter_direction then
-                return
+            -- Initially nil, progress handled by koreader
+            if not chapter_direction then return end
+
+            local document_is_new = (self.ui.document.is_new == true) or doc_settings:readSetting("legado_doc_is_new") == true
+            if document_is_new then 
+                doc_settings:delSetting("legado_doc_is_new")
+                if chapter_direction == "next" then return end
             end
 
-            local document_is_new =
-                (self.ui.document.is_new == true) or doc_settings:readSetting("legado_doc_is_new") == true
-            doc_settings:delSetting("legado_doc_is_new")
-            if document_is_new and chapter_direction == "next" then
-                return
+            local calculate_goto_page = function(chapter_direction, page_count)
+                if chapter_direction == "next" then
+                    return 1
+                elseif page_count and chapter_direction == "prev" then
+                    return page_count
+                end
             end
 
-            local function make_pages_continuous(chapter_event)
+            local make_pages_continuous = function(chapter_event)
                 local current_page = self.ui:getCurrentPage()
+                local is_paging = true
                 if not current_page or current_page == 0 then
                     -- fallback to another method if current_page is unavailable
                     -- self.ui.document.info.has_pages == self.ui.paging
                     if self.ui.paging or (self.ui.document.info and self.ui.document.info.has_pages) then
                         current_page = self.view.state.page
                     else
-                        current_page = self.ui.document:getXPointer()
-                        current_page = self.ui.document:getPageFromXPointer(current_page)
+                        is_paging = false
+                        local xpointer = self.ui.document:getXPointer()
+                        current_page = self.ui.document:getPageFromXPointer(xpointer)
                     end
                 end
-
+                
+                -- (getPageCount(), needing the document to be fully loaded, is not available
                 local page_count = self.ui.document:getPageCount()
                 if not (H.is_num(page_count) and page_count > 0) then
                     page_count = doc_settings:readSetting("doc_pages")
                 end
-
+                
                 local page_number = calculate_goto_page(chapter_event, page_count)
-
-                if H.is_num(page_number) and current_page ~= page_number then
+                if H.is_num(page_number) and page_number ~= tonumber(current_page) then
                     self.ui.link:addCurrentLocationToStack()
                     self.ui:handleEvent(Event:new("GotoPage", page_number))
+                    -- ReaderRolling or ReaderPaging
+                    -- koreader some cases is goto last_page or last_xpointer
+                    if is_paging == true then
+                      if not doc_settings.data.last_page or doc_settings.data.last_page ~= page_number then
+                          doc_settings:saveSetting("last_page", page_number)
+                      end
+                    else
+                       local page_xpointer = self.ui.document:getPageXPointer(page_number) or self.document:getXPointer()
+                       doc_settings:saveSetting("last_xpointer", tostring(page_xpointer))
+                    end
                 end
             end
+
             make_pages_continuous(chapter_direction)
         end
     end
@@ -1751,13 +1755,18 @@ end
 
 function LibraryView:showBookTocDialog(bookinfo)
     -- Simple display should not cause changes onReturnCallBack
+    self:chapterDirection("nil")
     return self:refreshBookTocWidget(bookinfo, nil, true)
 end
 
+-- Cache pagination direction, used only for readerui events
 function LibraryView:chapterDirection(direction)
-    self._chapter_direction = self._chapter_direction or "next"
-    if direction == "prev" or direction == "next" then
-        self._chapter_direction = direction
+    if H.is_str(direction) then
+        if direction == "prev" or direction == "next" then
+            self._chapter_direction = direction
+        elseif direction == "nil" then
+            self._chapter_direction = nil
+        end
     end
     return self._chapter_direction
 end
