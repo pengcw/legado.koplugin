@@ -2062,10 +2062,10 @@ function M:after_reader_chapter_show(chapter)
 
         if chapter.isRead ~= true then
             update_state.isRead = true
-            update_state.lastUpdated = {
-                _set = "= strftime('%s', 'now')"
-            }
         end
+        update_state.lastUpdated = {
+            _set = "= strftime('%s', 'now')"
+        }
 
         local bookShelfId = self:getCurrentBookShelfId()
         self.dbManager:transaction(function()
