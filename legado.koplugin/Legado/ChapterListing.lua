@@ -65,7 +65,7 @@ function ChapterListing:init()
         self.key_events.Right = {{ "Right" }}
     end
 
-    self._ui_refresh_time = os.time()
+    self._ui_refresh_time = time.now()
     self:refreshItems(nil, true)
 end
 
@@ -348,7 +348,7 @@ function ChapterListing:onRefreshChapters()
                     MessageBox:notice('同步成功')
                     self:refreshItems(nil, true)
                     self.all_chapters_count = nil
-                    self._ui_refresh_time = os.time()
+                    self._ui_refresh_time = time.now()
                 end, function(err_msg)
                     MessageBox:notice(err_msg or '同步失败')
                     if err_msg ~= '处理中' then
@@ -397,7 +397,7 @@ function ChapterListing:syncProgressShow(chapter)
                     self:refreshItems(true, true)
                     MessageBox:notice('同步完成')
                     self:switchItemTable(nil, self.item_table, tonumber(bookinfo.durChapterIndex))
-                    self._ui_refresh_time = os.time()
+                    self._ui_refresh_time = time.now()
                 end
             end, function(err_msg)
                 MessageBox:error('同步失败：', tostring(err_msg))
