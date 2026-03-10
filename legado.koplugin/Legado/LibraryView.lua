@@ -942,7 +942,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             local make_pages_continuous = function(chapter_event)
                 local current_page = self.ui:getCurrentPage()
                 local is_paging = true
-                if not current_page or current_page == 0 then
+                if not H.is_num(current_page) or current_page == 0 then
                     -- fallback to another method if current_page is unavailable
                     -- self.ui.document.info.has_pages == self.ui.paging
                     if self.ui.paging or (self.ui.document.info and self.ui.document.info.has_pages) then
@@ -950,7 +950,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                     else
                         is_paging = false
                         local xpointer = self.ui.document:getXPointer()
-                        current_page = self.ui.document:getPageFromXPointer(xpointer)
+                        current_page = self.ui.document:getPageFromXPointer(tostring(xpointer))
                     end
                 end
                 
@@ -1067,6 +1067,33 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
+    function parent_ref:onRefreshLegadoChapter()
+        local library_obj = library_ref:getInstance()
+        if not library_obj then
+            logger.warn("RefreshLegadoChapter LibraryView instance not loaded")
+            return true
+        end
+        if library_obj:readerUiVisible() ~= true then
+            MessageBox:error("操作失败: 仅支持 Legado 章节")
+            return true
+        end
+        local reading_chapter = library_obj:readingChapter()
+        if reading_chapter then
+            reading_chapter.isDownLoaded = true
+            Backend:HandleResponse(Backend:ChangeChapterCache(reading_chapter), function(data)
+                MessageBox:notice("刷新成功")
+                    UIManager:nextTick(function()
+                        library_obj:loadAndRenderChapter(reading_chapter)
+                    end)
+                end, function(err_msg)
+                    MessageBox:error('操作失败:', tostring(err_msg))
+            end)
+        else
+            MessageBox:error("操作失败: 没有获取到当前章节")
+        end
+        return true
+    end
+
     function parent_ref:initializeFromReaderUI(document, menu_items)
         if not (document and menu_items and is_legado_path(document.file)) then 
             return 
@@ -1120,21 +1147,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 text = "强制刷新本章",
                 separator = true,
                 callback = function()
-                    local library_obj = library_ref:getInstance()
-                    local reading_chapter = library_obj:readingChapter()
-                    if reading_chapter then
-                        reading_chapter.isDownLoaded = true
-                        Backend:HandleResponse(Backend:ChangeChapterCache(reading_chapter), function(data)
-                            MessageBox:notice("刷新成功")
-                            UIManager:nextTick(function()
-                                library_obj:loadAndRenderChapter(reading_chapter)
-                            end)
-                        end, function(err_msg)
-                            MessageBox:error('操作失败:', tostring(err_msg))
-                        end)
-                    else
-                        MessageBox:error("操作失败: 没有获取到当前章节")
-                    end
+                   self:onRefreshLegadoChapter()
                 end,
             }, {
                 text = "自动上传阅读进度",

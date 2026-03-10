@@ -265,9 +265,10 @@ function M:getProxyCoverUrl(coverUrl)
 end
 
 function M:getProxyImageUrl(bookUrl, img_src)
-    local res_img_src = img_src
+    local res_img_src = H.is_str(img_src) and tostring(img_src) or ""
     local server_address = self.settings.server_address
     
+    if res_img_src:find("^https?://") then return res_img_src end
     local api_root_url = server_address:gsub("/reader3$", "")
     -- <img src='__API_ROOT__/book-assets/guest/剑来_/剑来.cbz/index/1.png' />
     res_img_src = custom_urlEncode(img_src):gsub("^__API_ROOT__", "")
@@ -276,9 +277,7 @@ function M:getProxyImageUrl(bookUrl, img_src)
 end
 
 function M:getProxyEpubUrl(bookUrl, htmlUrl)
-    if not H.is_str(htmlUrl) then
-        return htmlUrl
-    end
+    htmlUrl = H.is_str(htmlUrl) and tostring(htmlUrl) or ""
     local server_address = self.settings['server_address']
     if server_address:match("/reader3$") and htmlUrl:match("%.x?html$") then
         local api_root_url = server_address:gsub("/reader3$", "")
