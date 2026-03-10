@@ -8,6 +8,7 @@ local UIManager = require("ui/uimanager")
 local NetworkMgr = require("ui/network/manager")
 local Menu = require("ui/widget/menu")
 local Device = require("device")
+local time = require("ui/time")
 local T = ffiUtil.template
 local _ = require("gettext")
 
@@ -25,7 +26,7 @@ local LibraryView = {
     -- record the current reading items
     _selected_book = nil,
     book_toc = nil,
-    _ui_refresh_time = os.time(),
+    _ui_refresh_time = time.now(),
     _displayed_chapter = nil,
     _readerui_is_showing = nil,
     _chapter_direction = nil,
@@ -1505,7 +1506,7 @@ local function init_book_menu(parent)
                         MessageBox:notice('同步成功')
                         self.show_search_item = true
                         self:refreshItems()
-                        self.parent_ref._ui_refresh_time = os.time()
+                        self.parent_ref._ui_refresh_time = time.now()
                     end, function(err_msg)
                         MessageBox:notice(tostring(err_msg) or '同步失败')
                     end)

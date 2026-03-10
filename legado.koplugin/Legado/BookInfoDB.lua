@@ -831,7 +831,7 @@ end
 
 function M:getChapterLastUpdateTime(bookCacheId)
     if not H.is_str(bookCacheId) then
-        return time.now()
+        return os.time()
     end
     local sql_stmt = "SELECT lastUpdated FROM books WHERE isEnabled = 1 AND bookCacheId = ?;"
     local result = self:execute(sql_stmt, {bookCacheId})
@@ -839,7 +839,7 @@ function M:getChapterLastUpdateTime(bookCacheId)
     if result and result[1] and result[1][1] then
         return tonumber(result[1][1])
     else
-        return time.now()
+        return os.time()
     end
 end
 

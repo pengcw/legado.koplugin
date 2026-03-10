@@ -190,9 +190,6 @@ function M:saveBook(bookinfo, callback)
       return nil, "输入参数错误"
   end
 
-  local nowTime = time.now()
-  bookinfo.time = time.to_ms(nowTime)
-
   return self:handleResponse(function()
       -- data=bookinfo
       return self.client:saveBook({
@@ -313,16 +310,17 @@ function M:saveBookProgress(chapter, callback)
   local chapters_index = chapter.chapters_index
 
   return self:handleResponse(function()
+      local timestamp = os.time()
       return self.client:saveBookProgress({
           name = chapter.name,
           author = chapter.author or '',
           durChapterPos = 0,
           durChapterIndex = chapters_index,
-          durChapterTime = time.to_ms(time.now()),
+          durChapterTime = timestamp * 1000,
           durChapterTitle = chapter.title or '',
           index = chapters_index,
           url = chapter.bookUrl,
-          v = os.time()
+          v = timestamp,
       })
   end, callback, {
       timeouts = {3, 5}
@@ -465,14 +463,14 @@ function M:_searchBookSocket(search_text, filter, timeout)
   client:send(key_json)
   ok, err = H.pcall(function()
       local response = {}
-      local start_time = os.time()
+      local start_time = time.now()
       local deduplication = {}
 
       while true do
           local response_body = client:receive()
           if not response_body then break end
 
-          if os.time() - start_time > timeout then
+          if time.since(start_time) > time.s(timeout) then
               logger.err("ws receive 超时")
               break
           end

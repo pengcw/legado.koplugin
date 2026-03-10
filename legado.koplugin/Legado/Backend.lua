@@ -307,7 +307,7 @@ function M:isBookTypeComic(book_cache_id)
 end
 
 function M:refreshLibraryCache(last_refresh_time)
-    if last_refresh_time and os.time() - last_refresh_time < 2 then
+    if last_refresh_time and time.since(last_refresh_time) < time.s(2) then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(nil, '处理中')
     end
@@ -366,7 +366,7 @@ function M:getChaptersList(bookinfo)
     return wrap_response(self.apiClient:getChapterList(bookinfo))
 end
 function M:refreshChaptersCache(bookinfo, last_refresh_time)
-    if last_refresh_time and os.time() - last_refresh_time < 2 then
+    if last_refresh_time and time.since(last_refresh_time) < time.s(2) then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(nil, '处理中')
     end

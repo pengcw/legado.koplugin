@@ -1,4 +1,3 @@
-local time = require("ui/time")
 local logger = require("logger")
 local util = require("util")
 local socket_url = require("socket.url")
@@ -232,9 +231,6 @@ function M:saveBook(bookinfo, callback)
         H.is_str(bookinfo.originName)) then
         return nil, "saveBook参数错误"
     end
-  
-    local nowTime = time.now()
-    bookinfo.time = time.to_ms(nowTime)
   
     return self:handleResponse(function()
         -- data=bookinfo

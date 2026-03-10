@@ -1,4 +1,3 @@
-local time = require("ui/time")
 local logger = require("logger")
 local util = require("util")
 local socket_url = require("socket.url")
@@ -75,9 +74,6 @@ function M:saveBook(bookinfo, callback)
         H.is_str(bookinfo.originName)) then
         return nil, "输入参数错误"
     end
-  
-    local nowTime = time.now()
-    bookinfo.time = time.to_ms(nowTime)
   
     return self:handleResponse(function()
         -- data=bookinfo
@@ -202,16 +198,17 @@ function M:refreshBookContent(chapter, callback)
     local chapters_index = chapter.chapters_index
   
     return self:handleResponse(function()
+        local timestamp = os.time()
         return self.client:saveBookProgress({
             name = chapter.name,
             author = chapter.author or '',
             durChapterPos = 0,
             durChapterIndex = chapters_index,
-            durChapterTime = time.to_ms(time.now()),
+            durChapterTime = timestamp * 1000,
             durChapterTitle = chapter.title or '',
             index = chapters_index,
             url = chapter.bookUrl,
-            v = os.time()
+            v = timestamp,
         })
     end, callback, {
         timeouts = {3, 5}
