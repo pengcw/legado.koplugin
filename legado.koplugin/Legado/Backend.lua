@@ -775,35 +775,25 @@ local replace_css_urls = function(css_text, replace_fn)
 end
 
 local processLink
-processLink = function(book_cache_id, resources_src, base_url, is_porxy, callback)
+processLink = function(book_cache_id, resources_src, base_url, is_proxy, callback)
     if not (H.is_str(book_cache_id) and H.is_str(resources_src) and resources_src ~= "") then
         logger.dbg("invalid params in processLink", book_cache_id, resources_src)
         return nil
     end
 
-    local processed_src
-    if is_porxy == true then
-        local bookUrl = base_url
-        processed_src = M:getProxyImageUrl(bookUrl, resources_src)
-    else
-        processed_src = util.trim(resources_src)
+    local processed_src = util.trim(resources_src)
+    if processed_src:find("^data:") or processed_src:find("^res:") or processed_src:sub(1, 1) == "#" then
+        return nil
+    end
 
-        local lower_src = processed_src:lower()
-        if lower_src:find("^data:") then
-            logger.dbg("skipping data URI", processed_src)
-            return nil
-        elseif lower_src:find("^res:") then
-            logger.dbg("fonts css URI", processed_src)
-            return nil
-        elseif lower_src:sub(1, 1) == "#" then
-            return nil
-        elseif lower_src:sub(1, 2) == "//" then
-            processed_src = "https:" .. processed_src
-        elseif lower_src:sub(1, 1) == "/" then
-            processed_src = socket_url.absolute(base_url, processed_src)
-        elseif not lower_src:find("^http") then
-            processed_src = socket_url.absolute(base_url, processed_src)
-        end
+    if processed_src:sub(1, 2) == "//" then
+        processed_src = "https:" .. processed_src
+    elseif processed_src:sub(1, 1) == "/" then
+        processed_src = socket_url.absolute(base_url, processed_src)
+    elseif is_proxy == true then
+        processed_src = M:getProxyImageUrl(base_url, processed_src)
+    elseif not processed_src:find("^https?://") then
+        return ""
     end
 
     local ext = get_url_extension(processed_src)

@@ -41,19 +41,25 @@ function Legado:onDispatcherRegisterActions()
         category = "none",
         event = "ShowLegadoLibraryView",
         title = _("Legado 书目"),
-        filemanager = true
+        filemanager = true,
     })
     Dispatcher:registerAction("return_legado_chapterlisting", {
         category = "none",
         event = "ShowLegadoToc",
         title = _("返回 Legado 目录"),
-        reader = true
+        reader = true,
     })
     Dispatcher:registerAction("show_legado_search", {
         category = "none",
         event = "ShowLegadoSearch",
         title = _("以书籍信息搜索 Legado 书源"),
-        reader = true
+        reader = true,
+    })
+    Dispatcher:registerAction("refresh_legado_chapter", {
+        category = "none",
+        event = "RefreshLegadoChapter",
+        title = _("强制刷新 Legado 章节"),
+        reader = true,
     })
 end
 
