@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-CC_BY--NC_3.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/3.0/)
 [![KOReader Version](https://img.shields.io/badge/KOReader-v2024.01+-green.svg)](https://github.com/koreader/koreader)
 
->一个在 KOReader 中阅读 Legado 开源阅读书库的插件, 适配阅读3.0, 支持手机app和服务器版本，初衷是 Kindle 的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的网文阅读，提升老设备体验。
+>一个在 KOReader 中阅读 Legado 开源阅读书库的插件, 适配阅读3.0, 支持手机app、reader3、轻阅读后端，初衷是 Kindle 的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的网文阅读，提升老设备体验。
 
 ---
 
