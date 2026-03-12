@@ -593,8 +593,7 @@ function ChapterListing:getStreamModeItem(close_dialog, callback)
         if H.is_tbl(extras_settings.data) then
             local stream_image_view = extras_settings.data.stream_image_view
             return {{
-                text = string.format("%s 流式漫画模式  %s", Icons.FA_BOOK,
-                    (stream_image_view and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+                text = string.format("%s 流式漫画模式", (stream_image_view and Icons.FA_CHECK_SQUARE or Icons.FA_SQUARE_O)),
                 callback = function()
                     if H.is_func(close_dialog) then close_dialog() end
                     UIManager:nextTick(function()

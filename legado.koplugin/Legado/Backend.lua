@@ -307,7 +307,7 @@ function M:isBookTypeComic(book_cache_id)
 end
 
 function M:refreshLibraryCache(last_refresh_time)
-    if last_refresh_time and time.since(last_refresh_time) < time.s(2) then
+    if self:enforceRateLimit(last_refresh_time, 2000) then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(nil, '处理中')
     end
@@ -366,7 +366,7 @@ function M:getChaptersList(bookinfo)
     return wrap_response(self.apiClient:getChapterList(bookinfo))
 end
 function M:refreshChaptersCache(bookinfo, last_refresh_time)
-    if last_refresh_time and time.since(last_refresh_time) < time.s(2) then
+    if self:enforceRateLimit(last_refresh_time, 2000) then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(nil, '处理中')
     end
@@ -776,39 +776,65 @@ end
 
 local processLink
 processLink = function(book_cache_id, resources_src, base_url, is_proxy, callback)
-    if not (H.is_str(book_cache_id) and H.is_str(resources_src) and resources_src ~= "") then
+    if not (H.is_str(book_cache_id) and H.is_str(resources_src)) then
         logger.dbg("invalid params in processLink", book_cache_id, resources_src)
         return nil
     end
 
     local processed_src = util.trim(resources_src)
-    if processed_src:find("^data:") or processed_src:find("^res:") or processed_src:sub(1, 1) == "#" then
+    if processed_src == "" then return nil end
+
+    local first = processed_src:sub(1, 1)
+    -- protocols and anchors directly return nil
+    if processed_src:find("^data:") or 
+            processed_src:find("^res:") or 
+            processed_src:find("^tel:") or 
+            processed_src:find("^javascript:") or 
+                first == "#" or first == "?" then
         return nil
     end
 
-    if processed_src:sub(1, 2) == "//" then
-        processed_src = "https:" .. processed_src
-    elseif processed_src:sub(1, 1) == "/" then
-        processed_src = socket_url.absolute(base_url, processed_src)
-    elseif is_proxy == true then
-        processed_src = M:getProxyImageUrl(base_url, processed_src)
-    elseif not processed_src:find("^https?://") then
-        return ""
+    local function normalize_url(src, base_url, is_proxy)
+         if not H.is_str(base_url) then base_url = "" end
+         if src:sub(1, 2) == "//" then
+            local protocol = base_url:match("^(https?:)") or "https:"
+            return protocol .. src
+        elseif src:sub(1, 1) == "/" or src:sub(1, 2) == "./" or src:sub(1, 3) == "../" then
+            return socket_url.absolute(base_url, src)
+        elseif is_proxy == true then
+            return M:getProxyImageUrl(base_url, src)
+        elseif not src:find("^%a+://") then
+            -- not a complete URL, converted to an absolute path
+            return socket_url.absolute(base_url, src)
+        end
+        return src
     end
 
-    local ext = get_url_extension(processed_src)
-    if ext == "" then
-        local clean_url = resources_src:gsub("[#?].*", "")
+    local function extract_extension(url, original_src)
+        
+        local ext = get_url_extension(url)
+        if ext ~= "" then return ext end
+    
+        local clean_url = original_src:gsub("[#?].*", "")
         ext = get_url_extension(clean_url)
-        if ext == "" then
-            -- legado app 图片后带数据 v07ew.jpg,{'headers':{'referer':'https://m.weibo.cn'}}"
-            clean_url = resources_src:match("^(.-),") or resources_src
-            ext = get_url_extension(clean_url)
-        end
+        if ext ~= "" then return ext end
+    
+        -- legado app 图片后带数据 v07ew.jpg,{'headers':{'referer':'https://m.weibo.cn'}}"
+        clean_url = original_src:match("^(.-),") or original_src
+        ext = get_url_extension(clean_url)
+        if ext ~= "" then return ext end
+    
+        return ""
+    end
+    
+    processed_src = normalize_url(processed_src, base_url, is_proxy)
+    if not (H.is_str(processed_src) and  processed_src:find("^(https?:)")) then
+        return nil
     end
 
     -- logger.info("src_ext", ext, "resources_src", resources_src)
     local resources_id = md5(processed_src)
+    local ext = extract_extension(processed_src, resources_src)
     local resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
 
     local resources_relpath, resources_filepath, resources_catalogue =
@@ -840,12 +866,10 @@ processLink = function(book_cache_id, resources_src, base_url, is_proxy, callbac
                 end
                 return processLink(book_cache_id, url, processed_src, nil, true)
             end)
-
         end
 
         return book_chapter_resources(book_cache_id, resources_filename, err["data"])
     end
-
 end
 
 local function plain_text_replace(text, pattern, replacement, count)
@@ -1003,14 +1027,20 @@ function M:_AnalyzingChapters(chapter, content, filePath)
         if not (H.is_tbl(err) and err["data"]) then
             error('下载失败，数据为空')
         end
-        -- TODO 写入原始文件名，用于导出
+
         local ext, original_name = get_url_extension(first_line)
         if (not ext or ext == "") and not not err.ext then
             ext = err['ext']
         end
-
         content = err['data'] or '下载失败'
         filePath = string.format("%s.%s", filePath, ext or "")
+
+        if H.is_str(original_name) and original_name ~= "" and original_name:find("%.") then
+            local dir_path, file_name = util.splitFilePathName(filePath)
+            if H.is_str(dir_path) then
+                filePath = H.joinPath(dir_path, original_name)
+            end
+        end
 
         if not htmlparser then
             htmlparser = require("htmlparser")
@@ -2459,6 +2489,12 @@ function M:launchProcess(job, callback, timeout)
     end)
 end
 
+function M:enforceRateLimit(last_time, limit_ms)
+    if last_time and time.since(last_time) < time.ms(limit_ms) then
+        return true
+    end
+    return false
+end
 function M:onExitClean()
     dbg.v('Backend call onExitClean')
 

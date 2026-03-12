@@ -26,7 +26,9 @@ local LibraryView = {
     -- record the current reading items
     _selected_book = nil,
     book_toc = nil,
-    _ui_refresh_time = time.now(),
+    _ui_refresh_time = nil,
+    _last_page_turn_time = nil,
+    _last_reader_ready_time = nil,
     _displayed_chapter = nil,
     _readerui_is_showing = nil,
     _chapter_direction = nil,
@@ -308,7 +310,7 @@ function LibraryView:openMenu(dimen)
     local unified_align = dimen and "left" or "center"
     local settings = Backend:getSettings()
     local buttons = {{},{{
-        text = Icons.FA_GLOBE .. " Legado WEB地址",
+        text = Icons.FA_GLOBE .. " WEB地址配置",
         callback = function()
             UIManager:close(dialog)
             require("Legado/WebConfigDialog"):openWebConfigManager(function()
@@ -318,16 +320,16 @@ function LibraryView:openMenu(dimen)
         end,
         align = unified_align,
     }}, {{
-        text = string.format("%s 自动上传进度  %s", Icons.FA_CLOUD,
-            (settings.sync_reading and Icons.UNICODE_STAR or Icons.UNICODE_STAR_OUTLINE)),
+        text = string.format("%s 自动上传进度",
+            (settings.sync_reading and Icons.FA_CHECK_SQUARE or Icons.FA_SQUARE_O)),
         callback = function()
             UIManager:close(dialog)
             switch_sync_reading(settings)
         end,
         align = unified_align,
     }}, {{
-        text = string.format("%s 自动生成快捷方式  %s", Icons.FA_FOLDER,
-            (settings.disable_browser and Icons.UNICODE_STAR_OUTLINE or Icons.UNICODE_STAR)),
+        text = string.format("%s 自动生成快捷方式  ",
+            (settings.disable_browser and Icons.FA_SQUARE_O or Icons.FA_CHECK_SQUARE)),
         callback = function()
             UIManager:close(dialog)
             MessageBox:confirm(string.format(
@@ -381,7 +383,7 @@ function LibraryView:openMenu(dimen)
         end,
         align = unified_align,
     }}, {{
-        text = string.format("%s 下载线程数: %d", Icons.FA_DOWNLOAD, settings.download_threads or 1),
+        text = string.format("%s 下载进程数: %d", Icons.FA_DOWNLOAD, settings.download_threads or 1),
         callback = function()
             UIManager:close(dialog)
             local SpinWidget = require("ui/widget/spinwidget")
@@ -445,13 +447,13 @@ function LibraryView:openMenu(dimen)
 -- 清风不识字，何故乱翻书 --
 
 简介：
-一个在 KOReader 中阅读 Legado 书库的插件，适配阅读 3.0，支持手机 APP 和服务器版本。初衷是 Kindle 的浏览器体验不佳，目的是部分替代受限设备的浏览器，实现流畅的网文阅读，提升老设备体验。
+一个在 KOReader 中阅读 Legado 书库的插件，适配阅读 3.0，支持手机 APP、reader3、轻阅读后端。初衷是 Kindle 的浏览器体验不佳，目的是部分替代受限设备的浏览器，实现流畅的网文阅读，提升老设备体验。
 
 操作：
 列表支持下拉或 Home 键刷新，右键列表菜单 / Menu 键左上角菜单，阅读界面下拉菜单有返回选项，书架和目录可绑定手势使用。
 
 章节页面图标说明:
-%1 可下载  %2 已阅读  %3 阅读进度
+%1 可下载  %2 已阅读  %3 书签
 
 帮助改进：
 请到 Github：pengcw/legado.koplugin 反馈 issues
@@ -492,7 +494,7 @@ function LibraryView:openMenu(dimen)
     end
 
     dialog = require("ui/widget/buttondialog"):new{
-        title = string.format(Icons.FA_DATABASE .. " Free: %.1f G", self.disk_available or -1),
+        title = string.format(Icons.FA_DATABASE .. " Free: %.1fG", self.disk_available or -1),
         title_align = unified_align,
         title_face = Font:getFace("x_smalltfont"),
         info_face = Font:getFace("tfont"),
@@ -649,9 +651,6 @@ function LibraryView:showReaderUI(chapter)
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
         ReaderUI:showReader(book_path, nil, true)
     end
-    UIManager:nextTick(function()
-        Backend:after_reader_chapter_show(chapter)
-    end)
 end
 
 function LibraryView:openLastReadChapter(bookinfo)
@@ -907,8 +906,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             self.ui.doc_settings.data.provider = "legado"
         end
     end
-
-    -- TODO onReaderReady call twice ?
+    
     function parent_ref:onReaderReady(doc_settings)
         -- logger.dbg("document.is_pic",self.ui.document.is_pic)
         -- logger.dbg(doc_settings.data.summary.status)
@@ -920,6 +918,8 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             if library_obj then library_obj:readerUiVisible(false) end
             return
         elseif self.ui.link and self.ui.document then
+            if Backend:enforceRateLimit(library_obj._last_reader_ready_time, 100) then return end
+            library_obj._last_reader_ready_time = time.now()
             if library_obj then library_obj:readerUiVisible(true) end
             local chapter_direction = library_obj:chapterDirection()
             -- Initially nil, progress handled by koreader
@@ -981,16 +981,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
     end
 
-    function parent_ref:onCloseDocument()
-        if is_legado_path(nil, self.ui) then
-            local library_obj = library_ref:getInstance()
-            if library_obj then library_obj:readerUiVisible(false) end
-            if not self.patches_ok then
-                require("readhistory"):removeItemByPath(self.document.file)
-            end
-        end
-    end
-
     function parent_ref:onShowLegadoSearch()
         local def_search_input
         if self.ui and self.ui.doc_settings and self.ui.doc_settings.data.doc_props then
@@ -1005,45 +995,19 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
-    function parent_ref:onEndOfBook()
-        if is_legado_path(nil, self.ui) then
-            local library_obj = library_ref:getInstance()
-            if library_obj then
-                local chapter_direction = "next"
-                library_obj:ReaderUIEventCallback(chapter_direction)
-            else
-                self:openLibraryView()
-            end
-            return true
-        end
-    end
-
-    function parent_ref:onStartOfBook()
-        if is_legado_path(nil, self.ui) then
-            local library_obj = library_ref:getInstance()
-            if library_obj then
-                local chapter_direction = "prev"
-                library_obj:ReaderUIEventCallback(chapter_direction)
-            else
-                self:openLibraryView()
-            end
-            return true
-        end
-    end
-
     function parent_ref:onShowLegadoBrowserOption(file)
         -- logger.info("Received ShowLegadoBrowserOption event", file)
         local library_obj = library_ref:getInstance()
         if FileManager.instance and library_obj then
-            library_obj:openBrowserMenu(file)
+            UIManager:nextTick(function()
+                library_obj:openBrowserMenu(file)
+            end)
         end
     end
 
     function parent_ref:onSuspend()
         Backend:closeDbManager()
     end
-
-    table.insert(parent_ref.ui, 3, parent_ref)
 
     function parent_ref:openFile(file)
         if not H.is_str(file) then
@@ -1171,6 +1135,96 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 end,
             }},
         }
+    end
+
+    function parent_ref:registerReaderUiHookWithPriority(ui)
+        local WidgetContainer = require("ui/widget/container/widgetcontainer")
+        self.eventListener = WidgetContainer:new({})
+        
+        self.eventListener.onCloseWidget = function()
+            if is_legado_path(nil, self.ui) then
+                local library_obj = library_ref:getInstance()
+                if library_obj then library_obj:readerUiVisible(false) end
+            end
+        end
+
+        self.eventListener.onStartOfBook = function()
+            if is_legado_path(nil, self.ui) then
+                local library_obj = library_ref:getInstance()
+                if library_obj then
+                    if Backend:enforceRateLimit(library_obj._last_page_turn_time, 100) then return true end
+                    library_obj._last_page_turn_time = time.now()
+                    UIManager:nextTick(function()
+                        local chapter_direction = "prev"
+                        library_obj:ReaderUIEventCallback(chapter_direction)
+                    end)
+                else
+                    parent_ref:openLibraryView()
+                end
+                return true
+            end
+        end
+
+        self.eventListener.onCloseDocument = function()
+            if is_legado_path(nil, self.ui) then
+                local library_obj = library_ref:getInstance()
+                if library_obj then library_obj:readerUiVisible(false) end
+                if not parent_ref.patches_ok then
+                    require("readhistory"):removeItemByPath(self.document.file)
+                end
+            end
+        end
+
+        self.eventListener.onEndOfBook = function()
+            if is_legado_path(nil, self.ui) then
+                local library_obj = library_ref:getInstance()
+                if library_obj then
+                    if Backend:enforceRateLimit(library_obj._last_page_turn_time, 100) then return true end
+                    library_obj._last_page_turn_time = time.now()
+                    UIManager:nextTick(function()
+                        local chapter_direction = "next"
+                        library_obj:ReaderUIEventCallback(chapter_direction)
+                    end)
+                else
+                    UIManager:nextTick(function()
+                        parent_ref:openLibraryView()
+                    end)
+                end
+                return true
+            end
+        end
+
+        -- none onDocSettingsLoad
+        table.insert(self.ui, 2, self.eventListener)
+    end
+
+    function parent_ref:afterReaderReady()
+        if is_legado_path(nil, self.ui)  then
+            local library_obj = library_ref:getInstance()
+            if library_obj then
+                local reading_chapter = library_obj:readingChapter()
+                if reading_chapter then
+                    UIManager:nextTick(function()
+                        Backend:after_reader_chapter_show(reading_chapter)
+                    end)
+                end
+            end
+        end
+    end
+
+    if parent_ref.ui and parent_ref.ui.name == "ReaderUI" then
+        parent_ref.ui:registerPostInitCallback(function()
+            parent_ref:registerReaderUiHookWithPriority(parent_ref.ui)
+        end)
+        if H.is_func(parent_ref.ui.registerPostReaderReadyCallback) then
+            parent_ref.ui:registerPostReaderReadyCallback(function()
+                parent_ref:afterReaderReady()
+            end)
+        elseif H.is_func(parent_ref.ui.registerPostReadyCallback) then
+            parent_ref.ui:registerPostReadyCallback(function()
+                parent_ref:afterReaderReady()
+            end)
+        end
     end
 end
 
@@ -1549,7 +1603,7 @@ local function init_book_menu(parent)
                     UIManager:nextTick(function()
                         self.parent_ref:addBkShortcut(bookinfo, true)
                     end)
-                    MessageBox:notice("已调用生成，请到 Home 目录查看")
+                    MessageBox:notice("快捷方式已保存至 Home 目录")
                 end,
                 ["删除"] = function()
                     MessageBox:confirm(string.format(
