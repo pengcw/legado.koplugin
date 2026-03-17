@@ -10,8 +10,9 @@ local RELEASE_API = "https://api.github.com/repos/pengcw/legado.koplugin/release
 
 function M:getPluginMetaInfo()
     local result, err_msg= H.require("_meta")
+    local plg_path = H.getPluginDirectory()
     if not result then
-        logger.warn(string.format("getPluginMetaInfo load %s/_meta.lua err", plugin_path))
+        logger.warn(string.format("getPluginMetaInfo load %s/_meta.lua err", plg_path))
         return
     end
     return result
@@ -180,7 +181,7 @@ function M:_installUpdate(update_zip_path)
         return "下载更新文件错误，请重试"
     end
 
-    local plugin_path = H.get_plugin_path()
+    local plg_path = H.getPluginDirectory()
     local temp_path_base = H.getTempDirectory()
     -- zip plugins/xxx
     local target_unzip_dir = H.getKoreaderDirectory()

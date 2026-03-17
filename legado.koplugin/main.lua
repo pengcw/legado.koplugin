@@ -6,8 +6,8 @@ local Event = require("ui/event")
 local util = require("util")
 local logger = require("logger")
 local _ = require("gettext")
-local H = require("Legado/Helper") -- need to load first 
-local Backend = require("Legado/Backend") -- two
+local H = require("Legado/Helper")
+local Backend = require("Legado/Backend")
 local LibraryView = require("Legado/LibraryView")
 local verify_patched = require("patches.core").verifyPatched
 
@@ -20,8 +20,13 @@ local Legado = WidgetContainer:extend({
 function Legado:init()
     -- on open FileManager or ReaderUI
     self.patches_ok = verify_patched()
-    if not H.plugin_path then
-        H.initialize("legado", self.path)
+    if not H.has_cache("plg:name") then
+        H.set_cache("plg:name", "legado")
+        if self.path then
+            -- fix Android path
+            local path = self.path:gsub("/+", "/")
+            H.set_cache("plg:path", path)
+        end
     end
     if not Backend.settings_data then
         Backend:initialize()
@@ -77,13 +82,14 @@ function Legado:registerDocumentRegistryAuxProvider()
     })
 end
 
-local is_low_version
 function Legado:addToMainMenu(menu_items)
     if not (self.ui and menu_items) then return end
     if not self.ui.document then -- FileManager menu only
+        local is_low_version = H.get_cache("is_low_version")
         if is_low_version == nil then
             local ko_version = require("version"):getNormalizedCurrentVersion()
             is_low_version = (ko_version and ko_version < 202411000000)
+            H.set_cache("is_low_version", is_low_version)
         end
         menu_items.Legado_main = {
             text_func = function()
@@ -95,7 +101,7 @@ function Legado:addToMainMenu(menu_items)
                 self:openLibraryView()
             end
         }
-    elseif self.ui.document.file and self.ui.name == "ReaderUI" then
+    elseif self.ui.document.file and self.ui.name == "ReaderUI" and self.initializeFromReaderUI then
         self:initializeFromReaderUI(self.ui.document, menu_items)
     end
 end

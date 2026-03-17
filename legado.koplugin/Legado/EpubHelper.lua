@@ -587,7 +587,7 @@ function EpubExporter:packageEpub()
     if self.custom_css then
         css_content = self.custom_css
     else
-        local default_css_path = string.format("%s/Legado/main.css.lua", H.get_plugin_path())
+        local default_css_path = string.format("%s/Legado/main.css.lua", H.getPluginDirectory())
         if util.fileExists(default_css_path) then
             css_content = util.readFromFile(default_css_path, "r")
         end

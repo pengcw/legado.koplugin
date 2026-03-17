@@ -5,31 +5,28 @@ local ffiUtil = require("ffi/util")
 local DataStorage = require("datastorage")
 local logger = require("logger")
 
-local M = {
-    plugin_path = nil,
-    plugin_name = nil
-}
+local M = {}
+local _global_cache = {}
 
-M.initialize = function(name, path)
-    M.plugin_name = name
-    -- fix Android path
-    if type(path) == "string" then
-        path = path:gsub("/+", "/")
-    end
-    M.plugin_path = path
+function M.get_cache(key)
+    return _global_cache[key]
 end
 
-M.get_plugin_path = function()
-    return M.plugin_path
+function M.set_cache(key, value)
+    _global_cache[key] = value
+end
+
+function M.has_cache(key)
+    return _global_cache[key] ~= nil
 end
 
 M.require = function(path)
      if type(path) ~= "string" or path == "" then
         return nil, "invalid path"
     end
-    local plugin_path = M.get_plugin_path()
+    local plg_path = M.getPluginDirectory()
     local norm_path = path:gsub("%.", "/")
-    local fullpath = string.format("%s/%s.lua", plugin_path, norm_path)
+    local fullpath = string.format("%s/%s.lua", plg_path, norm_path)
     local ok, result = pcall(dofile, fullpath)
     if not ok then
         return nil, "require error: " .. tostring(result)
@@ -101,44 +98,6 @@ M.okeys = function(t)
     return r
 end
 
-M.opairs = (function()
-    local __gen_order_index = function(t)
-        local orderedIndex = {}
-        for key in pairs(t) do
-            table.insert(orderedIndex, key)
-        end
-        table.sort(orderedIndex)
-        return orderedIndex
-    end
-
-    local nextpair = function(t, state)
-        local key
-        if state == nil then
-
-            t.__orderedIndex = __gen_order_index(t)
-            key = t.__orderedIndex[1]
-        else
-
-            for i = 1, table.getn(t.__orderedIndex) do
-                if t.__orderedIndex[i] == state then
-                    key = t.__orderedIndex[i + 1]
-                end
-            end
-        end
-
-        if key then
-            return key, t[key]
-        end
-
-        t.__orderedIndex = nil
-        return
-    end
-
-    return function(t)
-        return nextpair, t, nil
-    end
-end)()
-
 M.all = function(iterable, fn)
     for k, v in pairs(iterable) do
         if not fn(k, v) then
@@ -199,23 +158,6 @@ M.mapv = function(t, f)
     return _t
 end
 
-M.flatten = function(tbl)
-    local result = {}
-    local function flatten(arr)
-        local n = #arr
-        for i = 1, n do
-            local v = arr[i]
-            if type(v) == "table" then
-                flatten(v)
-            elseif v then
-                table.insert(result, v)
-            end
-        end
-    end
-    flatten(tbl)
-
-    return result
-end
 -- pay attention to infinite recursion
 M.deep_equal = function(a, b)
     return util.tableEquals(a, b, true)
@@ -250,6 +192,7 @@ end
 M.n_to_b = function(n)
     return n == 1
 end
+
 -- 路径转换
 M.replaceAllInvalidChars = function(str)
     if util.replaceAllInvalidChars then
@@ -357,7 +300,7 @@ M.checkAndCreateFolder = function(d_path)
 end
 
 M.getUserSettingsPath = function()
-    return M.joinPath(DataStorage:getSettingsDir(), M.plugin_name .. '.lua')
+    return M.joinPath(DataStorage:getSettingsDir(), M.get_cache("plg:name") .. '.lua')
 end
 M.getUserPatchesDirectory = function()
     local patches_dir = M.joinPath(DataStorage:getDataDir(), 'patches')
@@ -367,18 +310,18 @@ M.getKoreaderDirectory = function()
     return DataStorage:getDataDir()
 end
 M.getTempDirectory = function()
-    local plugin_cache_dir = M.plugin_name .. '.cache'
-    local plugin_cache_path = M.joinPath(DataStorage:getDataDir(), 'cache/' .. plugin_cache_dir)
-    return M.checkAndCreateFolder(plugin_cache_path)
+    local plg_cache_dir = M.get_cache("plg:name") .. '.cache'
+    local plg_cache_path = M.joinPath(DataStorage:getDataDir(), 'cache/' .. plg_cache_dir)
+    return M.checkAndCreateFolder(plg_cache_path)
 end
 M.getPluginDirectory = function()
-    local plugin_path_bak = table.concat({DataStorage:getDataDir(), "/plugins/", M.plugin_name, '.koplugin'})
-    return M.plugin_path or plugin_path_bak
+    local plg_path_alt = table.concat({DataStorage:getDataDir(), "/plugins/", M.get_cache("plg:name"), '.koplugin'})
+    return M.get_cache("plg:path") or plg_path_alt
 end
 M.getBookCachePath = function(book_cache_id)
     assert(type(book_cache_id) == "string", "Error: The variable is not a string.")
-    local plugin_cache_path = M.getTempDirectory()
-    local book_cache_path = M.joinPath(plugin_cache_path, book_cache_id .. '.sdr')
+    local plg_cache_path = M.getTempDirectory()
+    local book_cache_path = M.joinPath(plg_cache_path, book_cache_id .. '.sdr')
     M.checkAndCreateFolder(book_cache_path)
     M.checkAndCreateFolder(M.joinPath(book_cache_path, "resources"))
     return book_cache_path

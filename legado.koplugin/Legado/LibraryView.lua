@@ -297,7 +297,7 @@ local function switch_sync_reading(settings)
     local ok_msg = settings.sync_reading and "关闭" or "开启"
     settings.sync_reading = not settings.sync_reading or nil
     Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-        MessageBox:notice(string.format("设置已%s", ok_msg))
+        MessageBox:info(string.format("设置已%s", ok_msg))
     end, function(err_msg)
         MessageBox:error('设置失败:', err_msg)
     end)
@@ -322,15 +322,19 @@ function LibraryView:openMenu(dimen)
     }}, {{
         text = string.format("%s 自动上传进度",
             (settings.sync_reading and Icons.FA_CHECK_SQUARE or Icons.FA_SQUARE_O)),
-        callback = function()
+        hold_callback = function()
             UIManager:close(dialog)
             switch_sync_reading(settings)
+        end,
+        callback = function()
+            MessageBox:info("阅读时，自动上传阅读进度\n <长按切换选项>")
         end,
         align = unified_align,
     }}, {{
         text = string.format("%s 自动生成快捷方式  ",
             (settings.disable_browser and Icons.FA_SQUARE_O or Icons.FA_CHECK_SQUARE)),
-        callback = function()
+        callback = function() MessageBox:info("长按切换选项") end,
+        hold_callback = function()
             UIManager:close(dialog)
             MessageBox:confirm(string.format(
                 "自动生成快捷方式：%s \r\n \r\n 打开书籍目录时自动在文件浏览器 Home 目录中生成对应书籍快捷方式，支持封面显示, 关闭后可在书架菜单手动生成",
@@ -809,178 +813,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
-    function parent_ref:onDocSettingsLoad(doc_settings, document)
-        if not (doc_settings and doc_settings.data and document) then
-            return
-        end
-        if is_legado_path(document.file) then
-
-            local directory, file_name = util.splitFilePathName(document.file)
-            local _, extension = util.splitFileNameSuffix(file_name or "")
-            if not (directory and file_name and directory ~= "" and file_name ~= "") then
-                return
-            end
-
-            -- document.is_new = nil ? at readerui
-            local document_is_new = (document.is_new == true) or doc_settings:readSetting("doc_props") == nil
-            if document_is_new then
-                doc_settings:saveSetting("legado_doc_is_new", true)
-            end
-
-            local library_obj = library_ref:getInstance()
-            local shared_meta_data = library_obj:getSharedMetaData(directory)
-
-            if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
-                local summary = doc_settings.data.summary -- keep status
-                local book_defaults_data = util.tableDeepCopy(shared_meta_data.data)
-                for k, v in pairs(book_defaults_data) do
-                    doc_settings.data[k] = v
-                end
-                doc_settings.data.doc_path = document.file
-                doc_settings.data.summary = doc_settings.data.summary or summary
-            end
-            
-
-            if extension == 'txt' then
-                doc_settings.data.txt_preformatted = 0
-                doc_settings.data.style_tweaks = doc_settings.data.style_tweaks or {}
-                doc_settings.data.style_tweaks.paragraph_whitespace_half = true
-                doc_settings.data.style_tweaks.paragraphs_indent = true
-                doc_settings.data.css = "./data/fb2.css"
-            end
-
-            -- statistics.koplugin
-            if document then
-                document.is_pic = true
-            end
-            -- Does it affect the future ？
-            --[=[
-                    if document_is_new then  
-                        local bookinfo = library_ref.instance.book_toc.bookinfo
-                        doc_settings.data.doc_props = doc_settings.data.doc_props or {}
-                        doc_settings.data.doc_props.title = bookinfo.name or "N/A"
-                        doc_settings.data.doc_props.authors = bookinfo.author or "N/A"
-                    end
-                ]=]
-
-            -- current_page == nil
-            -- self.ui.document:getPageCount() unreliable, sometimes equal to 0
-        elseif is_legado_browser_book(document.file) and doc_settings.data then
-            doc_settings.data.provider = "legado"
-        end
-    end
-    -- or UIManager:flushSettings() --onFlushSettings
-    function parent_ref:onSaveSettings()
-        if not (self.ui and self.ui.doc_settings) then
-            return
-        end
-        local filepath = self.ui.document and self.ui.document.file or self.ui.doc_settings:readSetting("doc_path")
-        if is_legado_path(filepath) then
-
-            local directory, file_name = util.splitFilePathName(filepath)
-            if not is_legado_path(directory) then
-                return
-            end
-            -- logger.dbg("Legado: Saving reader settings...")
-            if self.ui.doc_settings and type(self.ui.doc_settings.data) == 'table' then
-                local persisted_settings_keys = require("Legado/BookMetaData")
-                local library_obj = library_ref:getInstance()
-                local shared_meta_data = library_obj:getSharedMetaData(directory)
-               
-                if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
-                    local is_updated
-                    local doc_settings_data = util.tableDeepCopy(self.ui.doc_settings.data)
-                    for k, v in pairs(doc_settings_data) do
-                        if persisted_settings_keys[k] and not H.deep_equal(shared_meta_data.data[k], v) then
-                            shared_meta_data.data[k] = v
-                            is_updated = true
-                            -- logger.info("onSaveSettings save k v", k, v)
-                        end
-                    end
-                    if is_updated == true and H.is_func(shared_meta_data.flush) then
-                        shared_meta_data:flush()
-                    end
-                end
-            end
-        elseif is_legado_browser_book(nil, self.ui) and self.ui.doc_settings then
-            self.ui.doc_settings.data.provider = "legado"
-        end
-    end
-    
-    function parent_ref:onReaderReady(doc_settings)
-        -- logger.dbg("document.is_pic",self.ui.document.is_pic)
-        -- logger.dbg(doc_settings.data.summary.status)
-        if not (doc_settings and doc_settings.data and self.ui and self.view) then
-            return
-        end
-        local library_obj = library_ref:getInstance()
-        if not is_legado_path(nil, self.ui) then
-            if library_obj then library_obj:readerUiVisible(false) end
-            return
-        elseif self.ui.link and self.ui.document then
-            if Backend:enforceRateLimit(library_obj._last_reader_ready_time, 100) then return end
-            library_obj._last_reader_ready_time = time.now()
-            if library_obj then library_obj:readerUiVisible(true) end
-            local chapter_direction = library_obj:chapterDirection()
-            -- Initially nil, progress handled by koreader
-            if not chapter_direction then return end
-
-            local document_is_new = (self.ui.document.is_new == true) or doc_settings:readSetting("legado_doc_is_new") == true
-            if document_is_new then 
-                doc_settings:delSetting("legado_doc_is_new")
-                if chapter_direction == "next" then return end
-            end
-
-            local calculate_goto_page = function(chapter_direction, page_count)
-                if chapter_direction == "next" then
-                    return 1
-                elseif page_count and chapter_direction == "prev" then
-                    return page_count
-                end
-            end
-
-            local make_pages_continuous = function(chapter_event)
-                local current_page = self.ui:getCurrentPage()
-                local is_paging = true
-                if not H.is_num(current_page) or current_page == 0 then
-                    -- fallback to another method if current_page is unavailable
-                    -- self.ui.document.info.has_pages == self.ui.paging
-                    if self.ui.paging or (self.ui.document.info and self.ui.document.info.has_pages) then
-                        current_page = self.view.state.page
-                    else
-                        is_paging = false
-                        local xpointer = self.ui.document:getXPointer()
-                        current_page = self.ui.document:getPageFromXPointer(tostring(xpointer))
-                    end
-                end
-                
-                -- (getPageCount(), needing the document to be fully loaded, is not available
-                local page_count = self.ui.document:getPageCount()
-                if not (H.is_num(page_count) and page_count > 0) then
-                    page_count = doc_settings:readSetting("doc_pages")
-                end
-                
-                local page_number = calculate_goto_page(chapter_event, page_count)
-                if H.is_num(page_number) and page_number ~= tonumber(current_page) then
-                    self.ui.link:addCurrentLocationToStack()
-                    self.ui:handleEvent(Event:new("GotoPage", page_number))
-                    -- ReaderRolling or ReaderPaging
-                    -- koreader some cases is goto last_page or last_xpointer
-                    if is_paging == true then
-                      if not doc_settings.data.last_page or doc_settings.data.last_page ~= page_number then
-                          doc_settings:saveSetting("last_page", page_number)
-                      end
-                    else
-                       local page_xpointer = self.ui.document:getPageXPointer(page_number) or self.document:getXPointer()
-                       doc_settings:saveSetting("last_xpointer", tostring(page_xpointer))
-                    end
-                end
-            end
-
-            make_pages_continuous(chapter_direction)
-        end
-    end
-
     function parent_ref:onShowLegadoSearch()
         local def_search_input
         if self.ui and self.ui.doc_settings and self.ui.doc_settings.data.doc_props then
@@ -995,18 +827,20 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
-    function parent_ref:onShowLegadoBrowserOption(file)
-        -- logger.info("Received ShowLegadoBrowserOption event", file)
-        local library_obj = library_ref:getInstance()
-        if FileManager.instance and library_obj then
-            UIManager:nextTick(function()
-                library_obj:openBrowserMenu(file)
-            end)
-        end
-    end
-
     function parent_ref:onSuspend()
         Backend:closeDbManager()
+    end
+
+    function parent_ref:onScreenResize(dimen)
+        local library_obj = LibraryView.instance
+        if library_obj then
+            if library_obj.book_menu then
+                LibraryView.instance.book_menu = nil
+            end
+            if library_obj.toc then
+                LibraryView.instance.book_toc = nil
+            end
+        end
     end
 
     function parent_ref:openFile(file)
@@ -1030,189 +864,388 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
         return true
     end
-
-    function parent_ref:onRefreshLegadoChapter()
-        local library_obj = library_ref:getInstance()
-        if not library_obj then
-            logger.warn("RefreshLegadoChapter LibraryView instance not loaded")
-            return true
-        end
-        if library_obj:readerUiVisible() ~= true then
-            MessageBox:error("操作失败: 仅支持 Legado 章节")
-            return true
-        end
-        local reading_chapter = library_obj:readingChapter()
-        if reading_chapter then
-            reading_chapter.isDownLoaded = true
-            Backend:HandleResponse(Backend:ChangeChapterCache(reading_chapter), function(data)
-                MessageBox:notice("刷新成功")
-                    UIManager:nextTick(function()
-                        library_obj:loadAndRenderChapter(reading_chapter)
-                    end)
-                end, function(err_msg)
-                    MessageBox:error('操作失败:', tostring(err_msg))
-            end)
-        else
-            MessageBox:error("操作失败: 没有获取到当前章节")
-        end
-        return true
-    end
-
-    function parent_ref:initializeFromReaderUI(document, menu_items)
-        if not (document and menu_items and is_legado_path(document.file)) then 
-            return 
-        end
-
-        if not self.patches_ok then
-            menu_items.go_back_to_legado = {
-                text = "返回 Legado...",
-                sorting_hint = "main",
-                help_text = "点击返回 Legado 书籍目录",
-                callback = function()
-                    self.ui:handleEvent(Event:new("ShowLegadoToc"))
-                end
-            }
-        end
-
-        local settings = Backend:getSettings()
-
-        menu_items.Legado_reader_ui_menu = {
-            text = "Legado 书目",
-            sorting_hint = "search",
-            sub_item_table = {{
-                text = "流式漫画模式",
-                keep_menu_open = true,
-                help_text = "在线获取内容",
-                checked_func = function()
-                    local library_obj = library_ref:getInstance()
-                    local book_cache_id = library_obj:getReadingBookId()
-                    if book_cache_id then
-                        local extras_settings = Backend:getBookExtras(book_cache_id)
-                        return H.is_tbl(extras_settings.data) and extras_settings.data.stream_image_view == true
-                    end
-                    return false
-                end,
-                callback = function() 
-                    local library_obj = library_ref:getInstance()
-                    local reading_chapter = library_obj:readingChapter()
-                    local toc_obj = library_obj:getBookTocWidget()
-                    if reading_chapter and toc_obj then
-                        local stream_mode_item = toc_obj:getStreamModeItem(nil, function()
-                            library_obj:loadAndRenderChapter(reading_chapter)
-                        end)
-                        if H.is_tbl(stream_mode_item) and H.is_tbl(stream_mode_item[1]) and H.is_func(stream_mode_item[1].callback) then
-                            stream_mode_item[1].callback()
-                        else
-                            return MessageBox:error("当前阅读不是漫画类型, 设置无效")
-                        end
-                    end
-                end,
-            }, {
-                text = "强制刷新本章",
-                separator = true,
-                callback = function()
-                   self:onRefreshLegadoChapter()
-                end,
-            }, {
-                text = "自动上传阅读进度",
-                keep_menu_open = true,
-                help_text = "阅读时，自动上传阅读进度",
-                checked_func = function() return settings.sync_reading == true end,
-                callback = function() ext_switch_sync_reading(settings) end,
-            }, {
-                text = "立即上传阅读进度",
-                callback = function()
-                    local library_obj = library_ref:getInstance()
-                    local reading_chapter = library_obj:readingChapter()
-                    if reading_chapter then
-                        local toc_obj = library_obj:getBookTocWidget()
-                        if toc_obj then
-                            toc_obj:syncProgressShow(reading_chapter)
-                        end
-                    else
-                        MessageBox:error("上传进度失败: 没有获取到当前章节")
-                    end
-                end,
-            }},
-        }
-    end
-
-    function parent_ref:registerReaderUiHookWithPriority(ui)
-        local WidgetContainer = require("ui/widget/container/widgetcontainer")
-        self.eventListener = WidgetContainer:new({})
-        
-        self.eventListener.onCloseWidget = function()
-            if is_legado_path(nil, self.ui) then
-                local library_obj = library_ref:getInstance()
-                if library_obj then library_obj:readerUiVisible(false) end
-            end
-        end
-
-        self.eventListener.onStartOfBook = function()
-            if is_legado_path(nil, self.ui) then
-                local library_obj = library_ref:getInstance()
-                if library_obj then
-                    if Backend:enforceRateLimit(library_obj._last_page_turn_time, 100) then return true end
-                    library_obj._last_page_turn_time = time.now()
-                    UIManager:nextTick(function()
-                        local chapter_direction = "prev"
-                        library_obj:ReaderUIEventCallback(chapter_direction)
-                    end)
-                else
-                    parent_ref:openLibraryView()
-                end
-                return true
-            end
-        end
-
-        self.eventListener.onCloseDocument = function()
-            if is_legado_path(nil, self.ui) then
-                local library_obj = library_ref:getInstance()
-                if library_obj then library_obj:readerUiVisible(false) end
-                if not parent_ref.patches_ok then
-                    require("readhistory"):removeItemByPath(self.document.file)
-                end
-            end
-        end
-
-        self.eventListener.onEndOfBook = function()
-            if is_legado_path(nil, self.ui) then
-                local library_obj = library_ref:getInstance()
-                if library_obj then
-                    if Backend:enforceRateLimit(library_obj._last_page_turn_time, 100) then return true end
-                    library_obj._last_page_turn_time = time.now()
-                    UIManager:nextTick(function()
-                        local chapter_direction = "next"
-                        library_obj:ReaderUIEventCallback(chapter_direction)
-                    end)
-                else
-                    UIManager:nextTick(function()
-                        parent_ref:openLibraryView()
-                    end)
-                end
-                return true
-            end
-        end
-
-        -- none onDocSettingsLoad
-        table.insert(self.ui, 2, self.eventListener)
-    end
-
-    function parent_ref:afterReaderReady()
-        if is_legado_path(nil, self.ui)  then
+    
+    if not (parent_ref.ui and parent_ref.ui.document) then
+        function parent_ref:onShowLegadoBrowserOption(file)
+            -- logger.info("Received ShowLegadoBrowserOption event", file)
             local library_obj = library_ref:getInstance()
-            if library_obj then
-                local reading_chapter = library_obj:readingChapter()
-                if reading_chapter then
-                    UIManager:nextTick(function()
-                        Backend:after_reader_chapter_show(reading_chapter)
-                    end)
-                end
+            if FileManager.instance and library_obj then
+                UIManager:nextTick(function()
+                    library_obj:openBrowserMenu(file)
+                end)
             end
         end
+        --[[
+        function parent_ref:onPathChanged()
+            if self.ui.title_bar and self.ui.title_bar.left_button then  
+                self.ui.title_bar.left_button.callback = function()  
+                end  
+            end 
+        end 
+        ]]
     end
 
     if parent_ref.ui and parent_ref.ui.name == "ReaderUI" then
+
+        function parent_ref:initializeFromReaderUI(document, menu_items)
+            if not (document and menu_items and is_legado_path(document.file)) then 
+                return 
+            end
+
+            if not self.patches_ok then
+                menu_items.go_back_to_legado = {
+                    text = "返回 Legado...",
+                    sorting_hint = "main",
+                    help_text = "点击返回 Legado 书籍目录",
+                    callback = function()
+                        self.ui:handleEvent(Event:new("ShowLegadoToc"))
+                    end
+                }
+            end
+
+            local settings = Backend:getSettings()
+
+            menu_items.Legado_reader_ui_menu = {
+                text = "Legado 选项",
+                sorting_hint = "search",
+                sub_item_table = {{
+                    text = "流式漫画模式",
+                    keep_menu_open = true,
+                    checked_func = function()
+                        local library_obj = library_ref:getInstance()
+                        local book_cache_id = library_obj:getReadingBookId()
+                        if book_cache_id then
+                            local extras_settings = Backend:getBookExtras(book_cache_id)
+                            return H.is_tbl(extras_settings.data) and extras_settings.data.stream_image_view == true
+                        end
+                        return false
+                    end,
+                    callback = function()  
+                        MessageBox:info("不缓存在线获取内容\n <长按切换选项>")
+                    end, 
+                    hold_callback = function() 
+                        local library_obj = library_ref:getInstance()
+                        local reading_chapter = library_obj:readingChapter()
+                        local toc_obj = library_obj:getBookTocWidget()
+                        if reading_chapter and toc_obj then
+                            local stream_mode_item = toc_obj:getStreamModeItem(nil, function()
+                                library_obj:loadAndRenderChapter(reading_chapter)
+                            end)
+                            if H.is_tbl(stream_mode_item) and H.is_tbl(stream_mode_item[1]) and H.is_func(stream_mode_item[1].callback) then
+                                stream_mode_item[1].callback()
+                            else
+                                return MessageBox:error("当前阅读不是漫画类型, 设置无效")
+                            end
+                        end
+                    end,
+                }, {
+                    text = "强制刷新本章",
+                    separator = true,
+                    callback = function()
+                        self:onRefreshLegadoChapter()
+                    end,
+                }, {
+                    text = "自动上传阅读进度",
+                    keep_menu_open = true,
+                    hold_keep_menu_open = true,
+                    help_text = "阅读时，自动上传阅读进度",
+                    checked_func = function() return settings.sync_reading == true end,
+                    hold_callback = function() ext_switch_sync_reading(settings) end,
+                    callback = function()  
+                        MessageBox:info("阅读时，自动上传阅读进度\n <长按切换选项>")
+                    end,
+                }, {
+                    text = "立即上传阅读进度",
+                    callback = function()
+                        local library_obj = library_ref:getInstance()
+                        local reading_chapter = library_obj:readingChapter()
+                        if reading_chapter then
+                            local toc_obj = library_obj:getBookTocWidget()
+                            if toc_obj then
+                                toc_obj:syncProgressShow(reading_chapter)
+                            end
+                        else
+                            MessageBox:error("上传进度失败: 没有获取到当前章节")
+                        end
+                    end,
+                }},
+            }
+        end
+
+        function parent_ref:onRefreshLegadoChapter()
+            local library_obj = library_ref:getInstance()
+            if not library_obj then
+                logger.warn("RefreshLegadoChapter LibraryView instance not loaded")
+                return true
+            end
+            if library_obj:readerUiVisible() ~= true then
+                MessageBox:error("操作失败: 仅支持 Legado 章节")
+                return true
+            end
+            local reading_chapter = library_obj:readingChapter()
+            if reading_chapter then
+                reading_chapter.isDownLoaded = true
+                Backend:HandleResponse(Backend:ChangeChapterCache(reading_chapter), function(data)
+                    MessageBox:notice("刷新成功")
+                        UIManager:nextTick(function()
+                            library_obj:loadAndRenderChapter(reading_chapter)
+                        end)
+                    end, function(err_msg)
+                        MessageBox:error('操作失败:', tostring(err_msg))
+                end)
+            else
+                MessageBox:error("操作失败: 没有获取到当前章节")
+            end
+            return true
+        end
+
+        function parent_ref:onDocSettingsLoad(doc_settings, document)
+            if not (doc_settings and doc_settings.data and document) then
+                return
+            end
+            if is_legado_path(document.file) then
+
+                local directory, file_name = util.splitFilePathName(document.file)
+                local _, extension = util.splitFileNameSuffix(file_name or "")
+                if not (directory and file_name and directory ~= "" and file_name ~= "") then
+                    return
+                end
+
+                -- document.is_new = nil ? at readerui
+                local document_is_new = (document.is_new == true) or doc_settings:readSetting("doc_props") == nil
+                if document_is_new then
+                    doc_settings:saveSetting("legado_doc_is_new", true)
+                end
+
+                local library_obj = library_ref:getInstance()
+                local shared_meta_data = library_obj:getSharedMetaData(directory)
+
+                if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
+                    local summary = doc_settings.data.summary -- keep status
+                    local book_defaults_data = util.tableDeepCopy(shared_meta_data.data)
+                    for k, v in pairs(book_defaults_data) do
+                        doc_settings.data[k] = v
+                    end
+                    doc_settings.data.doc_path = document.file
+                    doc_settings.data.summary = doc_settings.data.summary or summary
+                end
+                
+
+                if extension == 'txt' then
+                    doc_settings.data.txt_preformatted = 0
+                    doc_settings.data.style_tweaks = doc_settings.data.style_tweaks or {}
+                    doc_settings.data.style_tweaks.paragraph_whitespace_half = true
+                    doc_settings.data.style_tweaks.paragraphs_indent = true
+                    doc_settings.data.css = "./data/fb2.css"
+                end
+
+                -- statistics.koplugin
+                if document then
+                    document.is_pic = true
+                end
+                -- Does it affect the future ？
+                --[=[
+                        if document_is_new then  
+                            local bookinfo = library_ref.instance.book_toc.bookinfo
+                            doc_settings.data.doc_props = doc_settings.data.doc_props or {}
+                            doc_settings.data.doc_props.title = bookinfo.name or "N/A"
+                            doc_settings.data.doc_props.authors = bookinfo.author or "N/A"
+                        end
+                    ]=]
+
+                -- current_page == nil
+                -- self.ui.document:getPageCount() unreliable, sometimes equal to 0
+            elseif is_legado_browser_book(document.file) and doc_settings.data then
+                doc_settings.data.provider = "legado"
+            end
+        end
+        -- or UIManager:flushSettings() --onFlushSettings
+        function parent_ref:onSaveSettings()
+            if not (self.ui and self.ui.doc_settings) then
+                return
+            end
+            local filepath = self.ui.document and self.ui.document.file or self.ui.doc_settings:readSetting("doc_path")
+            if is_legado_path(filepath) then
+
+                local directory, file_name = util.splitFilePathName(filepath)
+                if not is_legado_path(directory) then
+                    return
+                end
+                -- logger.dbg("Legado: Saving reader settings...")
+                if self.ui.doc_settings and type(self.ui.doc_settings.data) == 'table' then
+                    local persisted_settings_keys = require("Legado/BookMetaData")
+                    local library_obj = library_ref:getInstance()
+                    local shared_meta_data = library_obj:getSharedMetaData(directory)
+                
+                    if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
+                        local is_updated
+                        local doc_settings_data = util.tableDeepCopy(self.ui.doc_settings.data)
+                        for k, v in pairs(doc_settings_data) do
+                            if persisted_settings_keys[k] and not H.deep_equal(shared_meta_data.data[k], v) then
+                                shared_meta_data.data[k] = v
+                                is_updated = true
+                                -- logger.info("onSaveSettings save k v", k, v)
+                            end
+                        end
+                        if is_updated == true and H.is_func(shared_meta_data.flush) then
+                            shared_meta_data:flush()
+                        end
+                    end
+                end
+            elseif is_legado_browser_book(nil, self.ui) and self.ui.doc_settings then
+                self.ui.doc_settings.data.provider = "legado"
+            end
+        end
+        
+        function parent_ref:onReaderReady(doc_settings)
+            -- logger.dbg("document.is_pic",self.ui.document.is_pic)
+            -- logger.dbg(doc_settings.data.summary.status)
+            if not (doc_settings and doc_settings.data and self.ui and self.view) then
+                return
+            end
+            local library_obj = library_ref:getInstance()
+            if not is_legado_path(nil, self.ui) then
+                if library_obj then library_obj:readerUiVisible(false) end
+                return
+            elseif self.ui.link and self.ui.document then
+                if Backend:enforceRateLimit(library_obj._last_reader_ready_time, 100) then return end
+                library_obj._last_reader_ready_time = time.now()
+                if library_obj then library_obj:readerUiVisible(true) end
+                local chapter_direction = library_obj:chapterDirection()
+                -- Initially nil, progress handled by koreader
+                if not chapter_direction then return end
+
+                local document_is_new = (self.ui.document.is_new == true) or doc_settings:readSetting("legado_doc_is_new") == true
+                if document_is_new then 
+                    doc_settings:delSetting("legado_doc_is_new")
+                    if chapter_direction == "next" then return end
+                end
+
+                local calculate_goto_page = function(chapter_direction, page_count)
+                    if chapter_direction == "next" then
+                        return 1
+                    elseif page_count and chapter_direction == "prev" then
+                        return page_count
+                    end
+                end
+
+                local make_pages_continuous = function(chapter_event)
+                    local current_page = self.ui:getCurrentPage()
+                    local is_paging = true
+                    if not H.is_num(current_page) or current_page == 0 then
+                        -- fallback to another method if current_page is unavailable
+                        -- self.ui.document.info.has_pages == self.ui.paging
+                        if self.ui.paging or (self.ui.document.info and self.ui.document.info.has_pages) then
+                            current_page = self.view.state.page
+                        else
+                            is_paging = false
+                            local xpointer = self.ui.document:getXPointer()
+                            current_page = self.ui.document:getPageFromXPointer(tostring(xpointer))
+                        end
+                    end
+                    
+                    -- (getPageCount(), needing the document to be fully loaded, is not available
+                    local page_count = self.ui.document:getPageCount()
+                    if not (H.is_num(page_count) and page_count > 0) then
+                        page_count = doc_settings:readSetting("doc_pages")
+                    end
+                    
+                    local page_number = calculate_goto_page(chapter_event, page_count)
+                    if H.is_num(page_number) and page_number ~= tonumber(current_page) then
+                        self.ui.link:addCurrentLocationToStack()
+                        self.ui:handleEvent(Event:new("GotoPage", page_number))
+                        -- ReaderRolling or ReaderPaging
+                        -- koreader some cases is goto last_page or last_xpointer
+                        if is_paging == true then
+                        if not doc_settings.data.last_page or doc_settings.data.last_page ~= page_number then
+                            doc_settings:saveSetting("last_page", page_number)
+                        end
+                        else
+                        local page_xpointer = self.ui.document:getPageXPointer(page_number) or self.document:getXPointer()
+                        doc_settings:saveSetting("last_xpointer", tostring(page_xpointer))
+                        end
+                    end
+                end
+
+                make_pages_continuous(chapter_direction)
+            end
+        end
+
+        function parent_ref:registerReaderUiHookWithPriority(ui)
+            local WidgetContainer = require("ui/widget/container/widgetcontainer")
+            self.eventListener = WidgetContainer:new({})
+            
+            self.eventListener.onCloseWidget = function()
+                if is_legado_path(nil, self.ui) then
+                    local library_obj = library_ref:getInstance()
+                    if library_obj then library_obj:readerUiVisible(false) end
+                end
+            end
+
+            self.eventListener.onStartOfBook = function()
+                if is_legado_path(nil, self.ui) then
+                    local library_obj = library_ref:getInstance()
+                    if library_obj then
+                        if Backend:enforceRateLimit(library_obj._last_page_turn_time, 100) then return true end
+                        library_obj._last_page_turn_time = time.now()
+                        UIManager:nextTick(function()
+                            local chapter_direction = "prev"
+                            library_obj:ReaderUIEventCallback(chapter_direction)
+                        end)
+                    else
+                        parent_ref:openLibraryView()
+                    end
+                    return true
+                end
+            end
+
+            self.eventListener.onCloseDocument = function()
+                if is_legado_path(nil, self.ui) then
+                    local library_obj = library_ref:getInstance()
+                    if library_obj then library_obj:readerUiVisible(false) end
+                    if not parent_ref.patches_ok then
+                        require("readhistory"):removeItemByPath(self.document.file)
+                    end
+                end
+            end
+
+            self.eventListener.onEndOfBook = function()
+                if is_legado_path(nil, self.ui) then
+                    local library_obj = library_ref:getInstance()
+                    if library_obj then
+                        if Backend:enforceRateLimit(library_obj._last_page_turn_time, 100) then return true end
+                        library_obj._last_page_turn_time = time.now()
+                        UIManager:nextTick(function()
+                            local chapter_direction = "next"
+                            library_obj:ReaderUIEventCallback(chapter_direction)
+                        end)
+                    else
+                        UIManager:nextTick(function()
+                            parent_ref:openLibraryView()
+                        end)
+                    end
+                    return true
+                end
+            end
+
+            -- none onDocSettingsLoad
+            table.insert(self.ui, 2, self.eventListener)
+        end
+
+        function parent_ref:afterReaderReady()
+            if is_legado_path(nil, self.ui)  then
+                local library_obj = library_ref:getInstance()
+                if library_obj then
+                    local reading_chapter = library_obj:readingChapter()
+                    if reading_chapter then
+                        UIManager:nextTick(function()
+                            Backend:after_reader_chapter_show(reading_chapter)
+                        end)
+                    end
+                end
+            end
+        end
+
         parent_ref.ui:registerPostInitCallback(function()
             parent_ref:registerReaderUiHookWithPriority(parent_ref.ui)
         end)
@@ -1458,9 +1491,7 @@ local function init_book_menu(parent)
         title_bar_fm_style = true,
         width = Device.screen:getWidth(),
         height = Device.screen:getHeight(),
-        close_callback = function()
-            Backend:closeDbManager()
-        end,
+        close_callback = function() Backend:closeDbManager() end,
         show_search_item = nil,
         refresh_menu_key = nil,
         parent_ref = parent,
