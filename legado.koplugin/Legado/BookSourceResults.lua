@@ -17,8 +17,7 @@ local H = require("Legado/Helper")
 local M = {
     results = {},
     last_read_chapter = nil,
-    _last_search_input = nil,
-
+    
     bookinfo = nil,
     search_text = nil,
     -- "CHANGE_SOURCE"
@@ -100,8 +99,8 @@ end
 function M:onCloseMenu()
     self.results = nil
     self.bookinfo = nil
-    self.search_text = nil
-    self.call_mode = nil
+    -- self.search_text = nil
+    -- self.call_mode = nil
     self.last_index = nil
     self.is_single_source_search = nil
 
@@ -260,8 +259,9 @@ function M:searchBookDialog(onReturnCallback, def_input)
 
     self:init()
 
-    if self._last_search_input and not def_input then
-        def_input = self._last_search_input
+    local last_search_input = H.get_cache("last_search_input")
+    if last_search_input and not def_input then
+        def_input = last_search_input
     end
     
     self.call_mode = "SEARCH"
@@ -289,6 +289,7 @@ function M:searchBookDialog(onReturnCallback, def_input)
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
+                    H.set_cache("last_search_input", inputText)
                     self:handleSingleSourceSearch(inputText)
                 end
             }, {
@@ -302,6 +303,7 @@ function M:searchBookDialog(onReturnCallback, def_input)
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
+                    H.set_cache("last_search_input", inputText)
                     self:handleMultiSourceSearch(inputText)
                 end
             }, {
