@@ -1974,29 +1974,29 @@ function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
     checkTask()
 end
 
+function M:findCustomCoverFileInDir(cover_path_no_ext)
+    local dir, image_filename = util.splitFilePathName(cover_path_no_ext)
+    if not (dir and image_filename) then
+        logger.err(string.format("findCustomCoverFileInDir: invalid name (%s, %s)", tostring(dir), tostring(image_filename)))
+        return nil
+    end
+    if not util.pathExists(dir) then return nil end
+    local extensions = { "jpg", "jpeg", "png", "webp", "bmp", "tiff" }
+    for _, ext in ipairs(extensions) do
+        local cover_full_path = string.format("%s.%s", cover_path_no_ext, ext)
+        if util.fileExists(cover_full_path) then
+            return cover_full_path, string.format("%s.%s",image_filename, ext)
+        end
+    end
+    return nil
+end
+
 function M:get_default_cover_cache(book_cache_id)
     if not (H.is_str(book_cache_id) and book_cache_id ~= "") then
         return nil
     end
     local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
-    local dir, image_filename = util.splitFilePathName(cover_path_no_ext)
-    if not (dir and image_filename) then
-        logger.err(string.format("get_default_cover_cache: invalid name (%s, %s)", tostring(dir), tostring(image_filename)))
-        return nil
-    end
-
-    if not util.pathExists(dir) then
-        return nil
-    end
-
-    local extensions = { "jpg", "jpeg", "png", "webp", "bmp", "tiff" }
-    for _, ext in ipairs(extensions) do
-        local cover_full_path = string.format("%s.%s", cover_path_no_ext, ext)
-        if util.fileExists(cover_full_path) then
-            return cover_full_path
-        end
-    end
-    return nil
+    return self:findCustomCoverFileInDir(cover_path_no_ext)
 end
 
 function M:download_cover_img(book_cache_id, cover_url, is_force)

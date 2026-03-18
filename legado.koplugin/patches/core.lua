@@ -1,5 +1,5 @@
 local M = {
-    _mark = "_c8eeb679f"
+    _mark = "_c8eeb679e"
 }
 
 M._setMark = function(instance)
@@ -130,26 +130,7 @@ M.install = function()
         end
         original_showFiles(self, path, focused_file, selected_files)
     end
-    local filemanagerutil = require("apps/filemanager/filemanagerutil")
-    local original_genBookCoverButton = filemanagerutil.genBookCoverButton
-    function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
-        if file and is_legado_browser_book(file) then
-            return {
-                text = "legado 书籍",
-                enabled = true,
-                callback = function()
-                    caller_callback()
-                    local ui = require("apps/filemanager/filemanager").instance or
-                                   require("apps/reader/readerui").instance
-                    if ui then
-                        ui:handleEvent(Event:new("ShowLegadoBrowserOption", file))
-                    end
-                end
-            }
-        else
-            return original_genBookCoverButton(file, book_props, caller_callback, button_disabled)
-        end
-    end
+
     -- fix koreader .cbz next chapter crash
     local ReaderFooter = require("apps/reader/modules/readerfooter")
     local original_getBookProgress = ReaderFooter.getBookProgress
