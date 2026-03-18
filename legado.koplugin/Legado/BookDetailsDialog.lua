@@ -24,6 +24,7 @@ local ButtonTable = require("ui/widget/buttontable")
 local util = require("util")
 local Device = require("device")
 local Backend = require("Legado/Backend")
+local H = require("Legado/Helper")
 
 local Screen = Device.screen
 
@@ -47,6 +48,7 @@ local BookDetails = FocusManager:extend{
     bookinfo = nil,
     callbacks = nil,
     has_reload_btn = nil,
+    lnk_file = nil,
 }
 
 function BookDetails:init()
@@ -140,7 +142,7 @@ function BookDetails:getButtonGroup(other_elements_height)
     end
     if self.has_reload_btn then
         table.insert(buttons, {
-            text = "封面刷新",
+            text = "刷新封面",
             callback = function()
                 local image_path = Backend:get_default_cover_cache(self.bookinfo.cache_id)  
                 if type(image_path) == "string" and util.fileExists(image_path) then
@@ -149,6 +151,53 @@ function BookDetails:getButtonGroup(other_elements_height)
                         if not util.fileExists(image_path) then self:_reload() end
                     end)
                 end
+            end,
+        })
+    end
+    if H.is_str(self.lnk_file) and util.fileExists(self.lnk_file) then
+        table.insert(buttons, {
+            text = "自定义封面",
+            callback = function()
+                local PathChooser = require("ui/widget/pathchooser")
+                local path_chooser = PathChooser:new{
+                    title ="长按图片选择",
+                    select_directory = false,
+                    path = H.getHomeDir(),
+                    onConfirm = function(image_file)
+                        local book_cache_id = self.bookinfo.cache_id
+                        local file = self.lnk_file
+                        if not H.is_str(image_file) then return end
+
+                        local DocumentRegistry = require("document/documentregistry")
+                        local DocSettings = require("docsettings")
+                        if DocumentRegistry:isImageFile(image_file) then
+                            local cover_cache_path = H.getCoverCacheFilePath(book_cache_id)
+                            local ext = image_file:match("%.([^.]+)$") or "jpg"
+                            local target_cover = string.format("%s.%s", cover_cache_path, ext:lower())
+                            
+                            local custom_book_cover = DocSettings:findCustomCoverFile(file)
+                            if custom_book_cover and util.fileExists(custom_book_cover) then
+                                util.removeFile(custom_book_cover)
+                            end
+                            local old_cover = Backend:findCustomCoverFileInDir(cover_cache_path)
+                            if old_cover then util.removeFile(old_cover) end
+
+                            local success = H.copyFileFromTo(image_file, target_cover)
+                            if util.fileExists(target_cover) then
+                                self:_reload()
+                                -- emitMetadataChanged
+                                local Event = require("ui/event")
+                                UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", file))
+                                UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
+                            else
+                                logger.warn("更换封面: 失败 - 新封面未能保存到缓存目录")
+                            end
+                        else
+                            logger.warn("更换封面: 仅支持图片文件")
+                        end
+                    end
+                }
+                UIManager:show(path_chooser)
             end,
         })
     end
