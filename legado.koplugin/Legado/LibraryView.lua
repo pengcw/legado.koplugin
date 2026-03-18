@@ -166,81 +166,15 @@ function LibraryView:openBrowserMenu(file)
 
     local dialog
     local buttons = { {{
-        text = "更多设置",
+        text = "更多设置 >>",
         callback = function()
             UIManager:close(dialog)
             UIManager:nextTick(function()
                 self:openMenu()
             end)
         end
-    }},{{
-        text = "更换书籍封面",
-        callback = function()
-            if book_cache_id then
-                UIManager:close(dialog)
-
-                logger.info("更换封面: 获取到的 book_cache_id =", book_cache_id or "无")
-
-                local custom_book_cover = DocSettings:findCustomCoverFile(file)
-                if custom_book_cover and util.fileExists(custom_book_cover) then
-                    logger.info("更换封面: 删除旧的自定义封面 -", custom_book_cover)
-                    util.removeFile(custom_book_cover)
-                end
-
-                local DocumentRegistry = require("document/documentregistry")
-                local PathChooser = require("ui/widget/pathchooser")
-                local path_chooser = PathChooser:new{
-                    select_directory = false,
-                    path = H.getHomeDir(),
-                    file_filter = function(filename)
-                        return DocumentRegistry:isImageFile(filename)
-                    end,
-                    onConfirm = function(image_file)
-                        -- 更新快捷方式封面
-                        if DocSettings:flushCustomCover(file, image_file) then
-                            self.book_browser:emitMetadataChanged(file)
-                        end
-
-                        -- 同时更新缓存目录的封面
-                        logger.info("更换封面: book_cache_id =", book_cache_id)
-                        logger.info("更换封面: image_file =", image_file)
-                        if book_cache_id then
-                            local cover_cache_path = H.getCoverCacheFilePath(book_cache_id)
-                            local ext = image_file:match("%.([^.]+)$") or "jpg"
-                            local target_cover = string.format("%s.%s", cover_cache_path, ext:lower())
-
-                            logger.info("更换封面: 目标路径 =", target_cover)
-
-                            -- 删除旧的缓存封面
-                            local extensions = {'jpg', 'jpeg', 'png', 'webp','bmp', 'tiff'}
-                            for _, old_ext in ipairs(extensions) do
-                                local old_cover = string.format("%s.%s", cover_cache_path, old_ext)
-                                if util.fileExists(old_cover) and old_cover ~= target_cover then
-                                    logger.info("更换封面: 删除旧封面 -", old_cover)
-                                    util.removeFile(old_cover)
-                                end
-                            end
-
-                            -- 复制新封面到缓存目录
-                            local success = H.copyFileFromTo(image_file, target_cover)
-                            logger.info("更换封面: 复制结果 =", success)
-                            if util.fileExists(target_cover) then
-                                logger.info("更换封面: 成功 - 新封面已保存到缓存目录")
-                            else
-                                logger.warn("更换封面: 失败 - 新封面未能保存到缓存目录")
-                            end
-                        else
-                            logger.warn("更换封面: 无 book_cache_id，无法更新缓存目录")
-                        end
-                    end
-                }
-                UIManager:show(path_chooser)
-            else
-                MessageBox:notice("操作失败: 仅能在文件浏览器下操作")
-            end
-        end
     }, {
-        text = "显示书籍详情",
+        text = "书籍详情 >>",
         callback = function()
             if book_cache_id then
                 local bookinfo = Backend:getBookInfoCache(book_cache_id)
@@ -253,6 +187,7 @@ function LibraryView:openBrowserMenu(file)
                     UIManager:show(require("Legado/BookDetailsDialog"):new{
                         bookinfo = bookinfo,
                         has_reload_btn = true,
+                        lnk_file = file,
                     })
                 end)
             end
@@ -864,17 +799,36 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
         return true
     end
-    
-    if not (parent_ref.ui and parent_ref.ui.document) then
-        function parent_ref:onShowLegadoBrowserOption(file)
-            -- logger.info("Received ShowLegadoBrowserOption event", file)
-            local library_obj = library_ref:getInstance()
-            if FileManager.instance and library_obj then
-                UIManager:nextTick(function()
-                    library_obj:openBrowserMenu(file)
-                end)
+
+    local orig_findCustomCoverFile = DocSettings.findCustomCoverFile  
+    function DocSettings:findCustomCoverFile(doc_path)
+        doc_path = doc_path or self.data.doc_path
+        local cover_dir
+        if is_legado_path(doc_path) then
+            cover_dir = util.splitFilePathName(doc_path)
+            cover_dir = cover_dir .. "/cover"
+        elseif is_legado_browser_book(doc_path) then
+            local function get_book_id(fullpath)
+                local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, fullpath)
+                if ok and H.is_tbl(lnk_config) and lnk_config.readSetting then
+                    return lnk_config:readSetting("book_cache_id")
+                end
+                local doc_settings = DocSettings:open(fullpath)
+                return doc_settings:readSetting("book_cache_id")
+            end
+            local book_id = get_book_id(doc_path)
+            if book_id then
+                cover_dir = H.getCoverCacheFilePath(book_id)
             end
         end
+        if H.is_str(cover_dir) then
+            local cover_path = Backend:findCustomCoverFileInDir(cover_dir)
+            if cover_path then return cover_path end
+        end
+        return orig_findCustomCoverFile(self, doc_path)  
+    end 
+
+    if not (parent_ref.ui and parent_ref.ui.document) then
         --[[
         function parent_ref:onPathChanged()
             if self.ui.title_bar and self.ui.title_bar.left_button then  
@@ -883,6 +837,27 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end 
         end 
         ]]
+        local filemanagerutil = require("apps/filemanager/filemanagerutil")
+        local orig_genBookCoverButton = filemanagerutil.genBookCoverButton
+        function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
+            if file and is_legado_browser_book(file) then
+                return {
+                    text = "legado 选项",
+                    enabled = true,
+                    callback = function()
+                        caller_callback()
+                        local library_obj = library_ref:getInstance()
+                        if FileManager.instance and library_obj then
+                            UIManager:nextTick(function()
+                                library_obj:openBrowserMenu(file)
+                            end)
+                        end
+                    end
+                }
+            else
+                return orig_genBookCoverButton(file, book_props, caller_callback, button_disabled)
+            end
+        end
     end
 
     if parent_ref.ui and parent_ref.ui.name == "ReaderUI" then
@@ -1417,7 +1392,7 @@ local function init_book_browser(parent)
                 return Backend:download_cover_img(book_cache_id, cover_url)
             end, function(status, cover_path, cover_name)
                 if status == true and cover_path and util.fileExists(cover_path) then
-                    DocSettings:flushCustomCover(book_lnk_path, cover_path)
+                    --DocSettings:flushCustomCover(book_lnk_path, cover_path)
                 end
             end)
         end
