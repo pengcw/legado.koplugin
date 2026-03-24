@@ -1,8 +1,8 @@
 return {
     FA_CHECK_CIRCLE = "\u{F058}",
     FA_CIRCLE_O = "\u{F10C}",
-    FA_CHECK_SQUARE = "\u{F046}",
-    FA_SQUARE_O = "\u{F096}",
+    FA_CHECK_SQUARE = "\u{2713}",
+    FA_SQUARE_O = "\u{25A2}",
     FA_THUMB_TACK = "\u{F08D}",
     FA_QUESTION_CIRCLE = "\u{F059}",
     FA_GLOBE = "\u{F0AC}",
