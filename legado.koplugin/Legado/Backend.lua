@@ -1991,6 +1991,22 @@ function M:findCustomCoverFileInDir(cover_path_no_ext)
     return nil
 end
 
+function M:emitMetadataChanged(book_file)
+    if H.is_str(book_file) and util.fileExists(book_file) then
+        local Event = require("ui/event")
+        --[[
+        local prop_updated = {
+            filepath = file,
+            doc_props = book_props,
+            metadata_key_updated = prop_updated,
+            metadata_value_old = prop_value_old,
+        }
+        ]]
+        UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", book_file))
+        UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
+    end
+end
+
 function M:get_default_cover_cache(book_cache_id)
     if not (H.is_str(book_cache_id) and book_cache_id ~= "") then
         return nil
@@ -2128,6 +2144,11 @@ function M:after_reader_chapter_show(chapter)
                 dbg.log('updating cache ext err:', tostring(err))
             end
         end
+        -- document_cover
+         if G_reader_settings and G_reader_settings.readSetting and
+                G_reader_settings:readSetting("lastfile") ~= cache_file_path then
+            G_reader_settings:saveSetting("lastfile", cache_file_path)
+         end
     end
 
     if NetworkMgr:isConnected() then

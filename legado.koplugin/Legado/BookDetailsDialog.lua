@@ -18,9 +18,12 @@ local ScrollTextWidget = require("ui/widget/scrolltextwidget")
 local ImageWidget = require("ui/widget/imagewidget")
 local TitleBar = require("ui/widget/titlebar")
 local TextWidget = require("ui/widget/textwidget")
+local DocumentRegistry = require("document/documentregistry")
+local FileManagerBookInfo = require("apps/filemanager/filemanagerbookinfo")
 local logger = require("logger")
 
 local ButtonTable = require("ui/widget/buttontable")
+local DocSettings = require("docsettings")
 local util = require("util")
 local Device = require("device")
 local Backend = require("Legado/Backend")
@@ -49,6 +52,7 @@ local BookDetails = FocusManager:extend{
     callbacks = nil,
     has_reload_btn = nil,
     lnk_file = nil,
+    is_downloading = nil,
 }
 
 function BookDetails:init()
@@ -144,13 +148,23 @@ function BookDetails:getButtonGroup(other_elements_height)
         table.insert(buttons, {
             text = "刷新封面",
             callback = function()
+                if self.is_downloading then return end
                 local image_path = Backend:get_default_cover_cache(self.bookinfo.cache_id)  
-                if type(image_path) == "string" and util.fileExists(image_path) then
+                if H.is_str(image_path) and util.fileExists(image_path) then
                     pcall(util.removeFile, image_path)
-                    UIManager:nextTick(function()
-                        if not util.fileExists(image_path) then self:_reload() end
-                    end)
                 end
+                if self.lnk_file then
+                    local custom_book_cover = DocSettings:findCustomCoverFile(self.lnk_file)
+                    if H.is_str(custom_book_cover) and util.fileExists(custom_book_cover) then
+                        pcall(util.removeFile, custom_book_cover)
+                    end
+                end
+                UIManager:nextTick(function()
+                    if not util.fileExists(image_path) then 
+                        self:_reload() 
+                        if self.lnk_file then Backend:emitMetadataChanged(self.lnk_file) end
+                    end
+                end)  
             end,
         })
     end
@@ -158,44 +172,21 @@ function BookDetails:getButtonGroup(other_elements_height)
         table.insert(buttons, {
             text = "自定义封面",
             callback = function()
-                local PathChooser = require("ui/widget/pathchooser")
-                local path_chooser = PathChooser:new{
+                local path_chooser = require("ui/widget/pathchooser"):new{
                     title ="长按图片选择",
                     select_directory = false,
                     path = H.getHomeDir(),
                     onConfirm = function(image_file)
-                        local book_cache_id = self.bookinfo.cache_id
-                        local file = self.lnk_file
                         if not H.is_str(image_file) then return end
-
-                        local DocumentRegistry = require("document/documentregistry")
-                        local DocSettings = require("docsettings")
                         if DocumentRegistry:isImageFile(image_file) then
-                            local cover_cache_path = H.getCoverCacheFilePath(book_cache_id)
-                            local ext = image_file:match("%.([^.]+)$") or "jpg"
-                            local target_cover = string.format("%s.%s", cover_cache_path, ext:lower())
-                            
-                            local custom_book_cover = DocSettings:findCustomCoverFile(file)
-                            if custom_book_cover and util.fileExists(custom_book_cover) then
-                                util.removeFile(custom_book_cover)
-                            end
-                            local old_cover = Backend:findCustomCoverFileInDir(cover_cache_path)
-                            if old_cover then util.removeFile(old_cover) end
-
-                            local success = H.copyFileFromTo(image_file, target_cover)
-                            if util.fileExists(target_cover) then
+                            if DocSettings:flushCustomCover(self.lnk_file, image_file) then
                                 self:_reload()
-                                -- emitMetadataChanged
-                                local Event = require("ui/event")
-                                UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", file))
-                                UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
-                            else
-                                logger.warn("更换封面: 失败 - 新封面未能保存到缓存目录")
+                                Backend:emitMetadataChanged(self.lnk_file)
                             end
                         else
                             logger.warn("更换封面: 仅支持图片文件")
                         end
-                    end
+                    end,
                 }
                 UIManager:show(path_chooser)
             end,
@@ -244,32 +235,19 @@ function BookDetails:getButtonGroup(other_elements_height)
     }
 end
 
-function BookDetails:_createCoverImage(image_path, max_width, max_height, min_frame_height)
+function BookDetails:_createCoverImage(cover_bb, max_width, max_height, min_frame_height)
     min_frame_height = min_frame_height or 0
-
-    local function safe_render_image(path)
-        local ok, img = pcall(RenderImage.renderImageFile, RenderImage, path, false)
-        if ok and img and type(img.getWidth) == "function" then
-            local w, h = img:getWidth(), img:getHeight()
-            if w > 0 and h > 0 then
-                return img, w, h
-            end
-        end
-        return nil
-    end
-
-    local image, actual_w, actual_h = safe_render_image(image_path)
-    if not image then
+    local actual_w, actual_h
+    if not cover_bb then
         -- Do not delete placeholder image
-        if image_path ~= Constants.PLACEHOLDER_COVER then
-            -- pcall(util.removeFile, image_path)
-            image, actual_w, actual_h = safe_render_image(Constants.PLACEHOLDER_COVER)
-        end
-        if not image then
+        -- pcall(util.removeFile, image_path)
+        cover_bb = self:getCoverimage()
+        if not cover_bb then
             actual_w, actual_h = max_width, max_height
         end
+    else
+        actual_w, actual_h = cover_bb:getWidth(), cover_bb:getHeight()
     end
-
 
     local container_w = max_width - (Constants.COVER_IMAGE_PADDING * 2)
     local container_h = max_height - (Constants.COVER_IMAGE_PADDING * 2)
@@ -281,7 +259,7 @@ function BookDetails:_createCoverImage(image_path, max_width, max_height, min_fr
     local scaled_h = math.floor(actual_h * scale)
 
     local image_widget = ImageWidget:new{
-        image = image,
+        image = cover_bb,
         width = scaled_w,
         height = scaled_h,
         scale_factor = 0,
@@ -370,17 +348,18 @@ function BookDetails:getBookDetails()
     -- Ensure cover image is at least as tall as the metadata
     local metadata_height = book_metadata_group:getSize().h
     img_max_height = math.max(img_max_height, metadata_height)
-    
-    local image_path = Backend:get_default_cover_cache(self.bookinfo.cache_id)
+
     local final_cover_component
+    local cover_bitmap = self:getCoverimage(self.lnk_file, self.bookinfo.cache_id)
     
-    if not( type(image_path) == "string" and util.fileExists(image_path) ) then
+    if not ( cover_bitmap and H.is_func(cover_bitmap.getWidth) ) then
         
         local book_cache_id = self.bookinfo.cache_id
         local cover_url = self.bookinfo.coverUrl
 
         -- Create placeholder image container
-        local placeholder_container, _ = self:_createCoverImage(Constants.PLACEHOLDER_COVER, img_width, img_max_height, metadata_height)
+        cover_bitmap = self:getCoverimage()
+        local placeholder_container, _ = self:_createCoverImage(cover_bitmap, img_width, img_max_height, metadata_height)
 
         self.loading_text_widget = TextWidget:new{
             text = "正在加载",
@@ -401,23 +380,31 @@ function BookDetails:getBookDetails()
             }
         
         final_cover_component = cover_group
-
-        Backend:launchProcess(function()
-            return Backend:download_cover_img(book_cache_id, cover_url)
-        end, function(status, cover_path, cover_name)
-            if self.loading_text_widget then
-                if status == true and type(cover_path) == "string" and util.fileExists(cover_path) then
-                   self:reloadCoverImage()
-                else
-                    self.loading_text_widget:setText("加载失败")
-                    UIManager:setDirty("all", "partial")
-                    UIManager:forceRePaint()
-                end
-            end
-        end)
         
+        -- 没有文件才进行下载
+        if not Backend:get_default_cover_cache(book_cache_id) then
+            self.is_downloading = true
+            Backend:launchProcess(function()
+                return Backend:download_cover_img(book_cache_id, cover_url)
+            end, function(status, cover_path, cover_name)
+                if self.loading_text_widget then
+                    if status == true and type(cover_path) == "string" and util.fileExists(cover_path) then
+                    self:reloadCoverImage()
+                    else
+                        self.loading_text_widget:setText("下载失败")
+                        UIManager:setDirty("all", "partial")
+                        UIManager:forceRePaint()
+                    end
+                end
+                self.is_downloading = nil
+            end)
+        else
+            self.loading_text_widget:setText("资源损坏")
+            UIManager:setDirty("all", "partial")
+            UIManager:forceRePaint()
+        end 
     else
-        local cover_image_container, cover_image_widget = self:_createCoverImage(image_path, img_width, img_max_height, metadata_height)
+        local cover_image_container, cover_image_widget = self:_createCoverImage(cover_bitmap, img_width, img_max_height, metadata_height)
         self.cover_image_widget = cover_image_widget
         final_cover_component = cover_image_container
     end
@@ -505,12 +492,48 @@ function BookDetails:reloadCoverImage()
     local image_path = Backend:get_default_cover_cache(self.bookinfo.cache_id)
     if type(image_path) == "string" and util.fileExists(image_path) then
         self:_reload()
+        if self.lnk_file then Backend:emitMetadataChanged(self.lnk_file) end
     end
 end
 
 function BookDetails:decodeHtmlEntities(text)
     return util.htmlEntitiesToUtf8(text)
 end
+
+function BookDetails:getCoverimage(path, book_cache_id)
+    if not (path or book_cache_id ) then
+        -- get_cover_bitmap(Constants.PLACEHOLDER_COVER)
+        return RenderImage:renderImageFile(Constants.PLACEHOLDER_COVER, false)
+    end
+
+    -- if the picture is damaged, it will crash.
+    local ok, cover_bb =  pcall(FileManagerBookInfo.getCoverImage, FileManagerBookInfo, nil, path)
+    if ok and cover_bb and H.is_func(cover_bb.getWidth) then
+        local w, h = cover_bb:getWidth(), cover_bb:getHeight()
+        if w > 0 and h > 0 then
+            return cover_bb
+        end
+    else
+        if book_cache_id then
+            local cover_path = Backend:get_default_cover_cache(book_cache_id)
+            if H.is_str(cover_path) and util.fileExists(cover_path) then
+                -- supports gz compression
+                local get_cover_bitmap = function(cover_file)
+                    local DocumentRegistry = require("document/documentregistry")
+                    local cover_doc = DocumentRegistry:openDocument(cover_file)
+                    if cover_doc then
+                        local ok, cover_bb = pcall(cover_doc.getCoverPageImage, cover_doc)
+                        cover_doc:close()
+                        if ok and cover_bb and H.is_func(cover_bb.getWidth) then return cover_bb end 
+                    end
+                end
+                return get_cover_bitmap(cover_path)
+            end
+        end
+    end
+    return nil
+end
+    
 
 function BookDetails:_reload()
     self[1][1] = self:getDetailsContent(self.screen_size.w)

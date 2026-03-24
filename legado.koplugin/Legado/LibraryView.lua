@@ -800,34 +800,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
-    local orig_findCustomCoverFile = DocSettings.findCustomCoverFile  
-    function DocSettings:findCustomCoverFile(doc_path)
-        doc_path = doc_path or self.data.doc_path
-        local cover_dir
-        if is_legado_path(doc_path) then
-            cover_dir = util.splitFilePathName(doc_path)
-            cover_dir = cover_dir .. "/cover"
-        elseif is_legado_browser_book(doc_path) then
-            local function get_book_id(fullpath)
-                local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, fullpath)
-                if ok and H.is_tbl(lnk_config) and lnk_config.readSetting then
-                    return lnk_config:readSetting("book_cache_id")
-                end
-                local doc_settings = DocSettings:open(fullpath)
-                return doc_settings:readSetting("book_cache_id")
-            end
-            local book_id = get_book_id(doc_path)
-            if book_id then
-                cover_dir = H.getCoverCacheFilePath(book_id)
-            end
-        end
-        if H.is_str(cover_dir) then
-            local cover_path = Backend:findCustomCoverFileInDir(cover_dir)
-            if cover_path then return cover_path end
-        end
-        return orig_findCustomCoverFile(self, doc_path)  
-    end 
-
     if not (parent_ref.ui and parent_ref.ui.document) then
         --[[
         function parent_ref:onPathChanged()
@@ -838,25 +810,28 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end 
         ]]
         local filemanagerutil = require("apps/filemanager/filemanagerutil")
-        local orig_genBookCoverButton = filemanagerutil.genBookCoverButton
-        function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
-            if file and is_legado_browser_book(file) then
-                return {
-                    text = "legado 选项",
-                    enabled = true,
-                    callback = function()
-                        caller_callback()
-                        local library_obj = library_ref:getInstance()
-                        if FileManager.instance and library_obj then
-                            UIManager:nextTick(function()
-                                library_obj:openBrowserMenu(file)
-                            end)
+        if not filemanagerutil.is_legado_patched then
+            local orig_genBookCoverButton = filemanagerutil.genBookCoverButton
+            function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
+                if file and is_legado_browser_book(file) then
+                    return {
+                        text = "legado 选项",
+                        enabled = true,
+                        callback = function()
+                            caller_callback()
+                            local library_obj = library_ref:getInstance()
+                            if FileManager.instance and library_obj then
+                                UIManager:nextTick(function()
+                                    library_obj:openBrowserMenu(file)
+                                end)
+                            end
                         end
-                    end
-                }
-            else
-                return orig_genBookCoverButton(file, book_props, caller_callback, button_disabled)
+                    }
+                else
+                    return orig_genBookCoverButton(file, book_props, caller_callback, button_disabled)
+                end
             end
+            filemanagerutil.is_legado_patched = true
         end
     end
 
@@ -997,9 +972,12 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
                 if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
                     local summary = doc_settings.data.summary -- keep status
+                     local persisted_settings_keys = require("Legado/BookMetaData")
                     local book_defaults_data = util.tableDeepCopy(shared_meta_data.data)
                     for k, v in pairs(book_defaults_data) do
-                        doc_settings.data[k] = v
+                        if persisted_settings_keys[k]  then
+                            doc_settings.data[k] = v
+                        end
                     end
                     doc_settings.data.doc_path = document.file
                     doc_settings.data.summary = doc_settings.data.summary or summary
@@ -1062,6 +1040,22 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                                 -- logger.info("onSaveSettings save k v", k, v)
                             end
                         end
+                        -- 缓存书籍信息用于 Document
+                        if H.is_tbl(shared_meta_data.data) and not H.is_tbl(shared_meta_data.data.bookinfo) then
+                                local book_id = library_obj:getReadingBookId()
+                                if H.is_str( book_id) then
+                                    local bookinfo = Backend:getBookInfoCache(book_id)
+                                    if H.is_tbl(bookinfo) then
+                                        shared_meta_data.data.bookinfo = {
+                                                book_cache_id = book_id,
+                                                title = bookinfo.name,
+                                                authors  = bookinfo.author,
+                                                description = bookinfo.intro,
+                                        }
+                                        is_updated = true
+                                    end
+                                end
+                        end
                         if is_updated == true and H.is_func(shared_meta_data.flush) then
                             shared_meta_data:flush()
                         end
@@ -1083,7 +1077,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 if library_obj then library_obj:readerUiVisible(false) end
                 return
             elseif self.ui.link and self.ui.document then
-                if Backend:enforceRateLimit(library_obj._last_reader_ready_time, 100) then return end
+                if Backend:enforceRateLimit(library_obj._last_reader_ready_time, 80) then return end
                 library_obj._last_reader_ready_time = time.now()
                 if library_obj then library_obj:readerUiVisible(true) end
                 local chapter_direction = library_obj:chapterDirection()
@@ -1161,7 +1155,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 if is_legado_path(nil, self.ui) then
                     local library_obj = library_ref:getInstance()
                     if library_obj then
-                        if Backend:enforceRateLimit(library_obj._last_page_turn_time, 100) then return true end
+                        if Backend:enforceRateLimit(library_obj._last_page_turn_time, 80) then return true end
                         library_obj._last_page_turn_time = time.now()
                         UIManager:nextTick(function()
                             local chapter_direction = "prev"
@@ -1188,7 +1182,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 if is_legado_path(nil, self.ui) then
                     local library_obj = library_ref:getInstance()
                     if library_obj then
-                        if Backend:enforceRateLimit(library_obj._last_page_turn_time, 100) then return true end
+                        if Backend:enforceRateLimit(library_obj._last_page_turn_time, 80) then return true end
                         library_obj._last_page_turn_time = time.now()
                         UIManager:nextTick(function()
                             local chapter_direction = "next"
@@ -1314,7 +1308,7 @@ local function init_book_browser(parent)
                 goto continue
             end
 
-            self:refreshBookMetadata(nil, fullpath, bookinfo)
+            self:refreshLnkMetadata(nil, fullpath, bookinfo)
             ::continue::
         end, true)
     end
@@ -1341,15 +1335,8 @@ local function init_book_browser(parent)
             return book_lnk_path, book_lnk_name
         end
 
-        local book_lnk_config = Backend:getLuaConfig(book_lnk_path)
-        book_lnk_config:saveSetting("book_cache_id", book_cache_id):flush()
-
+        self:refreshLnkMetadata(book_lnk_name, book_lnk_path, bookinfo)
         return book_lnk_path, book_lnk_name
-    end
-
-    function book_browser:getCustomMateData(filepath)
-        local custom_metadata_file = DocSettings:findCustomMetadataFile(filepath)
-        return custom_metadata_file and DocSettings.openSettingsFile(custom_metadata_file):readSetting("custom_props")
     end
 
     function book_browser:addBookShortcut(bookinfo)
@@ -1366,13 +1353,9 @@ local function init_book_browser(parent)
             return
         end
 
-        if not self:getCustomMateData(book_lnk_path) then
-            self:refreshBookMetadata(book_lnk_name, book_lnk_path, bookinfo)
-        else
-            self:bind_provider(book_lnk_path)
-        end
+        self:bind_provider(book_lnk_path)
 
-        if DocSettings:findCustomCoverFile(book_lnk_path) then
+        if Backend:get_default_cover_cache(book_cache_id) then
             return
         end
 
@@ -1384,7 +1367,7 @@ local function init_book_browser(parent)
         if cover_url then
             Backend:runTaskWithRetry(function()
                 if DocSettings:findCustomCoverFile(book_lnk_path) then
-                    self:emitMetadataChanged(book_lnk_path)
+                    Backend:emitMetadataChanged(book_lnk_path)
                     return true
                 end
             end, 12000, 2000)
@@ -1398,19 +1381,6 @@ local function init_book_browser(parent)
         end
     end
 
-    function book_browser:emitMetadataChanged(path)
-        --[[
-        local prop_updated = {
-            filepath = file,
-            doc_props = book_props,
-            metadata_key_updated = prop_updated,
-            metadata_value_old = prop_value_old,
-        }
-        ]]
-        UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", path))
-        UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
-    end
-
     function book_browser:bind_provider(file)
         local doc_settings = DocSettings:open(file)
         local provider = doc_settings:readSetting("provider")
@@ -1420,30 +1390,34 @@ local function init_book_browser(parent)
         return doc_settings
     end
 
-    function book_browser:refreshBookMetadata(lnk_name, lnk_path, bookinfo)
+    function book_browser:refreshLnkMetadata(lnk_name, lnk_path, bookinfo)
         lnk_name = lnk_name or (H.is_str(lnk_path) and select(2, util.splitFilePathName(lnk_path)))
-        if not (util.fileExists(lnk_path) and H.is_str(lnk_name) and H.is_tbl(bookinfo) and bookinfo.cache_id and
+        if not (H.is_str(lnk_name) and H.is_tbl(bookinfo) and bookinfo.cache_id and
             bookinfo.name) then
-            logger.err("browser.refreshBookMetadata parameter error")
+            logger.err("browser.refreshLnkMetadata parameter error")
             return
         end
 
         local book_cache_id = bookinfo.cache_id
+        local book_name = bookinfo.name
+        local book_author = bookinfo.author or "未知作者"
+
+        -- custom_props Document.getProps
+        local lnk_config = Backend:getLuaConfig(lnk_path)
+        lnk_config:saveSetting("book_cache_id", book_cache_id)
+        lnk_config:saveSetting("title", book_name)
+        lnk_config:saveSetting("authors", book_author)
+        -- lnk_config:saveSetting("doc_props", { pages = 1 })
+        lnk_config:saveSetting("description", bookinfo.intro or ""):flush()
+
+        pcall(util.removeFile, lnk_path .. ".old")
+
         local doc_settings = self:bind_provider(lnk_path)
-        if doc_settings and doc_settings.data then
-            doc_settings.data = {}
-            doc_settings:saveSetting("custom_props", {
-                authors = bookinfo.author,
-                title = bookinfo.name,
-                description = bookinfo.intro
-            })
-            doc_settings:saveSetting("book_cache_id", book_cache_id)
-            doc_settings:saveSetting("doc_props", {
-                pages = 1
-            }):flushCustomMetadata(lnk_path)
+        if not doc_settings:readSetting("book_cache_id") then
+            doc_settings:saveSetting("book_cache_id", book_cache_id):flush()
         end
 
-        self:emitMetadataChanged(lnk_path)
+        Backend:emitMetadataChanged(lnk_path)
     end
 
     parent.book_browser = book_browser
