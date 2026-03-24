@@ -326,7 +326,7 @@ function ChapterListing:onSwipe(arg, ges_ev)
                 self:onRefreshChapters()
             end)
         else
-            MessageBox:notice("刷新失败，请检查网络")
+            NetworkMgr:runWhenConnected(function() self:onRefreshChapters() end)  
         end
         return
     end

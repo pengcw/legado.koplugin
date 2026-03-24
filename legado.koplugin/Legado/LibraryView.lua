@@ -1489,7 +1489,8 @@ local function init_book_menu(parent)
                     self:onRefreshLibrary()
                 end)
             else
-                MessageBox:notice("刷新失败，请检查网络")
+                -- local connection
+                NetworkMgr:runWhenConnected(function() self:onRefreshLibrary() end)  
             end
             return
         end
