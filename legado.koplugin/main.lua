@@ -10,6 +10,8 @@ local H = require("Legado/Helper")
 local Backend = require("Legado/Backend")
 local LibraryView = require("Legado/LibraryView")
 local verify_patched = require("patches.core").verifyPatched
+local DocumentRegistry = require("document/documentregistry")
+local CreDocument = require("Legado/Document")
 
 local Legado = WidgetContainer:extend({
     name = "开源阅读插件",
@@ -39,6 +41,7 @@ function Legado:init()
     end
     self:registerDocumentRegistryAuxProvider()
     self:onDispatcherRegisterActions()
+    CreDocument:register(DocumentRegistry)
 end
 
 function Legado:onDispatcherRegisterActions()
