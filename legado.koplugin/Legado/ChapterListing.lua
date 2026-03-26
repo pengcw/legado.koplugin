@@ -65,7 +65,6 @@ function ChapterListing:init()
         self.key_events.Right = {{ "Right" }}
     end
 
-    self._ui_refresh_time = time.now()
     self:refreshItems(nil, true)
 end
 

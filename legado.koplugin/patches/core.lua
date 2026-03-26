@@ -27,15 +27,15 @@ M.install = function()
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
         end
-        return type(file_path) == 'string' and file_path:lower():find('/cache/legado.cache/', 1, true) or false
+        return type(file_path) == 'string' and file_path:lower():find('/cache/legado.cache/', 1, true) ~= nil
     end
     local is_legado_browser_book = function(file_path, instance)
         if instance and instance.document and instance.document.file then
             file_path = instance.document.file
         end
         return type(file_path) == "string"
-                and file_path:find("/Legado\u{200B}书目/", 1, true)
-                and file_path:find("\u{200B}.html", 1, true)
+                and file_path:find("/Legado\u{200B}书目/", 1, true) ~= nil
+                and file_path:find("\u{200B}.html", 1, true) ~= nil
     end
     local ReaderRolling = require("apps/reader/modules/readerrolling")
     local onGotoViewRel_original = ReaderRolling.onGotoViewRel
