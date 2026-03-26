@@ -72,7 +72,7 @@ function Legado:onDispatcherRegisterActions()
 end
 
 function Legado:isFileTypeSupported(file)
-    return true
+    return CreDocument:is_legado_browser_book(file)
 end
 
 function Legado:registerDocumentRegistryAuxProvider()
@@ -81,7 +81,7 @@ function Legado:registerDocumentRegistryAuxProvider()
         provider = "legado",
         order = 50, -- order in OpenWith dialog
         disable_file = true,
-        disable_type = false,
+        disable_type = true,
     })
 end
 
