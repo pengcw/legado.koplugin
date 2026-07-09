@@ -535,9 +535,6 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
             item.author = util.trim(item.author)
 
             if item.name ~= '' then
-                if item.author == '' then
-                    item.author = '未知'
-                end
                 local show_book_title = ("%s (%s)"):format(item.name, item.author)
                 item.cache_id = tostring(md5(show_book_title))
 
@@ -1175,9 +1172,9 @@ function M:isDownloaded(bookCacheId, chapterIndex)
     return result and #result > 0 and result[1][1] == 1
 end
 
-function M:clearBooks(bookShelfId)
+function M:disableBookShelf(bookShelfId)
     if not H.is_str(bookShelfId) then
-        dbg.log('DB clearBooks error')
+        dbg.log('DB disableBookShelf error')
         return false
     end
 
@@ -1189,28 +1186,18 @@ function M:clearBooks(bookShelfId)
     return true
 end
 
-function M:clearBook(bookShelfId, book_cache_id)
+function M:clearBook(bookShelfId, bookCacheId)
 
-    if not H.is_str(bookShelfId) or not H.is_str(book_cache_id) then
+    if not H.is_str(bookShelfId) or not H.is_str(bookCacheId) then
         dbg.log('DB clearBook error')
         return false
     end
 
+    local update_book_sql = "UPDATE books SET isEnabled = 0 WHERE bookCacheId = ?"
+    local del_chapters_sql = "DELETE FROM chapters WHERE bookCacheId = ?"
     return self:transaction(function()
-        self:dynamicUpdate('books', {
-            isEnabled = 0
-        }, {
-            bookShelfId = bookShelfId,
-            bookCacheId = book_cache_id
-        })
-
-        self:dynamicUpdate('chapters', {
-            cacheFilePath = self.nil_object(),
-            content = self.nil_object(),
-            isRead = 0
-        }, {
-            bookCacheId = book_cache_id
-        })
+        self:execute(del_chapters_sql, {bookCacheId})
+        self:execute(update_book_sql, {bookCacheId})
         return true
     end, {
         enable_savepoint = false
@@ -1389,10 +1376,23 @@ end
 
 function M:removeBookShelf(bookShelfId)
     if not H.is_str(bookShelfId) then
-        return
+        return false
     end
-    local delete_books_sql = "DELETE FROM books WHERE bookShelfId = ?"
-    return self:execute(delete_books_sql, {bookShelfId})
+    local perform_delete = self:transaction(function(targetShelfId)
+        local delete_chapters_sql = [[
+            DELETE FROM chapters 
+            WHERE bookCacheId IN (
+                SELECT bookCacheId 
+                FROM books 
+                WHERE bookShelfId = ?
+            )
+        ]]
+        self:execute(delete_chapters_sql, {targetShelfId})
+        local delete_books_sql = "DELETE FROM books WHERE bookShelfId = ?"
+        self:execute(delete_books_sql, {targetShelfId})
+        return true 
+    end)
+    return perform_delete(bookShelfId)
 end
 
 return M
