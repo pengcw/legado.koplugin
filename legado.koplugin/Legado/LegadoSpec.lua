@@ -281,7 +281,7 @@ local qread = {
             path = "/getBookContentNew",
             method = "POST",
             required_params = {"index", "url", "bookSourceUrl", "useReplaceRule"},
-            optional_params = {"bookname", "type"},
+            optional_params = {"bookname", "type", "needRefresh"},
             expected_status = {200}
         },
         getBookSourcesPage = {

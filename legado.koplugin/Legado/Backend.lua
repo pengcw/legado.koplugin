@@ -1848,7 +1848,7 @@ function M:cleanAllBookCaches()
     end
 
     local bookShelfId = self:getCurrentBookShelfId()
-    self.dbManager:clearBooks(bookShelfId)
+    self.dbManager:removeBookShelf(bookShelfId)
     self:closeDbManager()
     local books_cache_dir = H.getTempDirectory()
     ffiUtil.purgeDir(books_cache_dir)
@@ -2300,7 +2300,7 @@ function M:deleteWebConfig(conf_name)
 
     -- Use the config name to generate the bookshelf ID for deletion
     local book_shelf_id = tostring(md5(conf_name))
-    pcall(function() self.dbManager:removeBookShelf(book_shelf_id) end)
+    pcall(function() self.dbManager:disableBookShelf(book_shelf_id) end)
 
     self.settings_data.data.web_configs[conf_name] = nil
     self:saveSettings()
