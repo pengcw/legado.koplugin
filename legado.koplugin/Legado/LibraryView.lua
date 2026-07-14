@@ -809,29 +809,15 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end 
         end 
         ]]
-        local filemanagerutil = require("apps/filemanager/filemanagerutil")
-        if not filemanagerutil.is_legado_patched then
-            local orig_genBookCoverButton = filemanagerutil.genBookCoverButton
-            function filemanagerutil.genBookCoverButton(file, book_props, caller_callback, button_disabled)
-                if file and is_legado_browser_book(file) then
-                    return {
-                        text = "legado 选项",
-                        enabled = true,
-                        callback = function()
-                            caller_callback()
-                            local library_obj = library_ref:getInstance()
-                            if FileManager.instance and library_obj then
-                                UIManager:nextTick(function()
-                                    library_obj:openBrowserMenu(file)
-                                end)
-                            end
-                        end
-                    }
-                else
-                    return orig_genBookCoverButton(file, book_props, caller_callback, button_disabled)
+        function parent_ref:openBrowserMenu(file)
+            if file and is_legado_browser_book(file) then
+                local library_obj = library_ref:getInstance()
+                if FileManager.instance and library_obj then
+                    UIManager:nextTick(function()
+                        library_obj:openBrowserMenu(file)
+                    end)
                 end
             end
-            filemanagerutil.is_legado_patched = true
         end
     end
 
@@ -841,18 +827,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             if not (document and menu_items and is_legado_path(document.file)) then 
                 return 
             end
-
-            if not self.patches_ok then
-                menu_items.go_back_to_legado = {
-                    text = "返回 Legado...",
-                    sorting_hint = "main",
-                    help_text = "点击返回 Legado 书籍目录",
-                    callback = function()
-                        self.ui:handleEvent(Event:new("ShowLegadoToc"))
-                    end
-                }
-            end
-
             local settings = Backend:getSettings()
 
             menu_items.Legado_reader_ui_menu = {
@@ -1077,6 +1051,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 if library_obj then library_obj:readerUiVisible(false) end
                 return
             elseif self.ui.link and self.ui.document then
+                require("patches.core").readui_runtime(self.ui)
                 if Backend:enforceRateLimit(library_obj._last_reader_ready_time, 80) then return end
                 library_obj._last_reader_ready_time = time.now()
                 if library_obj then library_obj:readerUiVisible(true) end
@@ -1172,7 +1147,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 if is_legado_path(nil, self.ui) then
                     local library_obj = library_ref:getInstance()
                     if library_obj then library_obj:readerUiVisible(false) end
-                    if not parent_ref.patches_ok then
+                    if not (parent_ref.ui and parent_ref.ui._ref_legado_wrapped) then
                         require("readhistory"):removeItemByPath(self.document.file)
                     end
                 end
