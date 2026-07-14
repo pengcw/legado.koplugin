@@ -252,19 +252,6 @@ function M:initialize()
     self:loadApiProvider()
 end
 
-function M:installPatches()
-    local patches_file_path = H.joinPath(H.getUserPatchesDirectory(), '2-legado_plugin_func.lua')
-    local source_patches = H.joinPath(H.getPluginDirectory(), 'patches/2-legado_plugin_func.lua')
-    local disabled_patches = patches_file_path .. '.disabled'
-    for _, file in ipairs({patches_file_path, disabled_patches}) do
-        if util.fileExists(file) then
-            util.removeFile(file)
-        end
-    end
-    H.copyFileFromTo(source_patches, patches_file_path)
-    UIManager:restartKOReader()
-end
-
 function M:checkOta(is_compel)
     local check_interval = 518400
     local setting_data = self:getSettings()

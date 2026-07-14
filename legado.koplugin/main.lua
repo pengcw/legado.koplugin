@@ -9,19 +9,17 @@ local _ = require("gettext")
 local H = require("Legado/Helper")
 local Backend = require("Legado/Backend")
 local LibraryView = require("Legado/LibraryView")
-local verify_patched = require("patches.core").verifyPatched
+local patcher = require("patches.core")
 local DocumentRegistry = require("document/documentregistry")
 local CreDocument = require("Legado/Document")
 
 local Legado = WidgetContainer:extend({
     name = "开源阅读插件",
     library_view = nil,
-    patches_ok = nil
 })
 
 function Legado:init()
     -- on open FileManager or ReaderUI
-    self.patches_ok = verify_patched()
     if not H.has_cache("plg:name") then
         H.set_cache("plg:name", "legado")
         if self.path then
@@ -42,6 +40,7 @@ function Legado:init()
     self:registerDocumentRegistryAuxProvider()
     self:onDispatcherRegisterActions()
     CreDocument:register(DocumentRegistry)
+    patcher.install(self)
 end
 
 function Legado:onDispatcherRegisterActions()
@@ -112,9 +111,6 @@ end
 function Legado:openLibraryView()
     self.library_view = LibraryView:fetchAndShow()
     UIManager:nextTick(function()
-        if not self.patches_ok then
-            Backend:installPatches()
-        end
         Backend:checkOta()
     end)
 end
