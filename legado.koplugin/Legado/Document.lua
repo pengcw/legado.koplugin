@@ -5,13 +5,16 @@ local util = require("util")
 local H = require("Legado/Helper")
 local Backend = require("Legado/Backend")
 
-
 local Document= CreDocument:extend{
     provider = "legadodoc",
     provider_name = "Legado Document",
     _is_browser_book = nil,
     _is_cache_book = nil,
 }
+
+local LEGADO_CACHE_PATH = "/cache/legado.cache/"
+local LEGADO_BOOK_DIR = "/Legado\u{200B}书目/"
+local LEGADO_EXT = "\u{200B}.html"
 
 function Document:init()
     CreDocument.init(self)
@@ -25,13 +28,13 @@ end
 function Document:is_legado_browser_book(file_path)
     file_path = file_path or self.file
     return type(file_path) == "string"
-                and file_path:find("/Legado\u{200B}书目/", 1, true) ~= nil
-                and file_path:find("\u{200B}.html", 1, true) ~= nil
+                and file_path:find(LEGADO_BOOK_DIR, 1, true) ~= nil
+                and file_path:find(LEGADO_EXT, 1, true) ~= nil
 end
 
 function Document:is_legado_path(file_path)
     file_path = file_path or self.file
-    return type(file_path) == 'string' and file_path:lower():find('/cache/legado.cache/', 1, true) ~= nil
+    return type(file_path) == 'string' and file_path:lower():find(LEGADO_CACHE_PATH, 1, true) ~= nil
 end
 
 function Document:is_legado_cache_file(file_path)
@@ -90,7 +93,9 @@ function Document:getProps()
             --  for k, v in pairs(book_metadata) do base_props[k] = v end
             base_props["title"] = book_metadata["title"] or base_props.title
             base_props["authors"] = book_metadata["authors"] or base_props.authors
+            base_props["description"] = book_metadata["description"] or base_props.description
             base_props["book_cache_id"] = book_metadata["book_cache_id"]
+            base_props["keywords"] = "legado"
         end
     end
     return base_props
