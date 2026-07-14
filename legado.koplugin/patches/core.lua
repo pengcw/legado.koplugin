@@ -21,12 +21,12 @@ local function get_file_path(file_path, instance)
     return file_path
 end
 
-local function is_legado_path(file_path, instance)
+function M.is_legado_path(file_path, instance)
     local path = get_file_path(file_path, instance)
     return type(path) == 'string' and path:lower():find(LEGADO_CACHE_PATH, 1, true) ~= nil
 end
 
-local function is_legado_browser_book(file_path, instance)
+function M.is_legado_browser_book(file_path, instance)
     local path = get_file_path(file_path, instance)
     return type(path) == "string"
             and path:find(LEGADO_BOOK_DIR, 1, true) ~= nil
@@ -51,7 +51,7 @@ M.readui_runtime = function(parent_ref)
                 local new_pos = scroll_mode and self.current_pos or self.current_page
                 -- local beginning_page = self.ui.document:getNextPage(0)
                 -- old_pos cannot be equal to 1, otherwise it won't work in scroll mode.
-                if diff < 0 and old_pos == new_pos and is_legado_path(nil, self.ui) then
+                if diff < 0 and old_pos == new_pos and M.is_legado_path(nil, self.ui) then
                     self.ui:handleEvent(Event:new("StartOfBook"))
                 end
                 return true
@@ -68,7 +68,7 @@ M.readui_runtime = function(parent_ref)
                 self.onGotoViewRel:raw_method_call(diff)
                 local new_pos = self:getTopPage()
                 -- require("logger").info("ReaderPaging:onGotoViewRel scroll_mode old_pos new_pos diff ",scroll_mode,old_pos,new_pos,diff)
-                if diff < 0 and old_pos == 1 and old_pos == new_pos and is_legado_path(nil, self.ui) then
+                if diff < 0 and old_pos == 1 and old_pos == new_pos and M.is_legado_path(nil, self.ui) then
                     self.ui:handleEvent(Event:new("StartOfBook"))
                 end
                 return true
@@ -80,7 +80,7 @@ M.readui_runtime = function(parent_ref)
             ui.status,  
             "addToMainMenu",  
             function(self, menu_items)  
-                if not is_legado_path(nil, self.ui) then
+                if not M.is_legado_path(nil, self.ui) then
                     self.addToMainMenu:raw_method_call(menu_items)
                 end
             end  
@@ -91,7 +91,7 @@ M.readui_runtime = function(parent_ref)
             ui.toc,  
             "onShowToc",  
             function(self)  
-                if is_legado_path(nil, self.ui) then
+                if M.is_legado_path(nil, self.ui) then
                     self.ui:handleEvent(Event:new("ShowLegadoToc"))
                     return true
                 else
@@ -131,7 +131,7 @@ M.readui_runtime = function(parent_ref)
             ui.bookinfo,  
             "addToMainMenu",  
             function(self, menu_items)  
-                if not is_legado_path(nil, self.ui) then  
+                if not M.is_legado_path(nil, self.ui) then  
                     self.addToMainMenu:raw_method_call(menu_items)
                 end  
             end  
@@ -158,7 +158,7 @@ M.install = function(parent_ref)
             FileManager,  
             "showOpenWithDialog",  
             function(self, file)  
-                if file and is_legado_browser_book(file) then  
+                if file and M.is_legado_browser_book(file) then  
                     self:handleEvent(Event:new("ShowLegadoLibraryView"))  
                 else  
                     self.showOpenWithDialog:raw_call(self, file)
@@ -170,31 +170,31 @@ M.install = function(parent_ref)
             FileManager,  
             "showFiles",  
             function(self, path, focused_file, selected_files)  
-                if is_legado_path(path) then  
+                if M.is_legado_path(path) then  
                     local home_dir = G_reader_settings:readSetting("home_dir") or  
                                         require("apps/filemanager/filemanagerutil").getDefaultDir()  
                     if home_dir then  
                         local legado_homedir = home_dir .. LEGADO_BOOK_DIR  
-                        if util.fileExists(legado_homedir) then  
+                        if util.directoryExists(legado_homedir) then  
                             path = legado_homedir  
                         else  
                             path = home_dir  
                         end  
                     end  
-                end  
+                end
                 self.showFiles:raw_method_call(path, focused_file, selected_files)  
             end  
         ))
     end
 
-    -- fix simpleui.koplugin
+    -- fix bookself.koplugin
     if ReaderUI._legado_wrapped == nil then
         ReaderUI._legado_wrapped = true
         table.insert(M._wrappers, util.wrapMethod(  
             ReaderUI,  
             "showReader",  
-            function(self, file, provider, seamless, is_provider_forced, after_open_callback)  
-                if file and is_legado_browser_book(file) then
+            function(self, file, provider, seamless, is_provider_forced, after_open_callback) 
+                if file and M.is_legado_browser_book(file) then
                     if parent_ref.openFile then parent_ref:openFile(file) end
                 else
                     self.showReader:raw_method_call(file, provider, seamless, is_provider_forced, after_open_callback)
@@ -210,7 +210,7 @@ M.install = function(parent_ref)
             ReadHistory,  
             "addItem",  
             function(self, file, ts, no_flush)
-                if is_legado_path(file) or is_legado_browser_book(file) then
+                if M.is_legado_path(file) or M.is_legado_browser_book(file) then
                     return
                 end
                 return self.addItem:raw_method_call(file, ts, no_flush)
@@ -233,7 +233,7 @@ M.install = function(parent_ref)
             filemanagerutil,
             "genBookCoverButton",
             function(file, book_props, caller_callback, button_disabled)
-                if file and is_legado_browser_book(file) then
+                if file and M.is_legado_browser_book(file) then
                     return {
                         text = "legado 选项",
                         enabled = true,

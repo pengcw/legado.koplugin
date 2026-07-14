@@ -534,13 +534,30 @@ function LibraryView:loadAndRenderChapter(chapter)
     end
 end
 
-function LibraryView:ReaderUIEventCallback(chapter_direction)
+function LibraryView:ReaderUIEventCallback(chapter_direction, ui)
     if not H.is_str(chapter_direction) then
         logger.err("ReaderUIEventCallback: chapter_direction parameter is invalid")
         return
     end
 
+    local fullpath = ui and ui.document and ui.document.file
     local chapter = self:readingChapter()
+    
+    if not (H.is_tbl(chapter) and chapter.book_cache_id) and fullpath then
+        -- 兼容直接从缓存文件打开
+        local doc_settings = DocSettings:open(fullpath)
+        if doc_settings.data and doc_settings.data.doc_props then
+            local chapters_index = doc_settings.data.doc_props.chapters_index
+            local book_cache_id = doc_settings.data.doc_props.book_cache_id
+            if book_cache_id and H.is_num(chapters_index) then
+                chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
+                if H.is_tbl(chapter) and chapter.book_cache_id then
+                    self:readingChapter(chapter)
+                end
+            end
+        end
+    end
+
     if not (H.is_tbl(chapter) and chapter.book_cache_id) then
         logger.err("ReaderUIEventCallback: current reading chapter is invalid")
         return
@@ -645,21 +662,6 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
     local library_ref = self
     local ext_switch_sync_reading = switch_sync_reading
-
-    local is_legado_path = function(file_path, instance)
-        if instance and instance.document and instance.document.file then
-            file_path = instance.document.file
-        end
-        return type(file_path) == 'string' and file_path:lower():find('/cache/legado.cache/', 1, true) ~= nil
-    end
-    local is_legado_browser_book = function(file_path, instance)
-        if instance and instance.document and instance.document.file then
-            file_path = instance.document.file
-        end
-        return type(file_path) == "string"
-                and file_path:find("/Legado\u{200B}书目/", 1, true) ~= nil
-                and file_path:find("\u{200B}.html", 1, true) ~= nil
-    end
 
     function parent_ref:onShowLegadoLibraryView()
         -- FileManager menu only
@@ -787,7 +789,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             UIManager:broadcastEvent(Event:new("SetupShowReader"))
             ReaderUI:showReader(file, nil, true)
         end
-        if not is_legado_browser_book(file) then
+        if not parent_ref:isBrowserBook(file) then
             open_regular_file(file)
             return
         end
@@ -810,7 +812,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end 
         ]]
         function parent_ref:openBrowserMenu(file)
-            if file and is_legado_browser_book(file) then
+            if file and parent_ref:isBrowserBook(file) then
                 local library_obj = library_ref:getInstance()
                 if FileManager.instance and library_obj then
                     UIManager:nextTick(function()
@@ -824,7 +826,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
     if parent_ref.ui and parent_ref.ui.name == "ReaderUI" then
 
         function parent_ref:initializeFromReaderUI(document, menu_items)
-            if not (document and menu_items and is_legado_path(document.file)) then 
+            if not (document and menu_items and parent_ref:isCachePath(document.file)) then 
                 return 
             end
             local settings = Backend:getSettings()
@@ -927,7 +929,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             if not (doc_settings and doc_settings.data and document) then
                 return
             end
-            if is_legado_path(document.file) then
+            if parent_ref:isCachePath(document.file) then
 
                 local directory, file_name = util.splitFilePathName(document.file)
                 local _, extension = util.splitFileNameSuffix(file_name or "")
@@ -982,7 +984,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
 
                 -- current_page == nil
                 -- self.ui.document:getPageCount() unreliable, sometimes equal to 0
-            elseif is_legado_browser_book(document.file) and doc_settings.data then
+            elseif parent_ref:isBrowserBook(document.file) and doc_settings.data then
                 doc_settings.data.provider = "legado"
             end
         end
@@ -992,10 +994,10 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 return
             end
             local filepath = self.ui.document and self.ui.document.file or self.ui.doc_settings:readSetting("doc_path")
-            if is_legado_path(filepath) then
+            if parent_ref:isCachePath(filepath) then
 
                 local directory, file_name = util.splitFilePathName(filepath)
-                if not is_legado_path(directory) then
+                if not parent_ref:isCachePath(directory) then
                     return
                 end
                 -- logger.dbg("Legado: Saving reader settings...")
@@ -1030,12 +1032,21 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                                     end
                                 end
                         end
+                        
                         if is_updated == true and H.is_func(shared_meta_data.flush) then
                             shared_meta_data:flush()
                         end
+
+                        local doc_props = doc_settings_data.doc_props
+                        if H.is_tbl(doc_props) and not H.is_num(doc_props.chapters_index) then
+                            local reading_chapter = library_obj:readingChapter()
+                            if H.is_tbl(reading_chapter) and reading_chapter.chapters_index then
+                                self.ui.doc_settings.data.doc_props.chapters_index = reading_chapter.chapters_index
+                            end
+                        end
                     end
                 end
-            elseif is_legado_browser_book(nil, self.ui) and self.ui.doc_settings then
+            elseif parent_ref:isBrowserBook(nil, self.ui) and self.ui.doc_settings then
                 self.ui.doc_settings.data.provider = "legado"
             end
         end
@@ -1047,7 +1058,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 return
             end
             local library_obj = library_ref:getInstance()
-            if not is_legado_path(nil, self.ui) then
+            if not parent_ref:isCachePath(nil, self.ui) then
                 if library_obj then library_obj:readerUiVisible(false) end
                 return
             elseif self.ui.link and self.ui.document then
@@ -1120,21 +1131,21 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             self.eventListener = WidgetContainer:new({})
             
             self.eventListener.onCloseWidget = function()
-                if is_legado_path(nil, self.ui) then
+                if parent_ref:isCachePath(nil, self.ui) then
                     local library_obj = library_ref:getInstance()
                     if library_obj then library_obj:readerUiVisible(false) end
                 end
             end
 
             self.eventListener.onStartOfBook = function()
-                if is_legado_path(nil, self.ui) then
+                if parent_ref:isCachePath(nil, self.ui) then
                     local library_obj = library_ref:getInstance()
                     if library_obj then
                         if Backend:enforceRateLimit(library_obj._last_page_turn_time, 80) then return true end
                         library_obj._last_page_turn_time = time.now()
                         UIManager:nextTick(function()
                             local chapter_direction = "prev"
-                            library_obj:ReaderUIEventCallback(chapter_direction)
+                            library_obj:ReaderUIEventCallback(chapter_direction, self.ui)
                         end)
                     else
                         parent_ref:openLibraryView()
@@ -1144,7 +1155,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end
 
             self.eventListener.onCloseDocument = function()
-                if is_legado_path(nil, self.ui) then
+                if parent_ref:isCachePath(nil, self.ui) then
                     local library_obj = library_ref:getInstance()
                     if library_obj then library_obj:readerUiVisible(false) end
                     if not (parent_ref.ui and parent_ref.ui._ref_legado_wrapped) then
@@ -1154,14 +1165,14 @@ function LibraryView:initializeRegisterEvent(parent_ref)
             end
 
             self.eventListener.onEndOfBook = function()
-                if is_legado_path(nil, self.ui) then
+                if parent_ref:isCachePath(nil, self.ui) then
                     local library_obj = library_ref:getInstance()
                     if library_obj then
                         if Backend:enforceRateLimit(library_obj._last_page_turn_time, 80) then return true end
                         library_obj._last_page_turn_time = time.now()
                         UIManager:nextTick(function()
                             local chapter_direction = "next"
-                            library_obj:ReaderUIEventCallback(chapter_direction)
+                            library_obj:ReaderUIEventCallback(chapter_direction, self.ui)
                         end)
                     else
                         UIManager:nextTick(function()
@@ -1177,7 +1188,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         end
 
         function parent_ref:afterReaderReady()
-            if is_legado_path(nil, self.ui)  then
+            if parent_ref:isCachePath(nil, self.ui)  then
                 local library_obj = library_ref:getInstance()
                 if library_obj then
                     local reading_chapter = library_obj:readingChapter()
@@ -1297,14 +1308,14 @@ local function init_book_browser(parent)
 
         local book_cache_id = bookinfo.cache_id
         local book_name = bookinfo.name
-        local book_author = bookinfo.author or "未知作者"
-
-        local book_lnk_name = string.format("%s-%s\u{200B}.html", book_name, book_author)
+        
+        local book_lnk_name = string.format("%s-%s", book_name, bookinfo.author or "未知作者")
         book_lnk_name = H.getSafeFilename(book_lnk_name)
         if not book_lnk_name then
             logger.err("book_browser.wirteLnk: getSafeFilename error")
             return
         end
+        book_lnk_name = string.format("%s\u{200B}.html", book_lnk_name)
         local book_lnk_path = H.joinPath(home_dir, book_lnk_name)
         if book_lnk_path and util.fileExists(book_lnk_path) then
             return book_lnk_path, book_lnk_name
