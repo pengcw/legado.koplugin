@@ -71,7 +71,7 @@ function Legado:onDispatcherRegisterActions()
 end
 
 function Legado:isFileTypeSupported(file)
-    return CreDocument:is_legado_browser_book(file)
+    return self:isBrowserBook(file)
 end
 
 function Legado:registerDocumentRegistryAuxProvider()
@@ -114,4 +114,15 @@ function Legado:openLibraryView()
         Backend:checkOta()
     end)
 end
+
+function Legado:isCachePath(file_path, instance)
+    if not (file_path and instance) then instance = self.ui end
+    return patcher.is_legado_path(file_path, instance)
+end
+
+function Legado:isBrowserBook(file_path, instance)
+    if not (file_path and instance) then instance = self.ui end
+    return patcher.is_legado_browser_book(file_path, instance)
+end
+
 return Legado
