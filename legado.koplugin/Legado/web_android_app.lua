@@ -323,7 +323,7 @@ function M:saveBookProgress(chapter, callback)
           v = timestamp,
       })
   end, callback, {
-      timeouts = {3, 5}
+      timeouts = {5, 8}
   }, 'saveBookProgress')
 end
 

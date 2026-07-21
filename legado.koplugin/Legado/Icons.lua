@@ -6,7 +6,6 @@ return {
     FA_THUMB_TACK = "\u{F08D}",
     FA_QUESTION_CIRCLE = "\u{F059}",
     FA_GLOBE = "\u{F0AC}",
-    FA_DATABASE = "\u{F1C0}",
     FA_REFRESH = "\u{F021}",
     FA_BOOK = "\u{F02D}",
     FA_DOWNLOAD = "\u{F019}",
@@ -22,4 +21,5 @@ return {
     UNICODE_STAR_OUTLINE = "\u{2606}",
     FA_PAINT_BRUSH = "\u{F1FC}",
     FA_PLUS = "\u{F067}",
+    FA_SEARCH = "\u{f002}",
 }
