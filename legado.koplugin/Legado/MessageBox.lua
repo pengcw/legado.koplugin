@@ -221,8 +221,8 @@ function M:notice(message, ...)
 end
 
 function M:askForRestart(msg)
-    self:confirm(msg or "", function()
-        UIManager:restartKOReader()
+    self:confirm(msg or "", function(is_ok)
+        if is_ok then UIManager:restartKOReader() end
     end, {
         ok_text = "重启",
         cancel_text = "稍后"

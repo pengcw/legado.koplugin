@@ -22,7 +22,6 @@ local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
 
 local LibraryView = {
-    disk_available = nil,
     -- record the current reading items
     _selected_book = nil,
     book_toc = nil,
@@ -245,51 +244,20 @@ function LibraryView:openMenu(dimen)
     local unified_align = dimen and "left" or "center"
     local settings = Backend:getSettings()
     local buttons = {{},{{
-        text = Icons.FA_GLOBE .. " WEB地址配置",
+        text = Icons.FA_SEARCH .. " 添加书籍",
+        callback = function()
+            UIManager:close(dialog)
+            self:openSearchBooksDialog()
+        end,
+        align = unified_align,
+    }}, {{
+        text = Icons.FA_GLOBE .. " 切换书架",
         callback = function()
             UIManager:close(dialog)
             require("Legado/WebConfigDialog"):openWebConfigManager(function()
                 self:clearMenuItems()
                 self:onRefreshLibrary()
             end)
-        end,
-        align = unified_align,
-    }}, {{
-        text = string.format("%s 自动上传进度",
-            (settings.sync_reading and Icons.FA_CHECK_SQUARE or Icons.FA_SQUARE_O)),
-        hold_callback = function()
-            UIManager:close(dialog)
-            switch_sync_reading(settings)
-        end,
-        callback = function()
-            MessageBox:info("阅读时，自动上传阅读进度\n <长按切换选项>")
-        end,
-        align = unified_align,
-    }}, {{
-        text = string.format("%s 自动生成快捷方式  ",
-            (settings.disable_browser and Icons.FA_SQUARE_O or Icons.FA_CHECK_SQUARE)),
-        callback = function() MessageBox:info("长按切换选项") end,
-        hold_callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm(string.format(
-                "自动生成快捷方式：%s \r\n \r\n 打开书籍目录时自动在文件浏览器 Home 目录中生成对应书籍快捷方式，支持封面显示, 关闭后可在书架菜单手动生成",
-                (settings.disable_browser and '[关闭]' or '[开启]')), function(result)
-                if result then
-                    local ok_msg = "设置已开启"
-                    if not settings.disable_browser then
-                        ok_msg = "设置已关闭，请手动删除目录"
-                    end
-                    settings.disable_browser = not settings.disable_browser or nil
-                    Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-                        MessageBox:notice(ok_msg)
-                    end, function(err_msg)
-                        MessageBox:error('设置失败:', err_msg)
-                    end)
-                end
-            end, {
-                ok_text = "切换",
-                cancel_text = "取消"
-            })
         end,
         align = unified_align,
     }}, {{
@@ -321,96 +289,6 @@ function LibraryView:openMenu(dimen)
             })
         end,
         align = unified_align,
-    }}, {{
-        text = string.format("%s 下载进程数: %d", Icons.FA_DOWNLOAD, settings.download_threads or 1),
-        callback = function()
-            UIManager:close(dialog)
-            local SpinWidget = require("ui/widget/spinwidget")
-            local thread_spin = SpinWidget:new{
-                value = settings.download_threads or 1,
-                value_min = 1,
-                value_max = 16,
-                value_step = 1,
-                value_hold_step = 2,
-                ok_text = "确定",
-                title_text = "设置下载线程数",
-                info_text = "建议根据网络状况选择 4–8 线程\n（如下载异常，可尝试调为 1）",
-                callback = function(spin)
-                    local threads = spin.value
-                    settings.download_threads = threads
-                    Backend:HandleResponse(Backend:saveSettings(settings), function()
-                        MessageBox:notice(string.format("下载线程数已设置为: %d", threads))
-                    end, function(err_msg)
-                        MessageBox:error('设置失败：', tostring(err_msg))
-                    end)
-                end
-            }
-            UIManager:show(thread_spin)
-        end,
-        align = unified_align,
-    }}, {{
-        text = string.format("%s Clear all caches", Icons.FA_TRASH),
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm(
-                "是否清空本地书架所有已缓存章节与阅读记录？\r\n（刷新会重新下载）",
-                function(result)
-                    if result then
-                        Backend:closeDbManager()
-                        MessageBox:loading("清除中", function()
-                            return Backend:cleanAllBookCaches()
-                        end, function(state, response)
-                            if state == true then
-                                Backend:HandleResponse(response, function(data)
-                                    settings.servers_history = {}
-                                    Backend:saveSettings(settings)
-                                    MessageBox:notice("已清除")
-                                    self:closeMenu()
-                                end, function(err_msg)
-                                    MessageBox:error('操作失败：', tostring(err_msg))
-                                end)
-                            end
-                        end)
-                    end
-                end, {
-                    ok_text = "清空",
-                    cancel_text = "取消"
-                })
-        end,
-        align = unified_align,
-    }}, {{
-        text = Icons.FA_QUESTION_CIRCLE .. ' ' .. "关于/更新",
-        callback = function()
-            UIManager:close(dialog)
-            local about_txt = [[
--- 清风不识字，何故乱翻书 --
-
-简介：
-一个在 KOReader 中阅读 Legado 书库的插件，适配阅读 3.0，支持手机 APP、reader3、轻阅读后端。初衷是 Kindle 的浏览器体验不佳，目的是部分替代受限设备的浏览器，实现流畅的网文阅读，提升老设备体验。
-
-操作：
-列表支持下拉或 Home 键刷新，右键列表菜单 / Menu 键左上角菜单，阅读界面下拉菜单有返回选项，书架和目录可绑定手势使用。
-
-章节页面图标说明:
-%1 可下载  %2 已阅读  %3 书签
-
-帮助改进：
-请到 Github：pengcw/legado.koplugin 反馈 issues
-
-版本: ver_%4]]
-            local legado_update = require("Legado.Update")
-            local curren_version = legado_update:getCurrentPluginVersion() or ""
-            about_txt = T(about_txt, Icons.FA_DOWNLOAD, Icons.FA_CHECK_CIRCLE, Icons.FA_THUMB_TACK, curren_version)
-            MessageBox:custom({
-                text = about_txt,
-                alignment = "left"
-            })
-
-            UIManager:nextTick(function()
-                Backend:checkOta(true)
-            end)
-        end,
-        align = unified_align,
     }}}
 
     if not Device:isTouchDevice() then
@@ -424,26 +302,15 @@ function LibraryView:openMenu(dimen)
         }})
     end
 
-    if not self.disk_available then
-        local cache_dir = H.getTempDirectory()
-        local disk_use = util.diskUsage(cache_dir)
-        if disk_use and disk_use.available then
-            self.disk_available = disk_use.available / 1073741824
-        end
-    end
-
     dialog = require("ui/widget/buttondialog"):new{
-        title = string.format(Icons.FA_DATABASE .. " Free: %.1fG", self.disk_available or -1),
+        title = "设置",
         title_align = unified_align,
-        title_face = Font:getFace("x_smalltfont"),
-        info_face = Font:getFace("tfont"),
         buttons = buttons,
         shrink_unneeded_width = dimen and true,
         anchor = dimen and function()
             return dimen
         end or nil,
     }
-
     UIManager:show(dialog)
 end
 
@@ -802,6 +669,147 @@ function LibraryView:initializeRegisterEvent(parent_ref)
         return true
     end
 
+    function parent_ref:genMainMenuItems(ui)
+        return {
+            text = "Legado",
+            sorting_hint = "search",
+            help_text = "连接 Legado 书库",
+            sub_item_table = {
+                {
+                    text = "书架",
+                    callback = function()
+                        self:openLibraryView()
+                    end,
+                }, {
+                    text = "设置",
+                    sub_item_table = {
+                        {
+                            text = "WEB 地址配置",
+                            callback = function()
+                                require("Legado/WebConfigDialog"):openWebConfigManager()
+                            end,
+                        }, {
+                            text = "自动上传进度",
+                            checked_func = function()
+                                return Backend:getSettings().sync_reading == true
+                            end,
+                            callback = function()
+                                local settings = Backend:getSettings()
+                                local ok_msg = settings.sync_reading and "关闭" or "开启"
+                                settings.sync_reading = not settings.sync_reading or nil
+                                Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                    MessageBox:info("自动上传进度已" .. ok_msg)
+                                end, function(err_msg)
+                                    MessageBox:error("设置失败:", err_msg)
+                                end)
+                            end,
+                        }, {
+                            text = "自动生成快捷方式",
+                            checked_func = function()
+                                return Backend:getSettings().disable_browser ~= true
+                            end,
+                            callback = function()
+                                local settings = Backend:getSettings()
+                                local ok_msg = settings.disable_browser and "设置已开启" or "设置已关闭，请手动删除目录"
+                                settings.disable_browser = not settings.disable_browser or nil
+                                Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                    MessageBox:notice(ok_msg)
+                                end, function(err_msg)
+                                    MessageBox:error("设置失败:", err_msg)
+                                end)
+                            end,
+                        }, {
+                            text_func = function()
+                                return string.format("下载进程数: %d", Backend:getSettings().download_threads or 1)
+                            end,
+                            callback = function()
+                                local settings = Backend:getSettings()
+                                local thread_spin = require("ui/widget/spinwidget"):new{
+                                    value = settings.download_threads or 1,
+                                    value_min = 1,
+                                    value_max = 16,
+                                    value_step = 1,
+                                    value_hold_step = 2,
+                                    ok_text = "确定",
+                                    title_text = "设置下载线程数",
+                                    info_text = "建议根据网络状况选择 4–8 线程\n（如下载异常，可尝试调为 1）",
+                                    callback = function(spin)
+                                        settings.download_threads = spin.value
+                                        Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                            MessageBox:notice(string.format("下载线程数已设置为: %d", spin.value))
+                                        end, function(err_msg)
+                                            MessageBox:error("设置失败：", tostring(err_msg))
+                                        end)
+                                    end,
+                                }
+                                UIManager:show(thread_spin)
+                            end,
+                        }, {
+                            text = "清空所有缓存",
+                            keep_menu_open = true,
+                            callback = function()
+                                MessageBox:confirm(
+                                    "是否清空本地书架所有已缓存章节与阅读记录？\n（刷新会重新下载）",
+                                    function(result)
+                                        if result then
+                                            Backend:closeDbManager()
+                                            MessageBox:loading("清除中", function()
+                                                return Backend:cleanAllBookCaches()
+                                            end, function(state, response)
+                                                if state == true then
+                                                    Backend:HandleResponse(response, function()
+                                                        local s = Backend:getSettings()
+                                                        s.servers_history = {}
+                                                        Backend:saveSettings(s)
+                                                        MessageBox:notice("已清除")
+                                                    end, function(err_msg)
+                                                        MessageBox:error("操作失败：", tostring(err_msg))
+                                                    end)
+                                                end
+                                            end)
+                                        end
+                                    end, { ok_text = "清空", cancel_text = "取消" })
+                            end,
+                        }, {
+                            text = "检查更新",
+                            keep_menu_open = true,
+                            callback = function()
+                                UIManager:nextTick(function()
+                                    Backend:checkOta(true)
+                                end)
+                            end
+                        },
+                    },
+                }, {
+                    text = "关于",
+                    keep_menu_open = true,
+                    callback = function()
+                        local legado_update = require("Legado.Update")
+                        local curren_version = legado_update:getCurrentVersion() or ""
+                        local about_txt = [[
+-- 清风不识字，何故乱翻书 --
+
+简介：
+一个在 KOReader 中阅读 Legado 书库的插件，适配阅读 3.0，支持手机 APP、reader3、轻阅读后端。初衷是 Kindle 的浏览器体验不佳，目的是部分替代受限设备的浏览器，实现流畅的网文阅读，提升老设备体验。
+
+操作：
+列表支持下拉或 Home 键刷新，右键列表菜单 / Menu 键左上角菜单，阅读界面下拉菜单有返回选项，书架和目录可绑定手势使用。
+
+章节页面图标说明:
+%1 可下载  %2 已阅读  %3 书签
+
+帮助改进：
+请到 Github：pengcw/legado.koplugin 反馈 issues
+
+版本: ver_%4]]
+                        about_txt = T(about_txt, Icons.FA_DOWNLOAD, Icons.FA_CHECK_CIRCLE, Icons.FA_THUMB_TACK, curren_version)
+                        MessageBox:custom({ text = about_txt, alignment = "left" })
+                    end,
+                },
+            },
+        }
+    end
+
     if not (parent_ref.ui and parent_ref.ui.document) then
         --[[
         function parent_ref:onPathChanged()
@@ -873,7 +881,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 }, {
                     text = "自动上传阅读进度",
                     keep_menu_open = true,
-                    hold_keep_menu_open = true,
+                    -- hold_keep_menu_open = true,
                     help_text = "阅读时，自动上传阅读进度",
                     checked_func = function() return settings.sync_reading == true end,
                     hold_callback = function() ext_switch_sync_reading(settings) end,
@@ -1062,7 +1070,7 @@ function LibraryView:initializeRegisterEvent(parent_ref)
                 if library_obj then library_obj:readerUiVisible(false) end
                 return
             elseif self.ui.link and self.ui.document then
-                require("patches.core").readui_runtime(self.ui)
+                require("Leaado.patches").readui_runtime(self.ui)
                 if Backend:enforceRateLimit(library_obj._last_reader_ready_time, 80) then return end
                 library_obj._last_reader_ready_time = time.now()
                 if library_obj then library_obj:readerUiVisible(true) end
@@ -1427,9 +1435,9 @@ local function init_book_menu(parent)
         width = Device.screen:getWidth(),
         height = Device.screen:getHeight(),
         close_callback = function() Backend:closeDbManager() end,
-        show_search_item = nil,
         refresh_menu_key = nil,
         parent_ref = parent,
+        show_cover = true,
     }
 
     if Device:hasKeys() then
@@ -1538,7 +1546,6 @@ local function init_book_menu(parent)
                 if state == true then
                     Backend:HandleResponse(response, function(data)
                         MessageBox:notice('同步成功')
-                        self.show_search_item = true
                         self:refreshItems()
                         self.parent_ref._ui_refresh_time = time.now()
                     end, function(err_msg)
@@ -1628,26 +1635,15 @@ local function init_book_menu(parent)
 
     function book_menu:generateItemTableFromMangas(books)
         local item_table = {}
-        if self.show_search_item == true then
-            item_table[1] = {
-                text = string.format('%s Search...', Icons.FA_MAGNIFYING_GLASS),
-                mandatory = "[Go]"
-            }
-            self.show_search_item = nil
-        end
-
         for _, bookinfo in ipairs(books) do
-
-            local show_book_title = ("%s (%s)[%s]"):format(bookinfo.name or "未命名书籍",
+            local show_book_title = ("\u{FFF1}\u{FFF2}%s\u{FFF3} (%s)[%s]"):format(bookinfo.name or "未命名书籍",
                 bookinfo.author or "未知作者", bookinfo.originName)
-
             table.insert(item_table, {
                 cache_id = bookinfo.cache_id,
                 text = show_book_title,
                 mandatory = Icons.FA_ELLIPSIS_VERTICAL
             })
         end
-
         return item_table
     end
 
