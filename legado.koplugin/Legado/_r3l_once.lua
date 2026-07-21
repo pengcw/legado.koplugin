@@ -91,5 +91,12 @@ return function()
             util.removeFile(file)
         end
     end
+    local plugin_dir = H.getPluginDirectory()
+    local old_patches_dir = H.joinPath(plugin_dir, 'patches')
+    if util.directoryExists(old_patches_dir) then
+        local ffiUtil = require("ffi/util")
+        ffiUtil.purgeDir(old_patches_dir)
+        util.removePath(old_patches_dir)
+    end
     return true
 end

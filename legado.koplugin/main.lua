@@ -9,7 +9,7 @@ local _ = require("gettext")
 local H = require("Legado/Helper")
 local Backend = require("Legado/Backend")
 local LibraryView = require("Legado/LibraryView")
-local patcher = require("patches.core")
+local patcher = require("Legado.patches")
 local DocumentRegistry = require("document/documentregistry")
 local CreDocument = require("Legado/Document")
 
@@ -93,16 +93,16 @@ function Legado:addToMainMenu(menu_items)
             is_low_version = (ko_version and ko_version < 202411000000)
             H.set_cache("is_low_version", is_low_version)
         end
-        menu_items.Legado_main = {
-            text_func = function()
-                return is_low_version and "Legado 书目(低版环境)" or "Legado 书目"
-            end,
+        local main_menu = {
+            text = "Legado 书目(Koreader 版本低，建议升级)",
             sorting_hint = "search",
-            help_text = "连接 Legado 书库" .. (is_low_version and "，Koreader 版本低，建议升级" or ""),
-            callback = function()
-                self:openLibraryView()
-            end
+            help_txt = "本插件仅支持 2024.11 以上",
+            callback = function() end,
         }
+        if not is_low_version and self.genMainMenuItems then
+            main_menu = self:genMainMenuItems(self.ui)
+        end
+        menu_items.Legado_main = main_menu
     elseif self.ui.document.file and self.ui.name == "ReaderUI" and self.initializeFromReaderUI then
         self:initializeFromReaderUI(self.ui.document, menu_items)
     end

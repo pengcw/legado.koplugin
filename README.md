@@ -181,19 +181,20 @@
 </details>
 </details>
 
-## 项目依赖与致谢
-
-本插件基于以下优秀开源项目构建：
-
-#### UI界面
-- 界面组件修改自 [Rakuyomi项目](https://github.com/hanatsumi/rakuyomi)
-- 核心框架依赖 [KOReader](https://github.com/koreader/koreader)
-
-#### 数据服务
-- 兼容 [开源阅读app](https://github.com/gedoor/legado) 接口
-- 支持 [reader-server](https://github.com/hectorqin/reader) 服务端
-- 适配 [轻阅读](https://github.com/autobcb/read) 后端
+### 相关项目
 ---
+
+- [KOReader](https://github.com/koreader/koreader)
+- [~~开源阅读app~~](https://github.com/gedoor/legado)
+- [~~reader-server~~](https://github.com/hectorqin/reader)
+- [轻阅读](https://github.com/autobcb/read)
+- [reader-rust](https://github.com/givenge/reader-rust)
+- [reader-next](https://github.com/Maple0517/reader-next)
+- [阅读 MD3](https://github.com/HapeLee/legado-with-MD3)
+- [阅读 Sigma](https://github.com/Luoyacheng/legado-E)
+- [阅读 Archive](https://github.com/Rimchars/legado)
+- [阅读 R](https://github.com/refgd/legado)
+- [更多...](https://legado.vossc.com/index.php)
 
 ### 开源声明
 > 本插件不提供内容，如有侵权请联系删除
