@@ -605,7 +605,7 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
 
             -- 检查是否启用了多线程
             local settings = Backend:getSettings()
-            local current_threads = tonumber(settings.download_threads) or 1
+            local current_threads = tonumber(settings.download_threads) or 2
             local has_multithread = current_threads > 1 and not self.temp_disable_multithread
 
             local other_buttons_list = {{

@@ -1418,7 +1418,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     end
 
     local settings = self:getSettings()
-    local max_threads = tonumber(settings.download_threads) or 1
+    local max_threads = tonumber(settings.download_threads) or 2
     max_threads = math.max(1, math.min(16, max_threads))
     if temp_disable_multithread then 
         max_threads = 1 
@@ -2002,7 +2002,7 @@ function M:after_reader_chapter_show(chapter)
         if chapter.isRead ~= true then
             local complete_count = self:getcompleteReadAheadChapters(chapter)
             if complete_count < 40 then
-                local preDownloadNum = 3
+                local preDownloadNum = settings.preload_chapters or 3
                 if chapter.cacheExt and chapter.cacheExt == 'cbz' then
                     preDownloadNum = 1
                 end
@@ -2350,6 +2350,42 @@ function M:launchProcess(job, callback, timeout)
 
         poll()
     end)
+end
+
+function M:backupDbWithPreCheck()
+    local temp_dir = H.getTempDirectory()
+    local last_backup_db = H.joinPath(temp_dir, "bookinfo.db.bak")
+    local bookinfo_db_path = H.joinPath(temp_dir, "bookinfo.db")
+
+    if not util.fileExists(bookinfo_db_path) then
+        logger.warn("legado plugin: source database file does not exist - " .. bookinfo_db_path)
+        return false
+    end
+
+    local setting_data = self:getSettings()
+    local last_backup_time = setting_data.last_backup_time or 0
+    local has_backup = util.fileExists(last_backup_db)
+    local needs_backup = not has_backup or (os.time() - last_backup_time > 86400)
+
+    if not needs_backup then
+        return true
+    end
+
+    local status, err = pcall(function()
+        self:getBookShelfCache()
+    end)
+    if not status then
+        logger.err("legado plugin: database pre-check failed - " .. tostring(err))
+        return false
+    end
+
+    if has_backup then
+        util.removeFile(last_backup_db)
+    end
+    H.copyFileFromTo(bookinfo_db_path, last_backup_db)
+    logger.info("legado plugin: backup successful")
+    setting_data.last_backup_time = os.time()
+    self:saveSettings(setting_data)
 end
 
 function M:enforceRateLimit(last_time, limit_ms)

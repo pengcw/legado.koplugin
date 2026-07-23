@@ -4,21 +4,9 @@ local Device = require("device")
 local ffiUtil = require("ffi/util")
 local DataStorage = require("datastorage")
 local logger = require("logger")
+local PlgState = require("Legado/PlgState")
 
 local M = {}
-local _global_cache = {}
-
-function M.get_cache(key)
-    return _global_cache[key]
-end
-
-function M.set_cache(key, value)
-    _global_cache[key] = value
-end
-
-function M.has_cache(key)
-    return _global_cache[key] ~= nil
-end
 
 M.require = function(path)
      if type(path) ~= "string" or path == "" then
@@ -300,7 +288,7 @@ M.checkAndCreateFolder = function(d_path)
 end
 
 M.getUserSettingsPath = function()
-    return M.joinPath(DataStorage:getSettingsDir(), M.get_cache("plg:name") .. '.lua')
+    return M.joinPath(DataStorage:getSettingsDir(), PlgState.plg_name .. '.lua')
 end
 M.getUserPatchesDirectory = function()
     local patches_dir = M.joinPath(DataStorage:getDataDir(), 'patches')
@@ -310,13 +298,13 @@ M.getKoreaderDirectory = function()
     return DataStorage:getDataDir()
 end
 M.getTempDirectory = function()
-    local plg_cache_dir = M.get_cache("plg:name") .. '.cache'
+    local plg_cache_dir = PlgState.plg_name .. '.cache'
     local plg_cache_path = M.joinPath(DataStorage:getDataDir(), 'cache/' .. plg_cache_dir)
     return M.checkAndCreateFolder(plg_cache_path)
 end
 M.getPluginDirectory = function()
-    local plg_path_alt = table.concat({DataStorage:getDataDir(), "/plugins/", M.get_cache("plg:name"), '.koplugin'})
-    return M.get_cache("plg:path") or plg_path_alt
+    local plg_path_alt = table.concat({DataStorage:getDataDir(), "/plugins/", PlgState.plg_name, '.koplugin'})
+    return PlgState.plg_path or plg_path_alt
 end
 M.getBookCachePath = function(book_cache_id)
     assert(type(book_cache_id) == "string", "Error: The variable is not a string.")

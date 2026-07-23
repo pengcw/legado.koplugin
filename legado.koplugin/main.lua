@@ -9,9 +9,11 @@ local _ = require("gettext")
 local H = require("Legado/Helper")
 local Backend = require("Legado/Backend")
 local LibraryView = require("Legado/LibraryView")
-local patcher = require("Legado.patches")
+local Patcher = require("Legado.patches")
 local DocumentRegistry = require("document/documentregistry")
 local CreDocument = require("Legado/Document")
+local EventHandlers = require("Legado.EventHandlers")
+local PlgState = require("Legado/PlgState")
 
 local Legado = WidgetContainer:extend({
     name = "开源阅读插件",
@@ -20,19 +22,19 @@ local Legado = WidgetContainer:extend({
 
 function Legado:init()
     -- on open FileManager or ReaderUI
-    if not H.has_cache("plg:name") then
-        H.set_cache("plg:name", "legado")
+    if not PlgState.plg_name then
+        PlgState.plg_name = "legado"
         if self.path then
             -- fix Android path
             local path = self.path:gsub("/+", "/")
-            H.set_cache("plg:path", path)
+            PlgState.plg_path = path
         end
     end
     if not Backend.settings_data then
         Backend:initialize()
     end
     if self.ui then
-        LibraryView:initializeRegisterEvent(self)
+        EventHandlers:register(self)
         if self.ui.menu then
             self.ui.menu:registerToMainMenu(self)
         end
@@ -40,7 +42,7 @@ function Legado:init()
     self:registerDocumentRegistryAuxProvider()
     self:onDispatcherRegisterActions()
     CreDocument:register(DocumentRegistry)
-    patcher.install(self)
+    Patcher.install(self)
 end
 
 function Legado:onDispatcherRegisterActions()
@@ -87,11 +89,11 @@ end
 function Legado:addToMainMenu(menu_items)
     if not (self.ui and menu_items) then return end
     if not self.ui.document then -- FileManager menu only
-        local is_low_version = H.get_cache("is_low_version")
+        local is_low_version = PlgState.is_low_version
         if is_low_version == nil then
             local ko_version = require("version"):getNormalizedCurrentVersion()
             is_low_version = (ko_version and ko_version < 202411000000)
-            H.set_cache("is_low_version", is_low_version)
+            PlgState.is_low_version = is_low_version
         end
         local main_menu = {
             text = "Legado 书目(Koreader 版本低，建议升级)",
@@ -117,12 +119,12 @@ end
 
 function Legado:isCachePath(file_path, instance)
     if not (file_path and instance) then instance = self.ui end
-    return patcher.is_legado_path(file_path, instance)
+    return Patcher.is_legado_path(file_path, instance)
 end
 
 function Legado:isBrowserBook(file_path, instance)
     if not (file_path and instance) then instance = self.ui end
-    return patcher.is_legado_browser_book(file_path, instance)
+    return Patcher.is_legado_browser_book(file_path, instance)
 end
 
 return Legado
