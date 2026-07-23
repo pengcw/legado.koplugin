@@ -443,7 +443,7 @@ function ChapterListing:openMenu()
         end,
         align = "left",
     }}, {{
-        text = Icons.FA_DOWNLOAD .. " 缓存管理",
+        text = Icons.FA_DOWNLOAD .. " 章节缓存",
         callback = function()
             UIManager:close(dialog)
             MessageBox:confirm(
