@@ -50,9 +50,9 @@ end
 
 function Document:get_book_metadata_from_lnk(fullpath)
      if not H.is_str(fullpath) then return nil, nil end
-     local ok, lnk_config = pcall(Backend.getLuaConfig, Backend, fullpath)
-     if ok and H.is_tbl(lnk_config) and lnk_config.readSetting then
-        return lnk_config:readSetting("book_cache_id"), lnk_config
+     local ok, lnk_conf = pcall(Backend.getLuaConfig, Backend, fullpath)
+     if ok and H.is_tbl(lnk_conf) and lnk_conf.readSetting then
+        return lnk_conf:readSetting("book_cache_id"), lnk_conf
      end
     local doc_settings = DocSettings:open(fullpath)
     if doc_settings then
@@ -80,11 +80,11 @@ function Document:getProps()
     end
 
     if self._is_browser_book then
-        local book_cache_id, lnk_config = self:get_book_metadata_from_lnk(self.file)
-        if H.is_tbl(lnk_config) and H.is_tbl(lnk_config.data) then
+        local book_cache_id, lnk_conf = self:get_book_metadata_from_lnk(self.file)
+        if H.is_tbl(lnk_conf) and H.is_tbl(lnk_conf.data) then
             -- title authors description book_cache_id
             -- series series_index language keywords identifiers
-            for k, v in pairs(lnk_config.data) do base_props[k] = v end
+            for k, v in pairs(lnk_conf.data) do base_props[k] = v end
             base_props["keywords"] = "legado"
         end
     elseif self._is_cache_book then

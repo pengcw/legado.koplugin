@@ -13,6 +13,7 @@ local Icons = require("Legado/Icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
+local PlgState = require("Legado/PlgState")
 
 local M = {
     results = {},
@@ -259,7 +260,7 @@ function M:searchBookDialog(onReturnCallback, def_input)
 
     self:init()
 
-    local last_search_input = H.get_cache("last_search_input")
+    local last_search_input = PlgState.last_search_input
     if last_search_input and not def_input then
         def_input = last_search_input
     end
@@ -289,7 +290,7 @@ function M:searchBookDialog(onReturnCallback, def_input)
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
-                    H.set_cache("last_search_input", inputText)
+                    PlgState.last_search_input = inputText
                     self:handleSingleSourceSearch(inputText)
                 end
             }, {
@@ -303,7 +304,7 @@ function M:searchBookDialog(onReturnCallback, def_input)
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
-                    H.set_cache("last_search_input", inputText)
+                    PlgState.last_search_input = inputText
                     self:handleMultiSourceSearch(inputText)
                 end
             }, {
