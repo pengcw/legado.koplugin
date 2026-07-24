@@ -55,19 +55,19 @@ function Legado:onDispatcherRegisterActions()
     Dispatcher:registerAction("return_legado_chapterlisting", {
         category = "none",
         event = "ShowLegadoToc",
-        title = _("返回 Legado 目录"),
+        title = _("Legado：返回目录"),
         reader = true,
     })
     Dispatcher:registerAction("show_legado_search", {
         category = "none",
         event = "ShowLegadoSearch",
-        title = _("以书籍信息搜索 Legado 书源"),
+        title = _("Legado：以书籍信息搜索"),
         reader = true,
     })
     Dispatcher:registerAction("refresh_legado_chapter", {
         category = "none",
         event = "RefreshLegadoChapter",
-        title = _("强制刷新 Legado 章节"),
+        title = _("Legado：强制刷新章节"),
         reader = true,
     })
 end
@@ -113,6 +113,7 @@ end
 function Legado:openLibraryView()
     self.library_view = LibraryView:fetchAndShow()
     UIManager:nextTick(function()
+        Backend:backupDbWithPreCheck()
         Backend:checkOta()
     end)
 end
