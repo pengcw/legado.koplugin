@@ -10,6 +10,7 @@ local util = require("util")
 local time = require("ui/time")
 
 local UIManager = require("ui/uimanager")
+local TaskQueue = require("Legado.async")
 local H = require("Legado/Helper")
 
 -- 太旧版本缺少这个函数
@@ -219,7 +220,6 @@ function M:initialize()
         logger.err("run_once_task loading loading failed:", err_msg)
     end
 
-    self.task_pid_file = H.getTempDirectory() .. '/task.pid.lua'
     self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
 
     if H.is_tbl(self.settings_data) and not (H.is_tbl(self.settings_data.data) and 
@@ -1389,22 +1389,25 @@ function M:getChapterImgList(chapter)
     end)
 end
 
-local TaskCore = require("Legado.async")
 function M:preLoadingChapters(chapters, download_chapter_count, result_progress_callback, temp_disable_multithread)
-    if not H.is_func(result_progress_callback)  then result_progress_callback = function() end end
+    local has_result_progress_callback = H.is_func(result_progress_callback)
     
     local return_error_handle = function(error_msg)
         error_msg = error_msg or "未知错误"
         logger.dbg("Legado.preLoadingChapters - ", error_msg)
-        result_progress_callback(false, error_msg)
+        if has_result_progress_callback then result_progress_callback(false, error_msg) end
         return false, error_msg
     end
 
     if not H.is_tbl(chapters) then return return_error_handle('Incorrect call parameters') end
+    pcall(function() self.dbManager:cleanTimeoutTaskPids() end)
 
+    local is_read_ahead = true
     local chapter_down_tasks = {}
     if H.is_tbl(chapters[1]) and chapters[1].chapters_index ~= nil and chapters[1].book_cache_id ~= nil then
         chapter_down_tasks = chapters
+        -- mark false when input is a list (e.g., 1000 chapters)
+        is_read_ahead = false
     else
         local down_count = tonumber(download_chapter_count)
         down_count = (down_count and down_count > 1) and down_count or 1
@@ -1413,7 +1416,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
 
     if not H.is_tbl(chapter_down_tasks) or #chapter_down_tasks < 1 then
         logger.dbg("Legado.preLoadingChapters - All chapters already cached")
-        result_progress_callback(true, "所有章节已缓存")
+        if has_result_progress_callback then result_progress_callback(true, "所有章节已缓存") end
         return true, "所有章节已缓存"
     end
 
@@ -1425,100 +1428,129 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
         logger.info("Multi-threading temporarily disabled for this session")
     end
 
-
     local book_cache_id = chapter_down_tasks[1].book_cache_id
     local is_comic = self:isBookTypeComic(book_cache_id)
     local chapter_timeout = is_comic and 120 or 20
 
-    
-    local task_pid_info = self:getLuaConfig(self.task_pid_file)
-    local write_to_pid_file = function(chapter_info)
-        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
-        local task_chapters = task_pid_info:readSetting("chapters") or {}
-        task_chapters[task_id] = {
-            chapters_index = chapter_info.chapters_index,
-            book_cache_id = chapter_info.book_cache_id,
-            stime = os.time(),
-        }
-        task_pid_info:saveSetting("chapters", task_chapters):flush()
-    end
-
-    local remove_from_pid_file = function(chapter_info)
-        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
-        local task_chapters = task_pid_info:readSetting("chapters") or {}
-        task_chapters[task_id] = nil
-        
-        local current_time = os.time()
-        for t_id, task_data in pairs(task_chapters) do
-            if task_data.stime and current_time - task_data.stime > 7200 then
-                task_chapters[t_id] = nil
-            end
-        end
-
-        if next(task_chapters) == nil then
-             pcall(function()
-                task_pid_info:purge()
-                if util.fileExists(self.task_pid_file) then util.removeFile(self.task_pid_file) end
-            end)
-        else
-            task_pid_info:saveSetting("chapters", task_chapters):flush()
-        end
-    end
-
-    for _, dlChapter in ipairs(chapter_down_tasks) do
-        if self:getBackgroundTaskInfo(dlChapter) ~= false then
-            return return_error_handle("error: task is already running")
-        end
-    end
-
     logger.dbg("Legado.preLoadingChapters - START with", max_threads, "threads, type:", is_comic and "comic" or "text", "timeout:", chapter_timeout .. "s")
 
-    local channel_name = "Preload_" .. tostring(book_cache_id)
-    local ch = TaskCore:createChannel(channel_name, max_threads)
-
-    ch:executeBatch({
-        items = chapter_down_tasks,
-        task_func = function(chapter_info)
-            return self:_pDownloadChapter(chapter_info)
-        end,
-        timeout = chapter_timeout,
-        aggregate = false,
-        on_start = function(idx, dlChapter, retry)
-            dlChapter.is_pre_loading = true
-            write_to_pid_file(dlChapter)
-            logger.dbg('TaskCore running: chapter_title:', dlChapter.title or nil, 'idx:', idx)
-        end,
-        on_item_end = function(idx, dlChapter, success, downloaded_chapter, retries_used)
-            remove_from_pid_file(dlChapter)
-            if not (success and H.is_tbl(downloaded_chapter) and downloaded_chapter.cacheFilePath) then
-                logger.err("Failed to download chapter or job execution error: ", downloaded_chapter)
-                return true 
+    local channel_prefix = is_read_ahead and "Preload_" or "PreloadBulk_"
+    local channel_name = channel_prefix .. tostring(book_cache_id)
+    local ch = TaskQueue:createChannel(channel_name, max_threads, nil, true)
+    local completed_count = 0
+    local has_error = false
+    
+    local is_finalizing = false
+    local check_completion = function(progress, err_msg)
+        if progress == false then
+            if not is_read_ahead and not has_error then
+                has_error = true
+                if ch then
+                    local tasks_to_remove = {}
+                    for _, task in ipairs(ch.queue) do
+                        if task.args and task.args[1] then
+                            table.insert(tasks_to_remove, task.args[1])
+                        end
+                    end
+                    pcall(function() self.dbManager:setTaskPids(tasks_to_remove, false) end)
+                    ch:clearTasks()
+                end
+                if has_result_progress_callback then
+                    result_progress_callback(false, err_msg)
+                end
+            elseif is_read_ahead and has_result_progress_callback then
+                result_progress_callback(false, err_msg)
             end
-            local cache_file_path = downloaded_chapter.cacheFilePath
-            logger.dbg('Download chapter successfully:', dlChapter.book_cache_id, dlChapter.chapters_index, cache_file_path)
-
-            local ok, err = pcall(function()
-                return self.dbManager:updateCacheFilePath(dlChapter, cache_file_path)
-            end)
-            if not ok then logger.err('Error saving download to database:', tostring(err)) end
-            return false 
-        end,
-        on_progress = function(completed_count, total_count, idx, dlChapter, success)
-            if success then result_progress_callback(completed_count) end
-        end,
-        on_batch_end = function(is_aborted, results_map)
-            local _channel_name = channel_name
-            if is_aborted then
-                logger.dbg("Legado.preLoadingChapters - Error occurred, stopping")
-                result_progress_callback(false, "部分章节下载失败或被熔断")
-            else
-                logger.dbg("Legado.preLoadingChapters - All tasks completed")
-                result_progress_callback(true, "任务结束")
-            end
-            TaskCore:destroyChannel(_channel_name)
+        elseif not has_error and has_result_progress_callback and type(progress) == "number" then
+            result_progress_callback(progress, err_msg)
         end
-    })
 
+        if is_finalizing then return end
+        UIManager:nextTick(function()
+            if ch and not ch:hasTasks() then
+                -- 并发锁
+                if is_finalizing then return end
+                is_finalizing = true
+                if not is_read_ahead then
+                    TaskQueue:destroyChannel(channel_name)
+                end
+                if has_result_progress_callback and not has_error then
+                    result_progress_callback(true, "任务结束")
+                end
+            end
+        end)
+    end
+
+    -- read_ahead task flow limit
+    if is_read_ahead and ch.queue and #ch.queue > 0 then
+        local max_queue_size = math.max(10, (tonumber(download_chapter_count) or 3) * 2)
+        if #ch.queue > max_queue_size then
+            local tasks_to_drop = {}
+            for i = #ch.queue, max_queue_size + 1, -1 do
+                local removed_task = table.remove(ch.queue, i)
+                if removed_task and removed_task.args and removed_task.args[1] then
+                    local removed_chapter = removed_task.args[1]
+                    table.insert(tasks_to_drop, removed_chapter)
+                    logger.dbg('Legado.preLoadingChapters - Dropped old queued task:', removed_chapter.chapters_index)
+                end
+            end
+            if #tasks_to_drop > 0 then
+                pcall(function() self.dbManager:setTaskPids(tasks_to_drop, false) end)
+            end
+        end
+    end
+
+    local tasks_to_insert = {}
+    local db_update_success = self.dbManager:transaction(function(chapter_info, cache_file_path)
+        self.dbManager:setTaskPids(chapter_info, false)
+        self.dbManager:updateCacheFilePath(chapter_info, cache_file_path)
+    end, {enable_savepoint = true})
+
+    for i = #chapter_down_tasks, 1, -1 do
+        local dlChapter = chapter_down_tasks[i]
+        
+        if self:getBackgroundTaskInfo(dlChapter) == false then
+            dlChapter.is_pre_loading = true
+            table.insert(tasks_to_insert, dlChapter)
+            
+            ch:pushTask(
+                function(chapter_info)
+                    return self:_pDownloadChapter(chapter_info)
+                end,
+                function(success, downloaded_chapter)
+                    local current_chapter = dlChapter
+                    if not (success and H.is_tbl(downloaded_chapter) and downloaded_chapter.cacheFilePath) then
+                        pcall(function() self.dbManager:setTaskPids(current_chapter, false) end)
+                        logger.err("Failed to download chapter:", tostring(downloaded_chapter))
+                        return check_completion(false, string.format("章节[%s]下载失败: %s", tostring(current_chapter.title), tostring(downloaded_chapter)))
+                    end
+                    
+                    local cache_file_path = downloaded_chapter.cacheFilePath
+                    logger.dbg('Download chapter successfully:', dlChapter.book_cache_id, dlChapter.chapters_index, cache_file_path)
+
+                    local ok, err = pcall(db_update_success, current_chapter, cache_file_path)
+                    if not ok then logger.err('Error saving download to database:', tostring(err)) end
+                    
+                    completed_count = completed_count + 1
+                    check_completion(completed_count)
+                end,
+                {
+                    args = {dlChapter},
+                    insert_at_head = true,
+                    timeout = chapter_timeout,
+                    on_start = function(retry)
+                        logger.dbg('TaskQueue running: chapter_title:', dlChapter.title or nil)
+                    end
+                }
+            )
+        else
+            logger.dbg('Legado.preLoadingChapters - Task already in queue/running, skip:', dlChapter.chapters_index)
+        end
+    end
+    if #tasks_to_insert > 0 then
+        pcall(function() self.dbManager:setTaskPids(tasks_to_insert, true) end)
+    end
+    if ch then ch:resume() end
     return true
 end
 
@@ -1688,8 +1720,9 @@ function M:cleanBookCache(book_cache_id)
 end
 
 function M:cleanAllBookCaches()
+    pcall(function() self.dbManager:cleanTimeoutTaskPids() end)
     if self:getBackgroundTaskInfo() ~= false then
-        return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
+        return wrap_response(nil, '有后台在运行，请等待或重启 KOReader')
     end
 
     local bookShelfId = self:getCurrentBookShelfId()
@@ -1860,6 +1893,35 @@ function M:get_default_cover_cache(book_cache_id)
     return self:findCustomCoverFileInDir(cover_path_no_ext)
 end
 
+local function save_processed_image(data, output_path, ext)  
+    local RenderImage = require("ui/renderimage")  
+    local bb = RenderImage:renderImageData(data, #data, false, nil, nil)  
+    local final_success = false
+    if bb and bb.writeToFile then  
+        local ok, err = pcall(bb.writeToFile, bb, output_path, ext, nil, nil)  
+        final_success = ok and err
+    else  
+        util.writeToFile(data, output_path, true)  
+        local DocumentRegistry = require("document/documentregistry")  
+        local temp_doc = DocumentRegistry:openDocument(output_path)  
+        if temp_doc then  
+            local status, err = pcall(temp_doc.getCoverPageImage, temp_doc)  
+            temp_doc:close()
+            if status and err then
+                bb = err
+                if type(bb.getWidth) == "function" then
+                    local ok, err = pcall(bb.writeToFile, bb, output_path, ext, nil, nil)  
+                    final_success = ok and err
+                end  
+            end  
+        end  
+    end
+    if bb and bb.free then  
+        bb:free()  
+    end
+    return final_success  
+end
+
 function M:download_cover_img(book_cache_id, cover_url, is_force)
      if not (H.is_str(book_cache_id) and book_cache_id ~= "" 
         and H.is_str(cover_url) and cover_url ~= "") then
@@ -1875,6 +1937,22 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
         end
     end
 
+    local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
+    local lock_path = cover_path_no_ext .. ".downloading"
+    
+    if util.fileExists(lock_path) then
+        if not H.isFileOlderThan(lock_path, 60) then
+            logger.warn("download_cover_img: Cover download already in progress", book_cache_id)
+            return nil, nil
+        else
+            util.removeFile(lock_path)
+        end
+    end
+    
+    local dir = util.splitFilePathName(cover_path_no_ext)
+    H.checkAndCreateFolder(dir)
+    util.writeToFile("", lock_path)
+
     local img_src = self:getProxyCoverUrl(cover_url)
     local ok, resp = pGetUrlContent({
                         url = img_src,
@@ -1884,43 +1962,32 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
                 })
     if ok and resp and resp['data'] then
         local ext = resp.ext or "jpg"
-        local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
-        local cover_img_path = string.format("%s.%s", cover_path_no_ext, ext)
-        local dir, image_filename = util.splitFilePathName(cover_img_path)
-        H.checkAndCreateFolder(dir)
-        util.writeToFile(resp.data, cover_img_path, true)
-        return cover_img_path, image_filename
+        local final_img_path = string.format("%s.%s", cover_path_no_ext, ext)
+        
+        local is_success = save_processed_image(resp['data'], lock_path, ext)
+        if not is_success then
+            util.removeFile(lock_path)
+            logger.err("download_cover_img: Invalid cover image data")
+            return nil, nil
+        end
+        
+        if util.fileExists(final_img_path) then util.removeFile(final_img_path) end
+        os.rename(lock_path, final_img_path)
+        
+        local _, image_filename = util.splitFilePathName(final_img_path)
+        return final_img_path, image_filename
     else
+        util.removeFile(lock_path)
         logger.err("download_cover_img: failed", img_src, resp)
         return nil, nil
     end
 end
 
--- 这个函数会在子进程中调用，最好不要写task_pid_file
 function M:getBackgroundTaskInfo(chapter_info)
-    -- ffiUtil.isSubProcessDone(task_pid)
-    local pid_file = self.task_pid_file
-    if not util.fileExists(pid_file) then
-        return false
-    end
-    local task_pid_info = self:getLuaConfig(pid_file)
-    local task_chapters = task_pid_info:readSetting("chapters")
-    if not H.is_tbl(task_chapters) then
-        return false
-    end
-    if H.is_tbl(chapter_info) and chapter_info.book_cache_id and chapter_info.chapters_index then
-        local task_id = string.format("%s_%s", chapter_info.book_cache_id, chapter_info.chapters_index)
-        if not H.is_tbl(task_chapters[task_id]) then return false end
-        -- 有记录并且在最大有效时间内
-        local task_data = task_chapters[task_id]
-        local current_time = os.time()
-        if H.is_tbl(task_data) and task_data.stime and current_time - task_data.stime < 7200 then
-            return task_data
-        end
-        return false
-    end
-
-    return next(task_chapters) ~= nil and task_chapters or false
+    local ok, is_running = pcall(function() 
+        return self.dbManager:isTaskRunning(chapter_info) 
+    end)
+    return ok and is_running or false
 end
 
 function M:after_reader_chapter_show(chapter)
@@ -1996,18 +2063,33 @@ function M:after_reader_chapter_show(chapter)
     if NetworkMgr:isConnected() then
         local settings = self:getSettings()
         if settings.sync_reading == true then
-            UIManager:unschedule(M.saveBookProgressAsync)
-            UIManager:scheduleIn(8, M.saveBookProgressAsync, self, chapter)
+            if self._save_progress_timer_cancel then
+                self._save_progress_timer_cancel()
+                self._save_progress_timer_cancel = nil
+            end
+
+            self._save_progress_timer_cancel = TaskQueue.delay(8, function()
+                self:saveBookProgressAsync(chapter)
+                self._save_progress_timer_cancel = nil
+            end)
         end
         if chapter.isRead ~= true then
-            local complete_count = self:getcompleteReadAheadChapters(chapter)
-            if complete_count < 40 then
-                local preDownloadNum = settings.preload_chapters or 3
-                if chapter.cacheExt and chapter.cacheExt == 'cbz' then
-                    preDownloadNum = 1
-                end
-                self:preLoadingChapters(chapter, preDownloadNum)
+            if self._preload_timer_cancel then
+                self._preload_timer_cancel()
+                self._preload_timer_cancel = nil
             end
+
+            self._preload_timer_cancel = TaskQueue.delay(1.5, function()
+                local complete_count = self:getcompleteReadAheadChapters(chapter)
+                if complete_count < 40 then
+                    local preDownloadNum = settings.preload_chapters or 3
+                    if chapter.cacheExt and chapter.cacheExt == 'cbz' then
+                        preDownloadNum = 1
+                    end
+                    self:preLoadingChapters(chapter, preDownloadNum)
+                end
+                self._preload_timer_cancel = nil
+            end)
         end
     end
 
@@ -2256,99 +2338,26 @@ end
 -- If a callback is provided, there will be no return value, as the callback will always be invoked
 function M:launchProcess(job, callback, timeout)
     if not H.is_func(job) then
-        logger.err("launchProcess - job must be a function")
+        logger.err("Legado.launchProcess - job must be a function")
         if H.is_func(callback) then
             callback(false, "invalid_job_function")
         else
             return false, "invalid_job_function"
         end
     end
-
-    -- return task_pid, err other callback(ok, ...)
     if not H.is_func(callback) then
-        return ffiUtil.runInSubProcess(job, nil, true)
+        return TaskQueue.spawnProcess(job, nil, timeout)
     end
-
     local Trapper = require("ui/trapper")
-    local buffer = require("string.buffer")
-
     Trapper:wrap(function()
-        pcall(function() Device:enableCPUCores(2) end)
-
         logger.dbg("Legado.launchProcess - START")
-        local start_time = os.time()
-        local pid, parent_read_fd = nil, nil
-
-        local function deliver_result(ok, r1, r2)
-            if parent_read_fd then
-                pcall(ffiUtil.readAllFromFD, parent_read_fd)
-                parent_read_fd = nil
-            end
-            local status, err = pcall(function() Device:enableCPUCores(1) end)
-            if not status then
-                logger.err('Legado.launchProcess - Device.enableCPUCores err', tostring(err))
-            end
+        TaskQueue.spawnProcess(job, function(ok, r1, r2)
             logger.dbg("Legado.launchProcess - END")
-            callback(ok, r1, r2)
-        end
-
-        pid, parent_read_fd = ffiUtil.runInSubProcess(function(_pid, child_write_fd)
-            local ok, r1, r2 = pcall(job)
-            local ret_tbl = { ok = ok, r1 = r1, r2 = r2 }
-            -- NOTE: LuaJIT's serializer currently doesn't support:
-            --       functions, coroutines, non-numerical FFI cdata & full userdata.
-            local output_str = ""
-            local ok, str = pcall(buffer.encode, ret_tbl)
-            if ok and str then
-                output_str = str
-            else
-                logger.warn("Legado.launchProcess - serialization failed:", str or "unknown error")
-                ret_tbl = { ok = false, r1 = "serialization_error", r2 = tostring(str)}
-                output_str = buffer.encode(ret_tbl) or ""
+            local cb_ok, cb_err = pcall(callback, ok, r1, r2)
+            if not cb_ok then
+                logger.err("Legado.launchProcess - Callback error:", tostring(cb_err))
             end
-            ffiUtil.writeToFD(child_write_fd, output_str, true)
-        end, true)
-
-        if not pid then
-            logger.dbg("Legado.launchProcess - background task failed to start")
-            deliver_result(false, "start_failed", parent_read_fd)
-            return
-        end
-
-        local function poll()
-            if timeout and os.difftime(os.time(), start_time) >= timeout then
-                logger.dbg("Legado.launchProcess - timeout reached, killing subprocess")
-                ffiUtil.terminateSubProcess(pid)
-                UIManager:scheduleIn(1, function()
-                   deliver_result(false, "timeout")
-                end)
-                return
-            end
-
-            local subprocess_done = ffiUtil.isSubProcessDone(pid)
-            local stuff_to_read = parent_read_fd and ffiUtil.getNonBlockingReadSize(parent_read_fd) ~= 0
-            if subprocess_done or stuff_to_read then
-               -- Subprocess is gone or nearly gone
-                local ok, r1, r2 = false, nil, nil
-                if parent_read_fd then
-                    local ret_str = ffiUtil.readAllFromFD(parent_read_fd) or ""
-                    local dec_ok, ret_tbl = pcall(buffer.decode, ret_str)
-                    if dec_ok and ret_tbl and type(ret_tbl) == "table" then
-                        ok, r1, r2 = ret_tbl.ok, ret_tbl.r1, ret_tbl.r2
-                    else
-                        logger.warn("Legado.launchProcess - malformed serialized data:", ret_tbl)
-                        ok, r1, r2 = false, "decode_error", nil
-                    end
-                    parent_read_fd = nil
-                end
-                logger.dbg("Legado.launchProcess - background task completed")
-                deliver_result(ok, r1, r2)
-            else
-                UIManager:scheduleIn(0.2, poll)
-            end
-        end
-
-        poll()
+        end, timeout)
     end)
 end
 
@@ -2396,10 +2405,6 @@ function M:enforceRateLimit(last_time, limit_ms)
 end
 function M:onExitClean()
     dbg.v('Backend call onExitClean')
-
-    if util.fileExists(self.task_pid_file) then
-        util.removeFile(self.task_pid_file)
-    end
 
     self:closeDbManager()
     collectgarbage()

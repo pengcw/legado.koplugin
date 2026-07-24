@@ -7,6 +7,7 @@ local logger = require("logger")
 local ffiUtil = require("ffi/util")
 local buffer = require("string.buffer")
 local socket = require("socket") 
+local Device = require("device")
 
 local  M = { cache = {}, channels = {} }
 
@@ -123,19 +124,10 @@ function Channel:_processNext()
     end
 
     safe_call("on_start", task.on_start, task.current_retry)
-    if self.active_workers == 1 then pcall(function() Device:enableCPUCores(2) end) end
+    if self.active_workers == 1 then M.requestHighCPU() end
     logger.dbg("Channel:_processNext - START", self.name)
 
-    local start_time = os.time()
-    local pid, parent_read_fd = nil, nil
-    local poll_count = 0
-
-    local function deliver_result(ok, r1, r2)
-        if parent_read_fd then
-            pcall(ffiUtil.readAllFromFD, parent_read_fd)
-            parent_read_fd = nil
-        end
-        
+    local function finish_callback(ok, r1, r2)
         local completed, result = ok, r1
 
         if task.session == self.session then
@@ -153,13 +145,7 @@ function Channel:_processNext()
         self.active_workers = self.active_workers - 1
         
         if #self.queue == 0 and self.active_workers == 0 then
-            UIManager:scheduleIn(2.0, function()
-                local is_busy = M:hasAnyTasks()
-                if not is_busy then
-                    logger.dbg("TaskFlow: All channels idle, smoothly downgrading CPU to 1 core.")
-                    pcall(function() Device:enableCPUCores(1) end)
-                end
-            end)
+            M.releaseHighCPU()
             UIManager:nextTick(function()
                 if #self.queue == 0 and self.active_workers == 0 then
                     safe_call("on_finish", self.on_finish, false)
@@ -173,65 +159,11 @@ function Channel:_processNext()
     if task.run_in_main then
         logger.dbg("Channel:_processNext - Bypass to MAIN thread")
         local job_ok, r1, r2 = safe_call("run_in_main", execute_func)
-        UIManager:nextTick(function() deliver_result(job_ok, r1, r2) end)
+        UIManager:nextTick(function() finish_callback(job_ok, r1, r2) end)
         return 
     end
 
-    pid, parent_read_fd = ffiUtil.runInSubProcess(function(_pid, child_write_fd)
-        local job_ok, r1, r2 = pcall(execute_func)
-        local ret_tbl = { ok = job_ok, r1 = r1, r2 = r2 }
-        
-        local output_str = ""
-        local enc_ok, str = pcall(buffer.encode, ret_tbl)
-        if enc_ok and str then
-            output_str = str
-        else
-            ret_tbl = { ok = false, r1 = "serialization_error", r2 = tostring(str)}
-            output_str = buffer.encode(ret_tbl) or ""
-        end
-        ffiUtil.writeToFD(child_write_fd, output_str, true)
-    end, true)
-
-    if not pid then
-        deliver_result(false, "start_failed")
-        return
-    end
-
-    local function poll()
-        poll_count = poll_count + 1
-        
-        if task.timeout and os.difftime(os.time(), start_time) >= task.timeout then
-            ffiUtil.terminateSubProcess(pid)
-            -- delay until process exits
-            UIManager:scheduleIn(0.5, function() deliver_result(false, "timeout") end)
-            return
-        end
-        local subprocess_done = ffiUtil.isSubProcessDone(pid)
-        if subprocess_done then
-            local ok, r1, r2 = false, nil, nil
-            if parent_read_fd then
-                local ret_str = ffiUtil.readAllFromFD(parent_read_fd) or ""
-                if ret_str ~= "" then
-                    local dec_ok, ret_tbl = pcall(buffer.decode, ret_str)
-                    if dec_ok and type(ret_tbl) == "table" then
-                        ok, r1, r2 = ret_tbl.ok, ret_tbl.r1, ret_tbl.r2
-                    else
-                        logger.warn(string.format("Channel:_processNext - malformed data (len: %d)", #ret_str))
-                        ok, r1, r2 = false, "decode_error", nil
-                    end
-                else
-                    ok, r1, r2 = false, "empty_pipe_error", nil
-                end
-                parent_read_fd = nil
-            end
-            logger.dbg("Channel:_processNext - background task completed")
-            deliver_result(ok, r1, r2)
-        else
-            local next_delay = (poll_count <= 5) and 0.02 or 0.2
-            UIManager:scheduleIn(next_delay, poll)
-        end
-    end
-    poll()
+    M.spawnProcess(execute_func, finish_callback, task.timeout)
 end
 
 function Channel:clearTasks()
@@ -285,7 +217,6 @@ function Channel:executeBatch(params)
 
     local completed_count = 0
     local is_aborted = false
-    -- 必须显式传入 aggregate=true 才会聚合结果，否则丢弃释放内存
     local results_map = (aggregate == true) and {} or nil 
     local batch_id = tostring({}) 
     
@@ -475,16 +406,117 @@ function M:hasAnyTasks()
     return is_busy, total_queued, total_active
 end
 
+function M.requestHighCPU()
+    pcall(function() Device:enableCPUCores(2) end)
+end
+
+function M.releaseHighCPU()
+    if M._cpu_downgrade_timer_cancel then
+        M._cpu_downgrade_timer_cancel()
+        M._cpu_downgrade_timer_cancel = nil
+    end
+    M._cpu_downgrade_timer_cancel = M.delay(2.0, function()
+        local is_busy = M:hasAnyTasks()
+        if not is_busy and (M._active_processes or 0) <= 0 then
+            pcall(function() Device:enableCPUCores(1) end)
+        end
+        M._cpu_downgrade_timer_cancel = nil
+    end)
+end
+
+function M.spawnProcess(job, callback, timeout)
+    M._active_processes = (M._active_processes or 0) + 1
+    if M._active_processes == 1 then M.requestHighCPU() end
+
+    local start_time = os.time()
+    local pid, parent_read_fd = nil, nil
+    local poll_count = 0
+
+    local function deliver_result(ok, r1, r2)
+        if parent_read_fd then
+            pcall(ffiUtil.readAllFromFD, parent_read_fd)
+            parent_read_fd = nil
+        end
+        
+        M._active_processes = M._active_processes - 1
+        if M._active_processes <= 0 then
+            M._active_processes = 0
+            M.releaseHighCPU()
+        end
+
+        if type(callback) == "function" then
+            callback(ok, r1, r2)
+        end
+    end
+
+    pid, parent_read_fd = ffiUtil.runInSubProcess(function(_pid, child_write_fd)
+        local ok, r1, r2 = pcall(job)
+        local ret_tbl = { ok = ok, r1 = r1, r2 = r2 }
+        local output_str = ""
+        local enc_ok, str = pcall(buffer.encode, ret_tbl)
+        if enc_ok and str then
+            output_str = str
+        else
+            logger.warn("TaskQueue.spawnProcess - serialization failed:", str)
+            ret_tbl = { ok = false, r1 = "serialization_error", r2 = tostring(str)}
+            output_str = buffer.encode(ret_tbl) or ""
+        end
+        ffiUtil.writeToFD(child_write_fd, output_str, true)
+    end, true)
+
+    if not pid then
+        deliver_result(false, "start_failed")
+        return nil
+    end
+
+    local function poll()
+        poll_count = poll_count + 1
+        if timeout and os.difftime(os.time(), start_time) >= timeout then
+            ffiUtil.terminateSubProcess(pid)
+            UIManager:scheduleIn(0.5, function() deliver_result(false, "timeout") end)
+            return
+        end
+
+        if ffiUtil.isSubProcessDone(pid) then
+            local ok, r1, r2 = false, nil, nil
+            if parent_read_fd then
+                local ret_str = ffiUtil.readAllFromFD(parent_read_fd) or ""
+                if ret_str ~= "" then
+                    local dec_ok, ret_tbl = pcall(buffer.decode, ret_str)
+                    if dec_ok and type(ret_tbl) == "table" then
+                        ok, r1, r2 = ret_tbl.ok, ret_tbl.r1, ret_tbl.r2
+                    else
+                        logger.warn(string.format("TaskQueue.spawnProcess - malformed data (len: %d)", #ret_str))
+                        ok, r1, r2 = false, "decode_error", nil
+                    end
+                else
+                    ok, r1, r2 = false, "empty_pipe_error", nil
+                end
+                parent_read_fd = nil
+            end
+            deliver_result(ok, r1, r2)
+        else
+            local next_delay = (poll_count <= 5) and 0.02 or 0.2
+            UIManager:scheduleIn(next_delay, poll)
+        end
+    end
+    poll()
+    return pid
+end
+
 function M.delay(seconds, func)
     local pending = true
-    UIManager:scheduleIn(seconds, function()
-        pending = false
-        func()
-    end)
+    local wrapped_func = function()
+        if pending then
+            pending = false
+            func()
+        end
+    end
+    UIManager:scheduleIn(seconds, wrapped_func)
     return function()
         if pending then
             pending = false
-            UIManager:unschedule(func)
+            UIManager:unschedule(wrapped_func)
         end
     end
 end

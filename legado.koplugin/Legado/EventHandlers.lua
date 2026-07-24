@@ -12,7 +12,7 @@ local H = require("Legado/Helper")
 local Patcher = require("Legado.patches")
 local PlgState = require("Legado/PlgState")
 
-local EventHandlers = {}
+local Handlers = {}
 
 local function switch_sync_reading(settings)
     settings = H.is_tbl(settings) and settings or Backend:getSettings()
@@ -26,7 +26,7 @@ local function switch_sync_reading(settings)
     return settings
 end
 
-function EventHandlers:register(parent_ref)
+function Handlers:register(parent_ref)
     local LibraryView = require("Legado/LibraryView")
 
     function parent_ref:onShowLegadoLibraryView()
@@ -202,6 +202,73 @@ function EventHandlers:register(parent_ref)
                                 end)
                             end,
                         }, {
+                            text = "书架显示封面",
+                            help_text = "开启后，书架将尝试加载并显示书籍封面",
+                            checked_func = function()
+                                return Backend:getSettings().show_cover == true
+                            end,
+                            callback = function(menu_def)
+                                local settings = Backend:getSettings()
+                                local new_state = not settings.show_cover
+                                
+                                local function save_and_notify()
+                                    settings.show_cover = new_state
+                                    local msg = new_state and "已开启封面显示" or "已关闭封面显示"
+                                    Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                        MessageBox:notice(msg)
+                                        if menu_def and menu_def.updateItems then menu_def:updateItems() end
+                                    end, function(err_msg)
+                                        MessageBox:error("设置失败:", err_msg)
+                                    end)
+                                end
+
+                                if new_state then
+                                    local current_items = settings.items_per_page or G_reader_settings:readSetting("items_per_page") or 14
+                                    if current_items > 10 then
+                                        MessageBox:confirm("开启封面后，建议每页显示不超过 10 条，是否自动调整？", function(is_ok)
+                                            if is_ok then
+                                                settings.items_per_page = 10
+                                            end
+                                            save_and_notify()
+                                        end)
+                                        return
+                                    end
+                                end
+                                save_and_notify()
+                            end,
+                        }, {
+                            text_func = function()
+                                local settings = Backend:getSettings()
+                                local default_items = settings.show_cover and 10 or (G_reader_settings:readSetting("items_per_page") or 14)
+                                local current = settings.items_per_page or default_items
+                                return string.format("书架每页条目: %d", current)
+                            end,
+                            callback = function()
+                                local settings = Backend:getSettings()
+                                local default_items = settings.show_cover and 10 or (G_reader_settings:readSetting("items_per_page") or 14)
+                                local thread_spin = require("ui/widget/spinwidget"):new{
+                                    value = settings.items_per_page or default_items,
+                                    value_min = 4,
+                                    value_max = 15,
+                                    value_step = 1,
+                                    value_hold_step = 3,
+                                    ok_text = "确定",
+                                    title_text = "书架每页条目",
+                                    info_text = "设置书架每页显示书籍数量",
+                                    default_value = default_items,
+                                    default_text = tostring(default_items),
+                                    callback = function(spin)
+                                        settings.items_per_page = spin.value
+                                        Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                            MessageBox:notice(string.format("每页条目数已设置为: %d", spin.value))
+                                        end, function(err_msg)
+                                            MessageBox:error("设置失败：", tostring(err_msg))
+                                        end)
+                                    end,
+                                }
+                                UIManager:show(thread_spin)
+                            end,
+                        }, {
                             text_func = function()
                                 return string.format("缓存下载进程: %d", Backend:getSettings().download_threads or 2)
                             end,
@@ -217,7 +284,7 @@ function EventHandlers:register(parent_ref)
                                     title_text = "缓存下载进程数",
                                     info_text = "建议根据网络状况选择 4–8 进程\n（如下载异常，可尝试调为 1）",
                                     default_value = 2,
-                                    default_text = "恢复默认",
+                                    default_text = "2",
                                     callback = function(spin)
                                         settings.download_threads = spin.value
                                         Backend:HandleResponse(Backend:saveSettings(settings), function()
@@ -245,7 +312,7 @@ function EventHandlers:register(parent_ref)
                                     title_text = "预下载章节数",
                                     info_text = "阅读时, 向后预缓存正文",
                                     default_value = 3,
-                                    default_text = "恢复默认",
+                                    default_text = "3",
                                     callback = function(spin)
                                         settings.preload_chapters = spin.value
                                         Backend:HandleResponse(Backend:saveSettings(settings), function()
@@ -257,14 +324,6 @@ function EventHandlers:register(parent_ref)
                                 }
                                 UIManager:show(thread_spin)
                             end,
-                        }, {
-                            text = "检查更新",
-                            keep_menu_open = true,
-                            callback = function()
-                                UIManager:nextTick(function()
-                                    Backend:checkOta(true)
-                                end)
-                            end
                         },
                     },
                 }, {
@@ -298,6 +357,14 @@ function EventHandlers:register(parent_ref)
                             end,
                         },
                     },
+                }, {
+                    text = "检查更新",
+                    keep_menu_open = true,
+                    callback = function()
+                        UIManager:nextTick(function()
+                            Backend:checkOta(true)
+                        end)
+                    end
                 }, {
                     text = "关于",
                     keep_menu_open = true,
@@ -699,4 +766,4 @@ function EventHandlers:register(parent_ref)
     end
 end
 
-return EventHandlers
+return Handlers
