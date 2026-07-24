@@ -32,7 +32,6 @@ function LibraryView:init()
         return
     end
     self:getBrowserHomeDir(true)
-    Backend:backupDbWithPreCheck()
     LibraryView.instance = self
 end
 
@@ -185,7 +184,8 @@ function LibraryView:openMenu(dimen)
         callback = function()
             UIManager:close(dialog)
             require("Legado/WebConfigDialog"):openWebConfigManager(function()
-                self:clearMenuItems()
+                self:invalidateBookShelf()
+                self:fetchAndShow()
                 self:onRefreshLibrary()
             end)
         end,
@@ -483,6 +483,14 @@ end
 
 function LibraryView:getMenuWidget()
     return init_book_shelf(self)
+end
+
+-- reset widget cache on value change
+function LibraryView:invalidateBookShelf()
+    if self.book_shelf then
+        self.book_shelf:onClose()
+        self.book_shelf = nil
+    end
 end
 
 function LibraryView:getBookTocWidget()

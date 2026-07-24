@@ -1,6 +1,6 @@
 -- Legado/BookShelf.lua
 local BD = require("ui/bidi")
-local Menu = require("ui/widget/menu")
+local CoverMenu = require("Legado/CoverMenu")
 local Device = require("device")
 local UIManager = require("ui/uimanager")
 local Event = require("ui/event")
@@ -16,7 +16,7 @@ local function init_book_shelf(parent)
     if parent.book_shelf then
         return parent.book_shelf
     end
-    local book_shelf = Menu:new{
+    local book_shelf = CoverMenu:new{
         name = "library_view",
         title = "书架",
         with_context_menu = true,
@@ -54,7 +54,7 @@ local function init_book_shelf(parent)
     end
     
     function book_shelf:onFocusRight()
-        local focused_widget = Menu.getFocusItem(self)
+        local focused_widget = CoverMenu.getFocusItem(self)
         if focused_widget then
             local point = focused_widget.dimen:copy()
             point.x = point.x + point.w
@@ -81,7 +81,7 @@ local function init_book_shelf(parent)
             end
             return
         end
-        Menu.onSwipe(self, arg, ges_ev)
+        CoverMenu.onSwipe(self, arg, ges_ev)
     end
 
     function book_shelf:refreshItems(no_recalculate_dimen)

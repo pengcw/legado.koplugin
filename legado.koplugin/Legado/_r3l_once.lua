@@ -98,5 +98,12 @@ return function()
         ffiUtil.purgeDir(old_patches_dir)
         util.removePath(old_patches_dir)
     end
+
+    -- > 1.1.5: Clean up obsolete task.pid.lua
+    local old_task_pid = H.getTempDirectory() .. '/task.pid.lua'
+    if util.fileExists(old_task_pid) then
+        util.removeFile(old_task_pid)
+    end
+
     return true
 end

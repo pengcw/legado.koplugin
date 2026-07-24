@@ -23,6 +23,11 @@ function Document:init()
     elseif self:is_legado_browser_book() then
         self._is_browser_book = true
     end
+    
+    if self._is_cache_book or self._is_browser_book then
+        -- Run backup check when a Legado book is actually opened
+        Backend:backupDbWithPreCheck()
+    end
 end
 
 function Document:is_legado_browser_book(file_path)
