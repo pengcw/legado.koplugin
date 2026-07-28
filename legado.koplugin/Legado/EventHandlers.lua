@@ -241,7 +241,7 @@ function Handlers:register(parent_ref)
                                 local settings = Backend:getSettings()
                                 local default_items = settings.show_cover and 10 or (G_reader_settings:readSetting("items_per_page") or 14)
                                 local current = settings.items_per_page or default_items
-                                return string.format("书架每页条目: %d", current)
+                                return string.format("书架每页项数: %d", current)
                             end,
                             callback = function()
                                 local settings = Backend:getSettings()
@@ -253,42 +253,14 @@ function Handlers:register(parent_ref)
                                     value_step = 1,
                                     value_hold_step = 3,
                                     ok_text = "确定",
-                                    title_text = "书架每页条目",
+                                    title_text = "书架每页项数",
                                     info_text = "设置书架每页显示书籍数量",
                                     default_value = default_items,
                                     default_text = tostring(default_items),
                                     callback = function(spin)
                                         settings.items_per_page = spin.value
                                         Backend:HandleResponse(Backend:saveSettings(settings), function()
-                                            MessageBox:notice(string.format("每页条目数已设置为: %d", spin.value))
-                                        end, function(err_msg)
-                                            MessageBox:error("设置失败：", tostring(err_msg))
-                                        end)
-                                    end,
-                                }
-                                UIManager:show(thread_spin)
-                            end,
-                        }, {
-                            text_func = function()
-                                return string.format("缓存下载进程: %d", Backend:getSettings().download_threads or 2)
-                            end,
-                            callback = function()
-                                local settings = Backend:getSettings()
-                                local thread_spin = require("ui/widget/spinwidget"):new{
-                                    value = settings.download_threads or 2,
-                                    value_min = 1,
-                                    value_max = 16,
-                                    value_step = 1,
-                                    value_hold_step = 2,
-                                    ok_text = "确定",
-                                    title_text = "缓存下载进程数",
-                                    info_text = "建议根据网络状况选择 4–8 进程\n（如下载异常，可尝试调为 1）",
-                                    default_value = 2,
-                                    default_text = "2",
-                                    callback = function(spin)
-                                        settings.download_threads = spin.value
-                                        Backend:HandleResponse(Backend:saveSettings(settings), function()
-                                            MessageBox:notice(string.format("下载进程数已设置为: %d", spin.value))
+                                            MessageBox:notice(string.format("每页项数已设置为: %d", spin.value))
                                         end, function(err_msg)
                                             MessageBox:error("设置失败：", tostring(err_msg))
                                         end)
@@ -305,7 +277,7 @@ function Handlers:register(parent_ref)
                                 local thread_spin = require("ui/widget/spinwidget"):new{
                                     value = settings.preload_chapters or 3,
                                     value_min = 0,
-                                    value_max = 20,
+                                    value_max = 40,
                                     value_step = 1,
                                     value_hold_step = 5,
                                     ok_text = "确定",
@@ -324,11 +296,58 @@ function Handlers:register(parent_ref)
                                 }
                                 UIManager:show(thread_spin)
                             end,
+                        }, {
+                            text_func = function()
+                                return string.format("同时下载数: %d", Backend:getSettings().download_threads or 2)
+                            end,
+                            callback = function()
+                                local settings = Backend:getSettings()
+                                local thread_spin = require("ui/widget/spinwidget"):new{
+                                    value = settings.download_threads or 2,
+                                    value_min = 1,
+                                    value_max = 12,
+                                    value_step = 1,
+                                    value_hold_step = 2,
+                                    ok_text = "确定",
+                                    title_text = "同时下载进程数",
+                                    info_text = "建议根据机器配置选择 1–4 进程\n（如下载异常，可尝试调为 1）",
+                                    default_value = 2,
+                                    default_text = "2",
+                                }
+                                UIManager:show(thread_spin)
+                            end,
                         },
-                    },
-                }, {
+                }}, {
                     text = "缓存管理",
                     sub_item_table = {
+                        {
+                            text = "压缩数据库",
+                            keep_menu_open = true,
+                            callback = function()
+                                local old_size = Backend:getDBFileSize()
+                                local formatted_old = H.formatFileSize(old_size)
+                                MessageBox:confirm(
+                                    string.format("当前数据库大小为：%s\n\n是否确认压缩数据库？", formatted_old),
+                                    function(result)
+                                        if result then
+                                            MessageBox:loading("压缩中...", function()
+                                                return Backend:vacuumDatabase()
+                                            end, function(state, response)
+                                                if state == true then
+                                                    Backend:HandleResponse(response, function(data)
+                                                        local old_str = H.formatFileSize(data.old_size)
+                                                        local new_str = H.formatFileSize(data.new_size)
+                                                        MessageBox:info(string.format("数据库压缩完成！\n压缩前: %s\n压缩后: %s", old_str, new_str))
+                                                    end, function(err_msg)
+                                                        MessageBox:error("压缩失败：", tostring(err_msg))
+                                                    end)
+                                                end
+                                            end)
+                                        end
+                                    end
+                                )
+                            end,
+                        },
                         {
                             text = "清空缓存",
                             keep_menu_open = true,
@@ -371,7 +390,7 @@ function Handlers:register(parent_ref)
                     callback = function()
                         local legado_update = require("Legado.Update")
                         local curren_version = legado_update:getCurrentVersion() or ""
-                        local Icons = require("Legado/Icons")
+                        local Icons = require("Legado.res.icons")
                         local ffiUtil = require("ffi/util")
                         local about_txt = [[
 -- 清风不识字，何故乱翻书 --
@@ -533,7 +552,7 @@ function Handlers:register(parent_ref)
 
                 if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
                     local summary = doc_settings.data.summary 
-                     local persisted_settings_keys = require("Legado/BookMetaData")
+                     local persisted_settings_keys = require("Legado.res.metadata")
                     local book_defaults_data = util.tableDeepCopy(shared_meta_data.data)
                     for k, v in pairs(book_defaults_data) do
                         if persisted_settings_keys[k]  then
@@ -569,7 +588,7 @@ function Handlers:register(parent_ref)
                 if not parent_ref:isCachePath(directory) then return end
                 
                 if self.ui.doc_settings and type(self.ui.doc_settings.data) == 'table' then
-                    local persisted_settings_keys = require("Legado/BookMetaData")
+                    local persisted_settings_keys = require("Legado.res.metadata")
                     local library_obj = LibraryView:getInstance()
                     local shared_meta_data = library_obj:getSharedMetaData(directory)
                 

@@ -23,7 +23,7 @@ local EpubExporter = {
 }
 
 -- CSS 文件路径
-local mianCss = string.format("%s/%s", H.getPluginDirectory(), "Legado/main.css.lua")
+local mianCss = string.format("%s/%s", H.getPluginDirectory(), "Legado/res/main.css")
 local resCss = "resources/legado.css"
 
 -- ============================================================
