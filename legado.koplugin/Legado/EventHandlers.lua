@@ -493,7 +493,10 @@ function Handlers:register(parent_ref)
                     keep_menu_open = true,
                     help_text = "阅读时，自动上传阅读进度",
                     checked_func = function() return settings.sync_reading == true end,
-                    hold_callback = function() switch_sync_reading(settings) end,
+                    hold_callback = function(menu_def) 
+                        switch_sync_reading(settings)
+                        if menu_def and menu_def.updateItems then menu_def:updateItems() end
+                    end,
                     callback = function()  
                         MessageBox:info("阅读时，自动上传阅读进度\n <长按切换选项>")
                     end,
