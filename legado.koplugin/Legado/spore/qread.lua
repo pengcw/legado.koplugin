@@ -2,6 +2,7 @@ local logger = require("logger")
 local util = require("util")
 local socket_url = require("socket.url")
 local H = require("Legado/Helper")
+local safe_pcall = require("Legado.Helper.Error").pcall
 local LegadoSpec = require("Legado.spore.base")
 
 local M = LegadoSpec:extend{
@@ -25,12 +26,10 @@ function M:reader3Login()
         return false, '认证信息设置不全'
     end
 
-    self.client:reset_middlewares()
-    self.client:enable("Format.JSON")
-    self.client:enable("ForceJSON")
+    self:resetAndEnableMiddlewares(false)
     socketutil:set_timeout(8, 10)
 
-    local status, res = H.pcall(function()
+    local status, res = safe_pcall(function()
         return self.client:login({
             username = reader3_un,
             password = reader3_pwd,
@@ -46,10 +45,10 @@ function M:reader3Login()
         return false, "返回了无效数据"
     end
     if not (H.is_tbl(res.body.data) and H.is_str(res.body.data.accessToken)) then
-        return false, '获取 Token 失败' .. tostring(res.body.errorMsg or "")
+        return false, '获取 Token 失败:' .. tostring(res.body.errorMsg or "")
     end
 
-    self:reader3Token(res.body.data.accessToken)
+    self.tokenManager:set(res.body.data.accessToken)
     return true, res.body.data.accessToken
 end
 
