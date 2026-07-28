@@ -66,7 +66,7 @@ function BookDetails:init()
             self.bookinfo.author = '未知'
         end
         local show_book_title = ("%s (%s)"):format(self.bookinfo.name, self.bookinfo.author)
-        local md5 = require("ffi/sha2").md5
+        local md5 = require("Legado.Helper.Crypto").md5
         self.bookinfo.cache_id = tostring(md5(show_book_title))
     end
 

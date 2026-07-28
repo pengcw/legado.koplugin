@@ -142,19 +142,6 @@ end
 
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
-local Error = require("Legado.Helper.Error")
-local Crypto = require("Legado.Helper.Crypto")
-local Require = require("Legado.Helper.Require")
-
-for k, v in pairs(Require) do
-    M[k] = v
-end
-for k, v in pairs(Crypto) do
-    M[k] = v
-end
-for k, v in pairs(Error) do
-    M[k] = v
-end
 for k, v in pairs(FS) do
     M[k] = v
 end

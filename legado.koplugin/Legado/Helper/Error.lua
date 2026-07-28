@@ -18,7 +18,7 @@ M.pcall = function(f, ...)
     return xpcall(f, err_handler, ...)
 end
 
-M.map_error_message = function(err_msg)
+M.map_message = function(err_msg)
     if type(err_msg) ~= "string" then 
         return "网络请求失败"
     end

@@ -3,7 +3,7 @@ local util = require("util")
 local H = require("Legado/Helper")
 local socket_url = require("socket.url")
 local LuaSettings = require("luasettings")
-local md5 = require("ffi/sha2").md5
+local md5 = require("Legado.Helper.Crypto").md5
 
 return function()
     local settings_data = LuaSettings:open(H.getUserSettingsPath())

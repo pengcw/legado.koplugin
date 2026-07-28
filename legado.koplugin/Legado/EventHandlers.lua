@@ -318,7 +318,7 @@ function Handlers:register(parent_ref)
                             end,
                         },
                 }}, {
-                    text = "缓存管理",
+                    text = "清理与维护",
                     sub_item_table = {
                         {
                             text = "压缩数据库",
@@ -373,6 +373,18 @@ function Handlers:register(parent_ref)
                                             end)
                                         end
                                     end, { ok_text = "清空", cancel_text = "取消" })
+                            end,
+                        },
+                        {
+                            text = "清除认证状态",
+                            keep_menu_open = true,
+                            callback = function()
+                                if Backend.apiClient and Backend.apiClient.tokenManager then
+                                    Backend.apiClient.tokenManager:clear()
+                                    MessageBox:success("当前服务端的登录状态已清除！")
+                                else
+                                    MessageBox:notice("当前服务端无需清理登录 Token")
+                                end
                             end,
                         },
                     },
