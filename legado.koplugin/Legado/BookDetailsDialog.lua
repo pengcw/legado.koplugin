@@ -32,17 +32,17 @@ local H = require("Legado/Helper")
 local Screen = Device.screen
 
 local Constants = {
-    COVER_WIDTH_RATIO_PORTRAIT = 0.4, -- 竖屏封面宽度比例
-    COVER_WIDTH_RATIO_LANDSCAPE = 0.3, -- 横屏封面宽度比例
-    COVER_MAX_HEIGHT_RATIO = 1/3, -- 封面最大高度比例
-    METADATA_TOP_PADDING_RATIO = 0.15, -- 元数据顶部填充比例
-    METADATA_HORIZONTAL_SPACING_RATIO = 0.02, -- 元数据水平间距比例
-    DETAILS_HORIZONTAL_PADDING_RATIO = 0.05, -- 详情页水平填充比例
-    DESCRIPTION_HEIGHT_RATIO = 5 / 15, -- 描述高度比例
-    BUTTON_GROUP_SHRINK_MIN_WIDTH_RATIO = 0.5, -- 按钮组最小宽度比例
-    COVER_IMAGE_MARGIN = 5, -- 封面边距
-    COVER_IMAGE_PADDING = 10, -- 封面填充
-    COVER_IMAGE_BORDER_SIZE = 1, -- 封面边框
+    COVER_WIDTH_RATIO_PORTRAIT = 0.4,
+    COVER_WIDTH_RATIO_LANDSCAPE = 0.3,
+    COVER_MAX_HEIGHT_RATIO = 1/3,
+    METADATA_TOP_PADDING_RATIO = 0.15,
+    METADATA_HORIZONTAL_SPACING_RATIO = 0.02,
+    DETAILS_HORIZONTAL_PADDING_RATIO = 0.05,
+    DESCRIPTION_HEIGHT_RATIO = 5 / 15,
+    BUTTON_GROUP_SHRINK_MIN_WIDTH_RATIO = 0.5,
+    COVER_IMAGE_MARGIN = 5,
+    COVER_IMAGE_PADDING = 10,
+    COVER_IMAGE_BORDER_SIZE = 1,
     PLACEHOLDER_COVER = "resources/koreader.png",
 }
 
@@ -56,7 +56,7 @@ local BookDetails = FocusManager:extend{
 }
 
 function BookDetails:init()
-    if type(self.bookinfo) ~= "table" then return end
+    if not H.is_tbl(self.bookinfo) then return end
 
     -- The book id may not be generated yet
     if not self.bookinfo.cache_id then
@@ -133,12 +133,14 @@ end
 
 function BookDetails:getButtonGroup(other_elements_height)
     local buttons = {}
-    if type(self.callbacks) == "table" then
-        for text, callback in pairs(self.callbacks) do
+    if H.is_tbl(self.buttons) and H.is_tbl(self.buttons[1]) then
+        for _, btn in ipairs(self.buttons) do
             table.insert(buttons, {
-                text = text,
+                text = btn.text,
                 callback = function()
-                    callback(self.bookinfo)
+                    if H.is_func(btn.callback) then
+                        btn.callback(self.bookinfo)
+                    end
                     self:onClose()
                 end
             })
@@ -388,7 +390,7 @@ function BookDetails:getBookDetails()
                 return Backend:download_cover_img(book_cache_id, cover_url)
             end, function(status, cover_path, cover_name)
                 if self.loading_text_widget then
-                    if status == true and type(cover_path) == "string" and util.fileExists(cover_path) then
+                    if status == true and H.is_str(cover_path) and util.fileExists(cover_path) then
                     self:reloadCoverImage()
                     else
                         self.loading_text_widget:setText("下载失败")
@@ -490,7 +492,7 @@ end
 
 function BookDetails:reloadCoverImage()
     local image_path = Backend:get_default_cover_cache(self.bookinfo.cache_id)
-    if type(image_path) == "string" and util.fileExists(image_path) then
+    if H.is_str(image_path) and util.fileExists(image_path) then
         self:_reload()
         if self.lnk_file then Backend:emitMetadataChanged(self.lnk_file) end
     end

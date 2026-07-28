@@ -157,39 +157,46 @@ local function init_book_shelf(parent)
         local dialog = BookDetailsDialog:new{
             bookinfo = bookinfo,
             has_reload_btn = true,
-            callbacks = {
-                [pin_top_text] = function()
-                    Backend:manuallyPinToTop(item.cache_id, bookinfo.sortOrder)
-                    self:refreshItems(true)
-                end,
-                ["云端书籍链接"] = function()
-                    UIManager:nextTick(function()
-                        self.parent_ref:addBkShortcut(bookinfo, true)
-                    end)
-                    MessageBox:notice("云端书籍链接已保存至 Home 目录")
-                end,
-                ["删除"] = function()
-                    MessageBox:confirm(string.format(
-                        "是否从书架删除 <<%s>>？\r\n删除后关联记录会隐藏，重新添加可恢复",
-                        bookinfo.name), function(result)
-                        if result then
-                            Backend:closeDbManager()
-                            MessageBox:loading("删除中...", function()
-                                Backend:deleteBook(bookinfo)
-                                return Backend:refreshLibraryCache()
-                            end, function(state, response)
-                                if state == true then
-                                    Backend:HandleResponse(response, function(data)
-                                        MessageBox:notice("删除成功")
-                                        self:refreshItems(true)
-                                    end, function(err_msg)
-                                        MessageBox:error('删除失败：', err_msg)
-                                    end)
-                                end
-                            end)
-                        end
-                    end, { ok_text = "删除", cancel_text = "取消" })
-                end,
+            buttons = {
+                {
+                    text = "云端书籍链接",
+                    callback = function()
+                        UIManager:nextTick(function()
+                            self.parent_ref:addBkShortcut(bookinfo, true)
+                        end)
+                        MessageBox:notice("云端书籍链接已保存至 Home 目录")
+                    end,
+                }, {
+                    text = pin_top_text,
+                    callback = function()
+                        Backend:manuallyPinToTop(item.cache_id, bookinfo.sortOrder)
+                        self:refreshItems(true)
+                    end,
+                }, {
+                    text = "删除",
+                    callback = function()
+                        MessageBox:confirm(string.format(
+                            "是否从书架删除 <<%s>>？\r\n删除后关联记录会隐藏，重新添加可恢复",
+                            bookinfo.name), function(result)
+                            if result then
+                                Backend:closeDbManager()
+                                MessageBox:loading("删除中...", function()
+                                    Backend:deleteBook(bookinfo)
+                                    return Backend:refreshLibraryCache()
+                                end, function(state, response)
+                                    if state == true then
+                                        Backend:HandleResponse(response, function(data)
+                                            MessageBox:notice("删除成功")
+                                            self:refreshItems(true)
+                                        end, function(err_msg)
+                                            MessageBox:error('删除失败：', err_msg)
+                                        end)
+                                    end
+                                end)
+                            end
+                        end, { ok_text = "删除", cancel_text = "取消" })
+                    end,
+                },
             }
         }
         UIManager:show(dialog)

@@ -237,14 +237,17 @@ function M:showBookInfo(bookinfo)
     local BookDetailsDialog = require("Legado/BookDetailsDialog")
     local dialog = BookDetailsDialog:new{
         bookinfo = bookinfo,
-        callbacks = {
-            [button_text] = function()
-                if self.call_mode == "SEARCH" or self.call_mode == "EXPLORE" then
-                    self:addBookToLibrary(bookinfo)
-                else
-                    self:changeBookSource(bookinfo)
-                end
-            end,
+        buttons = {
+            {
+                text = button_text,
+                callback = function()
+                    if self.call_mode == "SEARCH" or self.call_mode == "EXPLORE" then
+                        self:addBookToLibrary(bookinfo)
+                    else
+                        self:changeBookSource(bookinfo)
+                    end
+                end,
+            },
         },
     }
     UIManager:show(dialog)
