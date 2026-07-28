@@ -99,11 +99,17 @@ return function()
         util.removePath(old_patches_dir)
     end
 
-    -- > 1.1.5: Clean up obsolete task.pid.lua
+    -- > 1.1.5: Clean up obsolete task.pid.lua & legacy task_pid DB table
     local old_task_pid = H.getTempDirectory() .. '/task.pid.lua'
     if util.fileExists(old_task_pid) then
         util.removeFile(old_task_pid)
     end
+    pcall(function()
+        local Backend = require("Legado/Backend")
+        if Backend and Backend.dbManager then
+            Backend.dbManager:execute("DROP TABLE IF EXISTS task_pid;")
+        end
+    end)
 
     return true
 end

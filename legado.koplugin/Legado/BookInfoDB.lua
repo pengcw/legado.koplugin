@@ -76,12 +76,11 @@ CREATE TABLE IF NOT EXISTS books (
 );
 
 
-CREATE TABLE IF NOT EXISTS task_pid (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    bookCacheId TEXT NOT NULL,
-    chapterIndex INTEGER NOT NULL,
-    stime INTEGER NOT NULL,
-    UNIQUE (bookCacheId, chapterIndex)
+CREATE TABLE IF NOT EXISTS task_locks (
+    lock_name TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL DEFAULT 'main',
+    acquire_time INTEGER DEFAULT (CAST(strftime('%s', 'now') AS INTEGER)),
+    expire_time INTEGER NOT NULL
 );
 
 
@@ -111,7 +110,7 @@ CREATE INDEX IF NOT EXISTS idx_books_bookshelfid_isenabled_sortorder ON books (b
 CREATE INDEX IF NOT EXISTS idx_chapters_chapterindex ON chapters (chapterIndex);
 CREATE INDEX IF NOT EXISTS idx_chapters_cachefilepath ON chapters (cacheFilePath);
 CREATE INDEX IF NOT EXISTS idx_chapters_bookcacheid_lastupdated ON chapters (bookCacheId, lastUpdated);
-CREATE INDEX IF NOT EXISTS idx_task_pid_main ON task_pid (bookCacheId, chapterIndex);
+CREATE INDEX IF NOT EXISTS idx_task_locks_expire ON task_locks (expire_time);
 ]]
 
 function M:new(o)
@@ -1378,47 +1377,6 @@ function M:setBooksTopStatus(bookShelfId, book_cache_id, current_sort_order, isP
             bookShelfId = bookShelfId
         })
     end
-end
-
-function M:isTaskRunning(chapter_info)
-    local min_stime = os.time() - 7200
-    local sql, params
-    if H.is_tbl(chapter_info) and chapter_info.book_cache_id and chapter_info.chapters_index then
-        sql = "SELECT 1 FROM task_pid WHERE bookCacheId = ? AND chapterIndex = ? AND stime >= ?"
-        params = { chapter_info.book_cache_id, chapter_info.chapters_index, min_stime }
-    else
-        sql = "SELECT 1 FROM task_pid WHERE stime >= ? LIMIT 1"
-        params = { min_stime }
-    end
-    
-    local ok, res = pcall(function()
-        return self:execute(sql, params)
-    end)
-    return ok and H.is_tbl(res) and #res > 0
-end
-
-function M:cleanTimeoutTaskPids()
-    local min_stime = os.time() - 7200
-    return self:execute("DELETE FROM task_pid WHERE stime < ?", { min_stime })
-end
-
-function M:setTaskPids(tasks, is_running)
-    if not H.is_tbl(tasks) then return false end
-    if not tasks[1] then tasks = {tasks} end
-    local query = is_running 
-        and "INSERT OR REPLACE INTO task_pid (bookCacheId, chapterIndex, stime) VALUES (?, ?, ?)" 
-        or "DELETE FROM task_pid WHERE bookCacheId = ? AND chapterIndex = ?"    
-    return self:transaction(function()
-        local current_time = os.time()
-        for _, task in ipairs(tasks) do
-            if H.is_tbl(task) and task.book_cache_id and task.chapters_index then
-                local params = is_running 
-                    and { task.book_cache_id, task.chapters_index, current_time }
-                    or { task.book_cache_id, task.chapters_index }
-                self:execute(query, params)
-            end
-        end
-    end, {enable_savepoint = true})()
 end
 
 function M:disableAllBookShelves()

@@ -28,14 +28,22 @@ function M:new(o)
 end
 
 function M:init()
-    local LegadoSpec, err_msg= H.require("Legado/LegadoSpec")
-    if not LegadoSpec then
+    local Spec, err_msg= H.require("Legado.spore.Spec")
+    if not Spec then
         logger.err("LegadoSpec loading failed", err_msg)
         return 
     end
-    local legado_spec = LegadoSpec[self.name]
+    local is_debug = false
+    if is_debug then
+        Spore.debug = {  
+            write = function(self, ...)  
+                logger.info(table.concat({...}))  
+            end  
+        }
+    end
+    local _spec = Spec[self.name]
     -- base_url = 'http://eu.httpbin.org/'
-    self.client = Spore.new_from_lua(legado_spec, { base_url = self.settings.server_address .. '/' })
+    self.client = Spore.new_from_lua(_spec, { base_url = self.settings.server_address .. '/' })
 
     self._need_login = H.is_func(self.client.login) and (self.settings.reader3_un or "") ~= ""
  

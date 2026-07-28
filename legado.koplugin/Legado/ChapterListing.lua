@@ -14,7 +14,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local Screen = Device.screen
 
 local Backend = require("Legado/Backend")
-local Icons = require("Legado/Icons")
+local Icons = require("Legado.res.icons")
 local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
 

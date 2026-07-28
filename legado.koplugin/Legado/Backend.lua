@@ -10,8 +10,9 @@ local util = require("util")
 local time = require("ui/time")
 
 local UIManager = require("ui/uimanager")
-local TaskQueue = require("Legado.async")
+local TaskQueue = require("Legado.task.Queue")
 local H = require("Legado/Helper")
+local TaskLock = require("Legado.task.Lock")
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -62,7 +63,7 @@ end
 
 local function pGetUrlContent(options)
     if not M.httpReq then 
-        M.httpReq = require("Legado.HttpRequest")
+        M.httpReq = require("Legado.Helper.Http")
     end
     return M.httpReq(options, true)
 end
@@ -80,7 +81,7 @@ local function pDownload_CreateCBZ(chapter, filePath, img_sources)
     local cbz_path_tmp = filePath .. '.downloading'
 
     if util.fileExists(cbz_path_tmp) then
-        if M:getBackgroundTaskInfo(chapter) ~= false then
+        if M:isTaskRunning(chapter) then
             error("Other threads downloading, cancelled")
         else
             util.removeFile(cbz_path_tmp)
@@ -200,11 +201,11 @@ function M:_isLegadoApp() return self.settings_data.data.server_type == 1 end
 function M:loadApiProvider()
     local client
     if self:_isReader3() then
-        client = require("Legado/web_reader3")
+        client = require("Legado.spore.reader3")
     elseif self:_isQingread() then
-        client = require("Legado/web_qread")
+        client = require("Legado.spore.qread")
     else
-        client = require("Legado/web_android_app")
+        client = require("Legado.spore.base")
     end
     self.apiClient = client:new{
         settings = self:getSettings()
@@ -1400,7 +1401,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     end
 
     if not H.is_tbl(chapters) then return return_error_handle('Incorrect call parameters') end
-    pcall(function() self.dbManager:cleanTimeoutTaskPids() end)
+    pcall(function() TaskLock.cleanExpired(self.dbManager) end)
 
     local is_read_ahead = true
     local chapter_down_tasks = {}
@@ -1434,6 +1435,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
 
     logger.dbg("Legado.preLoadingChapters - START with", max_threads, "threads, type:", is_comic and "comic" or "text", "timeout:", chapter_timeout .. "s")
 
+    local batch_id = "preload_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999))
     local channel_prefix = is_read_ahead and "Preload_" or "PreloadBulk_"
     local channel_name = channel_prefix .. tostring(book_cache_id)
     local ch = TaskQueue:createChannel(channel_name, max_threads, nil, true)
@@ -1449,10 +1451,12 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     local tasks_to_remove = {}
                     for _, task in ipairs(ch.queue) do
                         if task.args and task.args[1] then
-                            table.insert(tasks_to_remove, task.args[1])
+                            local removed_chapter = task.args[1]
+                            removed_chapter.is_pre_loading = nil
+                            table.insert(tasks_to_remove, removed_chapter)
                         end
                     end
-                    pcall(function() self.dbManager:setTaskPids(tasks_to_remove, false) end)
+                    pcall(function() TaskLock.setLock(self.dbManager, tasks_to_remove, false, nil, batch_id) end)
                     ch:clearTasks()
                 end
                 if has_result_progress_callback then
@@ -1490,26 +1494,26 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                 local removed_task = table.remove(ch.queue, i)
                 if removed_task and removed_task.args and removed_task.args[1] then
                     local removed_chapter = removed_task.args[1]
+                    removed_chapter.is_pre_loading = nil
                     table.insert(tasks_to_drop, removed_chapter)
                     logger.dbg('Legado.preLoadingChapters - Dropped old queued task:', removed_chapter.chapters_index)
                 end
             end
             if #tasks_to_drop > 0 then
-                pcall(function() self.dbManager:setTaskPids(tasks_to_drop, false) end)
+                pcall(function() TaskLock.setLock(self.dbManager, tasks_to_drop, false, nil, batch_id) end)
             end
         end
     end
 
     local tasks_to_insert = {}
     local db_update_success = self.dbManager:transaction(function(chapter_info, cache_file_path)
-        self.dbManager:setTaskPids(chapter_info, false)
         self.dbManager:updateCacheFilePath(chapter_info, cache_file_path)
     end, {enable_savepoint = true})
 
     for i = #chapter_down_tasks, 1, -1 do
         local dlChapter = chapter_down_tasks[i]
         
-        if self:getBackgroundTaskInfo(dlChapter) == false then
+        if not self:isTaskRunning(dlChapter) then
             dlChapter.is_pre_loading = true
             table.insert(tasks_to_insert, dlChapter)
             
@@ -1519,17 +1523,21 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                 end,
                 function(success, downloaded_chapter)
                     local current_chapter = dlChapter
+                    current_chapter.is_pre_loading = nil
+                    
                     if not (success and H.is_tbl(downloaded_chapter) and downloaded_chapter.cacheFilePath) then
-                        pcall(function() self.dbManager:setTaskPids(current_chapter, false) end)
+                        pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                         logger.err("Failed to download chapter:", tostring(downloaded_chapter))
                         return check_completion(false, string.format("章节[%s]下载失败: %s", tostring(current_chapter.title), tostring(downloaded_chapter)))
                     end
                     
                     local cache_file_path = downloaded_chapter.cacheFilePath
-                    logger.dbg('Download chapter successfully:', dlChapter.book_cache_id, dlChapter.chapters_index, cache_file_path)
+                    logger.dbg('Download chapter successfully:', current_chapter.book_cache_id, current_chapter.chapters_index, cache_file_path)
 
                     local ok, err = pcall(db_update_success, current_chapter, cache_file_path)
                     if not ok then logger.err('Error saving download to database:', tostring(err)) end
+                    
+                    pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                     
                     completed_count = completed_count + 1
                     check_completion(completed_count)
@@ -1548,7 +1556,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
         end
     end
     if #tasks_to_insert > 0 then
-        pcall(function() self.dbManager:setTaskPids(tasks_to_insert, true) end)
+        pcall(function() TaskLock.setLock(self.dbManager, tasks_to_insert, true, chapter_timeout, batch_id) end)
     end
     if ch then ch:resume() end
     return true
@@ -1701,7 +1709,7 @@ function M:closeDbManager()
 end
 
 function M:cleanBookCache(book_cache_id)
-    if self:getBackgroundTaskInfo() ~= false then
+    if self:isTaskRunning() then
         return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
     end
     local bookShelfId = self:getCurrentBookShelfId()
@@ -1720,8 +1728,8 @@ function M:cleanBookCache(book_cache_id)
 end
 
 function M:cleanAllBookCaches()
-    pcall(function() self.dbManager:cleanTimeoutTaskPids() end)
-    if self:getBackgroundTaskInfo() ~= false then
+    pcall(function() TaskLock.cleanExpired(self.dbManager) end)
+    if self:isTaskRunning() then
         return wrap_response(nil, '有后台在运行，请等待或重启 KOReader')
     end
 
@@ -1733,6 +1741,27 @@ function M:cleanAllBookCaches()
     H.getTempDirectory()
     self:saveSettings()
     return wrap_response(true)
+end
+
+function M:getDBFileSize()
+    if not (self.dbManager and self.dbManager.dbPath) then return 0 end
+    local lfs = require("lfs")
+    return lfs.attributes(self.dbManager.dbPath, "size") or 0
+end
+
+function M:vacuumDatabase()
+    local old_size = self:getDBFileSize()
+    local ok, err = pcall(function()
+        return self.dbManager:getDB():exec("VACUUM;")
+    end)
+    if not ok then
+        return wrap_response(nil, tostring(err))
+    end
+    local new_size = self:getDBFileSize()
+    return wrap_response({
+        old_size = old_size,
+        new_size = new_size
+    })
 end
 
 function M:MarkReadChapter(chapter, is_update_timestamp)
@@ -1983,11 +2012,12 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
     end
 end
 
-function M:getBackgroundTaskInfo(chapter_info)
-    local ok, is_running = pcall(function() 
-        return self.dbManager:isTaskRunning(chapter_info) 
-    end)
-    return ok and is_running or false
+function M:with_lock(target, fn, ttl, owner_id)
+    return TaskLock.withLock(self.dbManager, target, fn, ttl, owner_id)
+end
+
+function M:isTaskRunning(target)
+    return TaskLock.isLocked(self.dbManager, target)
 end
 
 function M:after_reader_chapter_show(chapter)
@@ -2073,23 +2103,22 @@ function M:after_reader_chapter_show(chapter)
                 self._save_progress_timer_cancel = nil
             end)
         end
-        if chapter.isRead ~= true then
+        if not chapter.isRead then
             if self._preload_timer_cancel then
                 self._preload_timer_cancel()
                 self._preload_timer_cancel = nil
             end
-
-            self._preload_timer_cancel = TaskQueue.delay(1.5, function()
-                local complete_count = self:getcompleteReadAheadChapters(chapter)
-                if complete_count < 40 then
-                    local preDownloadNum = settings.preload_chapters or 3
-                    if chapter.cacheExt and chapter.cacheExt == 'cbz' then
-                        preDownloadNum = 1
-                    end
-                    self:preLoadingChapters(chapter, preDownloadNum)
+            local preDownloadNum = tonumber(settings.preload_chapters)
+            if preDownloadNum == nil then preDownloadNum = 3 end
+            if preDownloadNum > 0 and self:getcompleteReadAheadChapters(chapter) < 40 then
+                if chapter.cacheExt == 'cbz' then
+                    preDownloadNum = 1
                 end
-                self._preload_timer_cancel = nil
-            end)
+                self._preload_timer_cancel = TaskQueue.delay(1.5, function()
+                    self:preLoadingChapters(chapter, preDownloadNum)
+                    self._preload_timer_cancel = nil
+                end)
+            end
         end
     end
 
@@ -2103,8 +2132,7 @@ function M:downloadChapter(chapter)
     local chapterIndex = chapter.chapters_index
     local chapterName = chapter.name
 
-    local background_task_info = self:getBackgroundTaskInfo(chapter)
-    if background_task_info ~= false then
+    if self:isTaskRunning(chapter) then
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 

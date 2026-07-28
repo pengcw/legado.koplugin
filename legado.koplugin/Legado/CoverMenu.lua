@@ -11,7 +11,7 @@ local Geom = require("ui/geometry")
 local Size = require("ui/size")
 
 local H = require("Legado/Helper")
-local TaskQueue = require("Legado.async")
+local TaskQueue = require("Legado.task.Queue")
 local Backend = require("Legado/Backend")
 
 local M = Menu:extend{

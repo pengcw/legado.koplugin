@@ -2,7 +2,7 @@ local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
-local makeRequest = require("Legado.HttpRequest")
+local makeRequest = require("Legado.Helper.Http")
 local H = require("Legado/Helper")
 local MessageBox = require("Legado/MessageBox")
 
