@@ -2,7 +2,7 @@ local logger = require("logger")
 local util = require("util")
 local socket_url = require("socket.url")
 local H = require("Legado/Helper")
-local LegadoSpec = require("Legado/web_android_app")
+local LegadoSpec = require("Legado.spore.base")
 
 local M = LegadoSpec:extend{
   name = "reader3",
@@ -46,14 +46,12 @@ function M:reader3Login()
     end
     
     if not (H.is_tbl(res) and H.is_tbl(res.body) ) then
-        return false,
-            (res.body and res.body.errorMsg) and res.body.errorMsg or "服务器返回了无效的数据结构"
+        return false, "返回了无效数据"
     end
     if not (H.is_tbl(res.body.data) and H.is_str(res.body.data.accessToken)) then
-        return false, '获取 Token 失败'
+        return false, '获取 Token 失败' .. tostring(res.body.errorMsg or "")
     end
-    logger.dbg('get legado3token:', res.body.data.accessToken)
-
+    
     self:reader3Token(res.body.data.accessToken)
     return true, res.body.data.accessToken
 end

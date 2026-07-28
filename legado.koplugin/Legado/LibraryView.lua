@@ -11,7 +11,7 @@ local ChapterListing = require("Legado/ChapterListing")
 local ReaderUI = require("apps/reader/readerui")
 local FileManager = require("apps/filemanager/filemanager")
 local DocSettings = require("docsettings")
-local Icons = require("Legado/Icons")
+local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
@@ -396,7 +396,7 @@ function LibraryView:openLastReadChapter(bookinfo)
     if H.is_num(last_read_chapter_index) then
         if last_read_chapter_index < 0 then last_read_chapter_index = 0 end
         local chapter = Backend:getChapterInfoCache(book_cache_id, last_read_chapter_index)
-        if H.is_tbl(chapter) and chapter.chapters_index then
+        if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
             chapter.call_event = "next"
             self:loadAndRenderChapter(chapter)
         else

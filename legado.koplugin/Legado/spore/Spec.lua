@@ -90,6 +90,7 @@ local reader3 = {
             method = "POST",
             payload = {"username", "password", "code", "isLogin"},
             required_params = {"username", "password", "code", "isLogin", "v"},
+            form_payload = true,
             expected_status = {200}
         },
         getUserConfig = {
@@ -247,8 +248,9 @@ local qread = {
         login = {
             path = "/login",
             method = "POST",
-            -- model = web
             required_params = {"username", "password", "model"}, 
+            payload = {"username", "password", "model"},
+            form_payload = true,
             expected_status = {200}
         },
         getBookshelfPage = {

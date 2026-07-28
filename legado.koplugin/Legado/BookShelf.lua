@@ -9,7 +9,7 @@ local time = require("ui/time")
 local MessageBox = require("Legado/MessageBox")
 local Backend = require("Legado/Backend")
 local H = require("Legado/Helper")
-local Icons = require("Legado/Icons")
+local Icons = require("Legado.res.icons")
 local PlgState = require("Legado/PlgState")
 
 local function init_book_shelf(parent)

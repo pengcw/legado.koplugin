@@ -9,7 +9,7 @@ local util = require("util")
 local Screen = Device.screen
 local T = ffiUtil.template
 
-local Icons = require("Legado/Icons")
+local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")

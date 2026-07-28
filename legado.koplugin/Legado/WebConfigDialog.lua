@@ -5,7 +5,7 @@ local util = require("util")
 local logger = require("logger")
 
 local ButtonDialog = require("ui/widget/buttondialog")
-local Icons = require("Legado/Icons")
+local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
