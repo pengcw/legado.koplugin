@@ -6,34 +6,43 @@ local Event = require("ui/event")
 local util = require("util")
 local logger = require("logger")
 local _ = require("gettext")
-local H = require("Legado/Helper") -- need to load first 
-local Backend = require("Legado/Backend") -- two
+local H = require("Legado/Helper")
+local Backend = require("Legado/Backend")
 local LibraryView = require("Legado/LibraryView")
-local verify_patched = require("patches.core").verifyPatched
+local Patcher = require("Legado.patches")
+local DocumentRegistry = require("document/documentregistry")
+local CreDocument = require("Legado/Document")
+local EventHandlers = require("Legado.EventHandlers")
+local PlgState = require("Legado/PlgState")
 
 local Legado = WidgetContainer:extend({
     name = "开源阅读插件",
     library_view = nil,
-    patches_ok = nil
 })
 
 function Legado:init()
     -- on open FileManager or ReaderUI
-    self.patches_ok = verify_patched()
-    if not H.plugin_path then
-        H.initialize("legado", self.path)
+    if not PlgState.plg_name then
+        PlgState.plg_name = "legado"
+        if self.path then
+            -- fix Android path
+            local path = self.path:gsub("/+", "/")
+            PlgState.plg_path = path
+        end
     end
     if not Backend.settings_data then
         Backend:initialize()
     end
     if self.ui then
-        LibraryView:initializeRegisterEvent(self)
+        EventHandlers:register(self)
         if self.ui.menu then
             self.ui.menu:registerToMainMenu(self)
         end
     end
     self:registerDocumentRegistryAuxProvider()
     self:onDispatcherRegisterActions()
+    CreDocument:register(DocumentRegistry)
+    Patcher.install(self)
 end
 
 function Legado:onDispatcherRegisterActions()
@@ -41,24 +50,30 @@ function Legado:onDispatcherRegisterActions()
         category = "none",
         event = "ShowLegadoLibraryView",
         title = _("Legado 书目"),
-        filemanager = true
+        filemanager = true,
     })
     Dispatcher:registerAction("return_legado_chapterlisting", {
         category = "none",
         event = "ShowLegadoToc",
-        title = _("返回 Legado 目录"),
-        reader = true
+        title = _("Legado：返回目录"),
+        reader = true,
     })
     Dispatcher:registerAction("show_legado_search", {
         category = "none",
         event = "ShowLegadoSearch",
-        title = _("以书籍信息搜索 Legado 书源"),
-        reader = true
+        title = _("Legado：以书籍信息搜索"),
+        reader = true,
+    })
+    Dispatcher:registerAction("refresh_legado_chapter", {
+        category = "none",
+        event = "RefreshLegadoChapter",
+        title = _("Legado：强制刷新章节"),
+        reader = true,
     })
 end
 
 function Legado:isFileTypeSupported(file)
-    return true
+    return self:isBrowserBook(file)
 end
 
 function Legado:registerDocumentRegistryAuxProvider()
@@ -67,48 +82,50 @@ function Legado:registerDocumentRegistryAuxProvider()
         provider = "legado",
         order = 50, -- order in OpenWith dialog
         disable_file = true,
-        disable_type = false,
+        disable_type = true,
     })
 end
 
-local is_low_version
 function Legado:addToMainMenu(menu_items)
+    if not (self.ui and menu_items) then return end
     if not self.ui.document then -- FileManager menu only
+        local is_low_version = PlgState.is_low_version
         if is_low_version == nil then
             local ko_version = require("version"):getNormalizedCurrentVersion()
             is_low_version = (ko_version and ko_version < 202411000000)
+            PlgState.is_low_version = is_low_version
         end
-        menu_items.Legado = {
-            text = is_low_version and "Legado 书目(低版环境)" or "Legado 书目",
+        local main_menu = {
+            text = "Legado 书目(Koreader 版本低，建议升级)",
             sorting_hint = "search",
-            help_text = "连接 Legado 书库" .. (is_low_version and "，Koreader 版本低，建议升级" or ""),
-            callback = function()
-                self:openLibraryView()
-            end
+            help_txt = "本插件仅支持 2024.11 以上",
+            callback = function() end,
         }
-    else
-
-        if not self.patches_ok and self.ui and self.ui.name == "readerUI" and LibraryView.instance and
-            LibraryView.instance.readerui_is_showing == true then
-            menu_items.go_back_to_legado = {
-                text = "返回 Legado...",
-                sorting_hint = "main",
-                help_text = "点击返回 Legado 书籍目录",
-                callback = function()
-                    self.ui:handleEvent(Event:new("ShowLegadoToc"))
-                end
-            }
+        if not is_low_version and self.genMainMenuItems then
+            main_menu = self:genMainMenuItems(self.ui)
         end
+        menu_items.Legado_main = main_menu
+    elseif self.ui.document.file and self.ui.name == "ReaderUI" and self.initializeFromReaderUI then
+        self:initializeFromReaderUI(self.ui.document, menu_items)
     end
 end
 
 function Legado:openLibraryView()
     self.library_view = LibraryView:fetchAndShow()
     UIManager:nextTick(function()
-        if not self.patches_ok then
-            Backend:installPatches()
-        end
+        Backend:backupDbWithPreCheck()
         Backend:checkOta()
     end)
 end
+
+function Legado:isCachePath(file_path, instance)
+    if not (file_path and instance) then instance = self.ui end
+    return Patcher.is_legado_path(file_path, instance)
+end
+
+function Legado:isBrowserBook(file_path, instance)
+    if not (file_path and instance) then instance = self.ui end
+    return Patcher.is_legado_browser_book(file_path, instance)
+end
+
 return Legado

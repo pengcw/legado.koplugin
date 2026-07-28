@@ -32,12 +32,9 @@ function M:custom(options)
     local defaultOptions = {
         text = '',
         icon = "notice-info",
-
         timeout = nil,
-
         alignment = "left",
         modal = true,
-
         _timeout_func = nil
     }
     if options then
@@ -52,15 +49,12 @@ end
 
 function M:error(message, ...)
     local args = {...}
-
     local timeout = nil
     if #args > 0 and type(args[1]) == "number" then
         timeout = table.remove(args, 1)
-
     end
-
     if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
+        message = string.format("%s %s", tostring(message), custom_concat(args, " "))
     end
     return self:custom({
         text = message,
@@ -70,19 +64,14 @@ function M:error(message, ...)
 end
 
 function M:info(message, ...)
-
     local args = {...}
-
     local timeout = nil
     if #args > 0 and type(args[1]) == "number" then
         timeout = table.remove(args, 1)
-
     end
-
     if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
+        message = string.format("%s %s", tostring(message), custom_concat(args, " "))
     end
-
     return self:custom({
         text = message,
         icon = "notice-info",
@@ -93,15 +82,13 @@ end
 
 function M:success(message, ...)
     local args = {...}
-
     local timeout = nil
     if #args > 0 and type(args[1]) == "number" then
         timeout = table.remove(args, 1)
 
     end
-
     if #args > 0 then
-        message = message .. " " .. custom_concat(args, " ")
+        message = string.format("%s %s", tostring(message), custom_concat(args, " "))
     end
     return self:custom({
         text = _(message),
@@ -111,13 +98,10 @@ function M:success(message, ...)
 end
 
 function M:confirm(message, callback, options)
-
     local dialog
     local defaultOptions = {
         text = message,
-
         timeout = nil
-
     }
 
     if options then
@@ -207,44 +191,13 @@ function M:input(message, callback, options)
 end
 
 function M:loading(message, runnable, callback, options)
-    local defaultOptions = {
-        text = "\u{231B}  " .. message,
-        dismissable = false,
-        update_interval = 0.2
-    }
 
-    if type(options) == 'table' then
-        for key, value in pairs(options) do
-            defaultOptions[key] = value
-        end
-    end
-
-    local spinner_styles = {{"|", "/", "-", "\\"}, {"\u{25D0}", "\u{25D3}", "\u{25D1}", "\u{25D2}"}}
-    math.randomseed(os.time())
-    local spinner_chars = spinner_styles[math.random(1, #spinner_styles)]
-    local spinner_index = 1
-    local updateText
-    local message_dialog
-
-    updateText = function()
-        local spinner = spinner_chars[spinner_index]
-        spinner_index = (spinner_index % #spinner_chars) + 1
-
-        defaultOptions.text = string.format("%s %s ...", message, spinner)
-
-        message_dialog = InfoMessage:new(defaultOptions)
-        UIManager:show(message_dialog)
-        UIManager:scheduleIn(defaultOptions.update_interval, updateText)
-    end
-
-    updateText()
+    local message_dialog = self:showloadingMessage(message, options)
 
     Trapper:wrap(function()
         local completed, return_values = Trapper:dismissableRunInSubprocess(runnable, message_dialog)
 
-        UIManager:unschedule(updateText)
-        UIManager:close(message_dialog)
-
+        if message_dialog.close then message_dialog:close() end
         if type(callback) == 'function' then
             if not completed then
                 callback(false, "Task was cancelled or failed to complete")
@@ -255,17 +208,110 @@ function M:loading(message, runnable, callback, options)
     end)
 end
 
-function M:notice(msg, timeout)
-    Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
+function M:notice(message, ...)
+     local args = {...}
+    local timeout
+    if #args > 0 and type(args[1]) == "number" then
+        timeout = table.remove(args, 1)
+    end
+    if #args > 0 then
+        message = string.format("%s %s", tostring(message), custom_concat(args, " "))
+    end
+    Notification:notify(message, Notification.SOURCE_ALWAYS_SHOW)
 end
 
 function M:askForRestart(msg)
-    self:confirm(msg or "", function()
-        UIManager:restartKOReader()
+    self:confirm(msg or "", function(is_ok)
+        if is_ok then UIManager:restartKOReader() end
     end, {
         ok_text = "重启",
         cancel_text = "稍后"
     })
+end
+
+function M:showloadingMessage(message, options)
+    if type(message) ~= "string" then message = "" end
+    if type(options) ~= 'table' then options = {} end
+
+    local defaultOptions = {
+        text = "\u{231B}  " .. message,
+        dismissable = options.dismissable,
+        show_icon = false,
+        update_interval = 0.2
+    }
+
+    for key, value in pairs(options) do
+        defaultOptions[key] = value
+    end
+
+    local spinner_styles = {{"|", "/", "-", "\\"}, {"\u{25D0}", "\u{25D3}", "\u{25D1}", "\u{25D2}"}}
+    math.randomseed(os.time())
+    local spinner_chars = spinner_styles[math.random(1, #spinner_styles)]
+    local updateText
+    local message_dialog
+    local current_progress
+
+    local spinner
+    local spinner_index = 1
+    local current_progress_text = ""
+    local progress_max = defaultOptions.progress_max
+    local has_progress_max = type(progress_max) == "number"
+    updateText = function()
+        if has_progress_max and current_progress then
+            current_progress_text = progress_max and string.format("[%s/%s]", current_progress, progress_max) or ""
+        else
+            spinner = spinner_chars[spinner_index]
+            spinner_index = (spinner_index % #spinner_chars) + 1
+            current_progress_text = spinner
+        end
+
+        defaultOptions.text = string.format("%s %s ...", message, current_progress_text)
+        message_dialog = InfoMessage:new(defaultOptions)
+        UIManager:show(message_dialog)
+
+        UIManager:scheduleIn(defaultOptions.update_interval, updateText)
+    end
+
+    updateText()
+    return {
+        close = function()
+            UIManager:unschedule(updateText)
+            UIManager:close(message_dialog)
+        end,
+        unschedule = function()
+            UIManager:unschedule(updateText)
+        end,
+        reportProgress = function(_, progress)
+            current_progress = progress
+        end,
+    }
+end
+
+function M:progressBar(message, options)
+    if type(options) ~= 'table' then options = {} end
+
+    local title = options.title or "progressbar"
+    local sub_title = message or ""
+    local max = type(options.max) == "number" and options.max or 1
+    local show_parent = options.parent
+
+    local progressbar_dialog
+    local ok, ProgressbarDialog = pcall(require, "ui/widget/progressbardialog")
+    if ok and ProgressbarDialog then
+        progressbar_dialog = ProgressbarDialog:new{
+            title = title,
+            subtitle = sub_title,
+            progress_max = max,
+            refresh_time_seconds = 0.4
+        }
+        -- fix bar fill color on Koreader 2025.08
+        if progressbar_dialog.progress_bar then  
+            progressbar_dialog.progress_bar.fillcolor = require("ffi/blitbuffer").COLOR_BLACK
+        end
+        progressbar_dialog:show()
+    end
+    -- compatible with old versions
+    return progressbar_dialog or self:showloadingMessage(sub_title, {progress_max = max, parent = show_parent})
 end
 
 return M

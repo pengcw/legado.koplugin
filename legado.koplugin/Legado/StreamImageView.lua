@@ -1,5 +1,6 @@
 local UIManager = require("ui/uimanager")
 local InputDialog = require("ui/widget/inputdialog")
+local Screen = require("device").screen
 local RenderImage = require("ui/renderimage")
 local ImageViewer = require("ui/widget/imageviewer")
 local logger = require("logger")
@@ -22,9 +23,15 @@ function M:init()
 end
 
 function M:fetchAndShow(options)
-    self.bookinfo = options.bookinfo
+    if not H.is_tbl(options) or not H.is_tbl(options.chapter) then
+        logger.err("StreamImageView:fetchAndShow - 无效的options或options.chapter")
+        MessageBox:notice("参数错误", "无法打开图片浏览器。")
+        return
+    end
+
     self.chapter = options.chapter
     self.on_return_callback = options.on_return_callback
+    self.bookinfo = Backend:getBookInfoCache(self.chapter.book_cache_id)
 
     local viewer = M:new{
         image = {self:loadChatperInitImage(self.chapter)},
@@ -35,6 +42,7 @@ function M:fetchAndShow(options)
         image_padding = 0
     }
     UIManager:show(viewer)
+    return viewer
 end
 
 function M:onClose()
@@ -42,6 +50,17 @@ function M:onClose()
     if H.is_func(self.on_return_callback) then
         self.on_return_callback()
     end
+end
+
+function M:onSwipe(_, ges)
+    local direction = ges.direction
+    local distance = ges.distance
+    local w = Screen:getWidth()
+    -- south close
+    if direction == "south" and ges.pos.x >= w/8 and ges.pos.x <= w*7/8 and self.scale_factor == 0 then
+        return true
+    end
+    ImageViewer.init(self, nil, ges)
 end
 
 function M:onShowNextImage()
@@ -61,6 +80,7 @@ local function downloadImage(img_src)
             return
         end
     end, function(err_msg)
+        logger.warn("图片下载失败，错误信息：", err_msg)
         return
     end)
 end
@@ -82,7 +102,7 @@ function M:get_image_bb(imgData)
 end
 
 function M:loadChatperInitImage(chapter)
-    local new_chapter_imglist = Backend:getChapterImgList(chapter)
+    local new_chapter_imglist, err_msg = Backend:getChapterImgList(chapter)
     if H.is_tbl(new_chapter_imglist) and #new_chapter_imglist > 0 then
         self.chapter_imglist = new_chapter_imglist
         local img_src = self.chapter_imglist[1]
@@ -95,8 +115,9 @@ function M:loadChatperInitImage(chapter)
 
         return self.image
     else
-        logger.err("获取章节图片列表失败 Init")
-        Backend:show_notice("内容加载失败")
+        logger.err("获取章节图片列表失败 Init", err_msg)
+        -- TODO 非漫画或者加载失败
+        MessageBox:notice("内容加载失败", err_msg)
         return RenderImage:renderImageFile("resources/koreader.png", false)
     end
 end
@@ -120,7 +141,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             current_chapter_index = current_chapter_index - 1
             logger.dbg("切换到上一章节：", current_chapter_index)
         else
-            Backend:show_notice("已经是第一章")
+            MessageBox:notice("已经是第一章")
             return
         end
         -- 处理正常翻页逻辑
@@ -162,7 +183,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
             end
         else
             logger.err("获取章节图片列表失败：", current_chapter_index)
-            Backend:show_notice("内容加载失败" .. tostring(current_chapter_index))
+            MessageBox:notice("内容加载失败" .. tostring(current_chapter_index))
             return
         end
     end
@@ -186,7 +207,7 @@ function M:getTurnPageNextImage(call_event_type, image_num)
         self:update()
     else
         logger.err("最终图片加载失败")
-        Backend:show_notice("页面加载失败，请重试")
+        MessageBox:notice("页面加载失败，请重试")
     end
 end
 
@@ -206,7 +227,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
             current_chapter_index = current_chapter_index - 1
             logger.dbg("切换到上一章节：", current_chapter_index)
         else
-            Backend:show_notice("已经是第一章")
+            MessageBox:notice("已经是第一章")
             return
         end
 
@@ -256,15 +277,14 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
 
     end, function(state, response)
 
-        if state == true then
-
-            if H.is_tbl(response['new_chapter_imglist']) and #response['new_chapter_imglist'] > 0 then
-                self.chapter_imglist = response['new_chapter_imglist']
+        if state == true and H.is_tbl(response) then
+            -- 检查并更新章节图片列表
+            if H.is_tbl(response.new_chapter_imglist) and #response.new_chapter_imglist > 0 then
+                self.chapter_imglist = response.new_chapter_imglist
             end
 
-            self.image = response['self_image']
-
-            if self.image then
+            if response.self_image then
+                self.image = response.self_image
 
                 if not self.images_keep_pan_and_zoom then
                     self._center_x_ratio = 0.5
@@ -273,12 +293,14 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
                 end
 
                 self.image = self:get_image_bb(self.image)
-                self.chapter_imglist_cur = response['chapter_imglist_cur']
+                if response.chapter_imglist_cur then
+                    self.chapter_imglist_cur = response.chapter_imglist_cur
+                end
 
                 self:update()
             else
                 logger.err("最终图片加载失败")
-                Backend:show_notice("页面加载失败，请重试")
+                MessageBox:notice("页面加载失败，请重试")
             end
         end
     end)
