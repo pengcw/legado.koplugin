@@ -4,8 +4,8 @@ local logger = require("logger")
 local dbg = require("dbg")
 local Device = require("device")
 local util = require("util")
-local md5 = require("ffi/sha2").md5
 local H = require("Legado/Helper")
+local md5 = require("Legado.Helper.Crypto").md5
 
 if not dbg.log then
     dbg.log = logger.dbg

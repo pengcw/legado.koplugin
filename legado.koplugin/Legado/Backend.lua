@@ -2,7 +2,6 @@ local logger = require("logger")
 local Device = require("device")
 local NetworkMgr = require("ui/network/manager")
 local ffiUtil = require("ffi/util")
-local md5 = require("ffi/sha2").md5
 local dbg = require("dbg")
 local LuaSettings = require("luasettings")
 local socket_url = require("socket.url")
@@ -12,6 +11,9 @@ local time = require("ui/time")
 local UIManager = require("ui/uimanager")
 local TaskQueue = require("Legado.task.Queue")
 local H = require("Legado/Helper")
+local safe_pcall = require("Legado.Helper.Error").pcall
+local safe_require = require("Legado.Helper.Require").require
+local md5 = require("Legado.Helper.Crypto").md5
 local TaskLock = require("Legado.task.Lock")
 
 -- 太旧版本缺少这个函数
@@ -214,7 +216,7 @@ end
 
 function M:initialize()
     local ok, err_msg = pcall(function()
-        local fn, file_path = H.require("Legado/_r3l_once")
+        local fn, file_path = safe_require("Legado/_r3l_once")
         return fn and fn() == true and util.removeFile(file_path)
     end)
     if not ok then
@@ -365,7 +367,7 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
     local bookUrl = bookinfo.bookUrl
 
     return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
-        local status, err = H.pcall(function()
+        local status, err = safe_pcall(function()
             return self.dbManager:upsertChapters(book_cache_id, response.data)
         end)
         if not status then
@@ -978,7 +980,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                 return chapter_writeToFile(chapter, filePath, err['data'])
             else
                 filePath = filePath .. '.cbz'
-                local status, err = H.pcall(pDownload_CreateCBZ, chapter, filePath, img_sources)
+                local status, err = safe_pcall(pDownload_CreateCBZ, chapter, filePath, img_sources)
 
                 if not status then
                     error('CreateCBZ err: ' .. tostring(err))
@@ -2136,7 +2138,7 @@ function M:downloadChapter(chapter)
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 
-    local status, err = H.pcall(function()
+    local status, err = safe_pcall(function()
         return self:_pDownloadChapter(chapter)
     end)
     if not status then

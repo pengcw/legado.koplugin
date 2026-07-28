@@ -4,6 +4,7 @@ local logger = require("logger")
 local util = require("util")
 local makeRequest = require("Legado.Helper.Http")
 local H = require("Legado/Helper")
+local safe_require = require("Legado.Helper.Require").require
 local MessageBox = require("Legado/MessageBox")
 
 local M = {}
@@ -11,7 +12,7 @@ local M = {}
 local RELEASE_API = "https://api.github.com/repos/pengcw/legado.koplugin/releases/latest"
 
 function M:getMetaInfo()
-    local info, err_msg= H.require("_meta")
+    local info, err_msg= safe_require("_meta")
     local plg_path = H.getPluginDirectory()
     if not info then
         logger.warn(string.format("getMetaInfo load %s/_meta.lua err", plg_path))
