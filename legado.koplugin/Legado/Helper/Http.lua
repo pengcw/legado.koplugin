@@ -12,7 +12,8 @@ local DEFAULT_BLOCK_TIMEOUT = 60
 local DEFAULT_TOTAL_TIMEOUT = -1   
 
 local default_headers = {
-    ["user-agent"] = "Mozilla/5.0 (X11; U; Linux armv7l like Android; en-us) AppleWebKit/531.2+ (KHTML, like Gecko) Version/5.0 Safari/533.2+ Kindle/3.0+"
+    -- Use a modern UA to avoid CDN/WAF blocking outdated or niche devices
+    ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 }
 
 local function get_extension_from_mimetype(content_type)
@@ -46,14 +47,14 @@ local function get_image_format_head8(image_data)
         return "jpg"
     elseif header:sub(1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then
         return "png"
-    elseif header:sub(1, 4) == "\x47\x49\x46\x38" then
-        return "gif"
-    elseif header:sub(1, 2) == "\x42\x4D" then
-        return "bmp"
     elseif header:sub(1, 4) == "\x52\x49\x46\x46" then
         return "webp"
-    else
-        return "bin"
+    elseif header:sub(1, 2) == "\x42\x4D" then
+        return "bmp"
+    elseif header:sub(1, 4) == "\x47\x49\x46\x38" then
+        return "gif"
+    elseif header:sub(1, 4) == "\x49\x49\x2A\x00" or header:sub(1, 4) == "\x4D\x4D\x00\x2A" then
+        return "tiff"
     end
 end
 
@@ -69,6 +70,7 @@ local function pGetUrlContent(options, is_create)
     local timeout = options.timeout or 10
     local maxtime = options.maxtime or options.timeout + 20
     local file_fp = options.file
+    local is_pic = options.is_pic
 
     local parsed = socket_url.parse(url)
     if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
@@ -76,6 +78,12 @@ local function pGetUrlContent(options, is_create)
     end
 
     local sink = {}
+    -- Only use the custom TCP creator for plain HTTP; leave HTTPS to default so TLS/SNI works properly
+    local use_custom_create = is_create and parsed and parsed.scheme == "http"
+    if is_pic then
+         -- Image requests prioritize
+        default_headers["Accept"] = "image/png, image/jpeg, image/webp, image/bmp;q=0.9, image/tiff;q=0.8, image/*;q=0.7"
+    end
     local request = {
         url = url,
         method = options.method or "GET",
@@ -83,8 +91,9 @@ local function pGetUrlContent(options, is_create)
         sink = not file_fp and (maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink)) or
             (maxtime and socketutil.file_sink(file_fp) or ltn12.sink.file(file_fp)),
         source = options.source,
-        -- Strictly customized TCP GitHub API error
-        create = is_create and socketutil.tcp,
+        redirect = options.redirect,
+        -- Strictly customized TCP only for HTTP; HTTPS relies on underlying SSL stack for SNI/TLS
+        create = use_custom_create and socketutil.tcp or nil,
     }
 
     socketutil:set_timeout(timeout, maxtime)
@@ -122,7 +131,7 @@ local function pGetUrlContent(options, is_create)
     local contentType = headers["content-type"]
     if contentType then
         extension = get_extension_from_mimetype(contentType)
-        if not extension and contentType:match("^image/") then
+        if not extension and (contentType:match("^image/") or is_pic) then
             extension = get_image_format_head8(content)
         end
     end

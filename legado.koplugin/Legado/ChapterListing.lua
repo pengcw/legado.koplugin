@@ -3,6 +3,7 @@ local Font = require("ui/font")
 local util = require("util")
 local logger = require("logger")
 local dbg = require("dbg")
+local Blitbuffer = require("ffi/blitbuffer")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 local NetworkMgr = require("ui/network/manager")
@@ -13,9 +14,8 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local Screen = Device.screen
 
 local Backend = require("Legado/Backend")
-local Icons = require("Legado/Icons")
+local Icons = require("Legado.res.icons")
 local MessageBox = require("Legado/MessageBox")
-local StreamImageView = require("Legado/StreamImageView")
 local H = require("Legado/Helper")
 
 if not dbg.log then
@@ -24,75 +24,80 @@ end
 
 local ChapterListing = Menu:extend{
     name = "chapter_listing",
-    is_enable_shortcut = false,
-    is_popout = false,
     title = "catalogue",
     align_baselines = true,
     is_borderless = true,
-    linesize = 0,
+    line_color = Blitbuffer.COLOR_WHITE,
+    -- can't be 0 → no key move indicator
+    -- linesize = 0,
+    covers_fullscreen = true,
     single_line = true,
     toc_items_per_page_default = 14,
+    title_bar_left_icon = "appbar.menu",
+    title_bar_fm_style = true,
 
     bookinfo = nil,
-    chapter_sorting_mode = nil,
     all_chapters_count = nil,
     on_return_callback = nil,
     on_show_chapter_callback = nil,
-    ui_refresh_time = nil
+    _ui_refresh_time = nil,
+    refresh_menu_key = nil,
 }
 
 function ChapterListing:init()
-    self.title_bar_left_icon = "appbar.menu"
+    self.width, self.height = Screen:getWidth(), Screen:getHeight()
     self.onLeftButtonTap = function()
         self:openMenu()
     end
 
-    self.width, self.height = Screen:getWidth(), Screen:getHeight()
-
     Menu.init(self)
-
-    self.paths = {{
-        callback = self.on_return_callback
-    }}
-
-    self.on_return_callback = nil
-
-    if Device:hasKeys({"Home"}) or Device:hasDPad() then
-        self.key_events.Close = {{Device.input.group.Back}}
-        self.key_events.RefreshChapters = {{"Home"}}
-        self.key_events.Right = {{"Right"}}
+    
+    if Device:hasKeys() then
+        self.refresh_menu_key = "Home"
+        if Device:hasKeyboard() then
+            self.refresh_menu_key = "F5"
+        end
+        self.key_events.RefreshChapters = {{ self.refresh_menu_key }}
     end
 
-    self.ui_refresh_time = os.time()
-    self:refreshItems()
+    if Device:hasDPad() then
+        self.key_events.FocusRight = nil
+        self.key_events.Right = {{ "Right" }}
+    end
+
+    self:refreshItems(nil, true)
 end
 
-function ChapterListing:refreshItems(no_recalculate_dimen)
+function ChapterListing:refreshItems(no_recalculate_dimen, go_last_read)
 
     local book_cache_id = self.bookinfo.cache_id
-    local chapter_cache_data = Backend:getBookChapterCache(book_cache_id)
+    local chapter_cache_data = Backend:getAllChaptersByUI(book_cache_id)
 
-    if chapter_cache_data and #chapter_cache_data > 0 then
-
+    if H.is_tbl(chapter_cache_data) and #chapter_cache_data > 0 then
         self.item_table = self:generateItemTableFromChapters(chapter_cache_data)
         self.multilines_show_more_text = false
         self.items_per_page = nil
-
+        self.single_line = true
     else
         self.item_table = self:generateEmptyViewItemTable()
         self.multilines_show_more_text = true
         self.items_per_page = 1
+        self.single_line = false
     end
     Menu.updateItems(self, nil, no_recalculate_dimen)
-    self:gotoLastReadChapter()
+    if go_last_read then
+        self:gotoLastReadChapter()
+    end
 end
 
 function ChapterListing:generateEmptyViewItemTable()
+    local hint = (self.refresh_menu_key and not Device:isTouchDevice())
+    and string.format("press the %s button", self.refresh_menu_key)
+     or "swiping down"
     return {{
-        text = string.format("No chapters found in library. Try%s swiping down to refresh.",
-            (Device:hasKeys({"Home"}) and ' Press the home button or ' or '')),
+        text = string.format("Chapter list is empty. Try %s to refresh.", hint),
         dim = true,
-        select_enabled = false
+        select_enabled = false,
     }}
 end
 
@@ -123,11 +128,10 @@ end
 
 function ChapterListing:onReturn()
     Menu.onClose(self)
-    if H.is_tbl(self.paths) then
-        local path = table.remove(self.paths)
-        if H.is_tbl(path) and H.is_func(path.callback) then
-            pcall(path.callback)
-        end
+    if H.is_func(self.on_return_callback) then
+        UIManager:nextTick(function()
+            self.on_return_callback()
+        end)
     end
 end
 
@@ -136,14 +140,25 @@ function ChapterListing:onCloseWidget()
     Menu.onCloseWidget(self)
 end
 
-function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, hide)
+function ChapterListing:updateReturnCallback(callback)
+    -- Skip changes when callback is nil
+    if H.is_func(callback) then
+        self.on_return_callback = callback
+    end
+end
+
+function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, visible)
     accept_cached_results = accept_cached_results or false
 
-    if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.cache_id) then
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
         MessageBox:error('书籍信息出错')
         return
     end
 
+    if not H.is_func(onReturnCallBack) then
+        onReturnCallBack = function() end
+    end
+    
     local settings = Backend:getSettings()
     if not H.is_tbl(settings) then
         MessageBox:error('获取设置出错')
@@ -154,20 +169,26 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
     local items_font_size = G_reader_settings:readSetting("toc_items_font_size") or Menu.getItemFontSize(items_per_page)
     local items_with_dots = G_reader_settings:nilOrTrue("toc_items_with_dots")
 
+    local is_stream_image_mode = false
+    if bookinfo.cacheExt == 'cbz' then
+        local extras_settings = Backend:getBookExtras(bookinfo.cache_id)
+        if H.is_tbl(extras_settings) and H.is_tbl(extras_settings.data) then
+            is_stream_image_mode = extras_settings.data.stream_image_view == true
+        end
+    end
+
     local chapter_listing = ChapterListing:new{
         bookinfo = bookinfo,
-        chapter_sorting_mode = settings.chapter_sorting_mode,
         on_return_callback = onReturnCallBack,
         on_show_chapter_callback = showChapterCallBack,
 
-        subtitle = "目录",
+        title = "目录",
         with_dots = items_with_dots,
         items_per_page = items_per_page,
         items_font_size = items_font_size,
-        title = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, (bookinfo.cacheExt == 'cbz' and
-            Backend:getSettings().stream_image_view == true) and "[流式]" or "")
+        subtitle = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, is_stream_image_mode and "[流式]" or "")
     }
-    if not hide then
+    if visible == true then
         UIManager:show(chapter_listing)
     end
     return chapter_listing
@@ -181,33 +202,20 @@ function ChapterListing:gotoLastReadChapter()
 end
 
 function ChapterListing:onMenuChoice(item)
-    local book_cache_id = self.bookinfo.cache_id
-    local chapters_index = item.chapters_index
     if item.chapters_index == nil then
         return true
     end
+    local book_cache_id = self.bookinfo.cache_id
+    local chapters_index = item.chapters_index
+
     local chapter = Backend:getChapterInfoCache(book_cache_id, chapters_index)
-    if chapter.cacheExt == 'cbz' and Backend:getSettings().stream_image_view == true then
-        ChapterListing.onReturnCallback = function()
-            self:gotoLastReadChapter()
-        end
-        NetworkMgr:runWhenOnline(function()
-            UIManager:nextTick(function()
-                StreamImageView:fetchAndShow({
-                    bookinfo = self.bookinfo,
-                    chapter = chapter,
-                    on_return_callback = ChapterListing.onReturnCallback
-                })
-            end)
-        end)
-        Backend:show_notice("流式漫画开启")
-    else
-        self:showReaderUI(chapter)
-    end
+    if self.onShowingReader then self:onShowingReader() end
+    self:showReaderUI(chapter)
+    return true
 end
 
 function ChapterListing:onMenuHold(item)
-
+    
     local book_cache_id = self.bookinfo.cache_id
     local chapters_index = item.chapters_index
     if item.chapters_index == nil then
@@ -234,7 +242,7 @@ function ChapterListing:onMenuHold(item)
                 MessageBox:error('标记失败 ', err_msg)
             end)
         end
-    }}, {{
+    }, {
         text = table.concat({Icons.FA_DOWNLOAD, (isDownLoaded and ' 刷新' or ' 下载'), '章节'}),
         callback = function()
             UIManager:close(dialog)
@@ -243,14 +251,12 @@ function ChapterListing:onMenuHold(item)
                 cacheFilePath = cacheFilePath,
                 book_cache_id = chapter.book_cache_id,
                 isDownLoaded = isDownLoaded,
-
                 bookUrl = chapter.bookUrl,
-
-                title = chapter
+                title = chapter.title
             }), function(data)
                 self:refreshItems(true)
                 if isDownLoaded == true then
-                    Backend:show_notice('删除成功')
+                    MessageBox:notice('删除成功')
                 else
                     MessageBox:success('后台下载章节任务已添加，请稍后下拉刷新')
                 end
@@ -259,13 +265,13 @@ function ChapterListing:onMenuHold(item)
             end)
         end
     }}, {{
-        text = table.concat({Icons.FA_THUMB_TACK, " 上传进度"}),
+        text = table.concat({Icons.FA_CLOUD, " 上传进度"}),
         callback = function()
             UIManager:close(dialog)
             self:syncProgressShow(chapter)
         end
-    }}, {{
-        text = table.concat({Icons.FA_INFO_CIRCLE, " 缓存章节"}),
+    }, {
+        text = table.concat({Icons.FA_BOOK, " 向后缓存"}),
         callback = function()
             UIManager:close(dialog)
             if not self.all_chapters_count then
@@ -279,33 +285,21 @@ function ChapterListing:onMenuHold(item)
                 value_hold_step = 5,
                 ok_text = "下载",
                 title_text = "请选择需下载的章数：",
-                info_text = "( 默认跳过已读和已下载, 点击中间数字可直接输入)",
-                extra_text = Icons.FA_DOWNLOAD .. " 缓存全部",
+                info_text = "(点击中间数字可直接输入)",
+                extra_text = Icons.FA_DOWNLOAD .. " 下载本章后全部",
                 callback = function(autoturn_spin)
-
-                    local status, err = pcall(function()
-
-                        self:ChapterDownManager(tonumber(chapters_index), 'next', autoturn_spin.value)
+                    require("Legado/ExportDialog"):new({
+                        bookinfo = self.bookinfo
+                    }):cacheSelectedChapters(tonumber(chapters_index), autoturn_spin.value, function(success)
+                        self:refreshItems(true)
                     end)
-                    if not status and err then
-                        dbg.log('向后下载出错：', H.errorHandler(err))
-                    end
                 end,
                 extra_callback = function()
-                    MessageBox:confirm("请确认缓存全部章节 (短时间大量下载有可能触发反爬)",
-                        function(result)
-                            if result then
-                                local status, err = pcall(function()
-                                    self:ChapterDownManager(0, 'next')
-                                end)
-                                if not status then
-                                    dbg.log('缓存全部章节出错：', tostring(err))
-                                end
-                            end
-                        end, {
-                            ok_text = "开始",
-                            cancel_text = "取消"
-                        })
+                    require("Legado/ExportDialog"):new({
+                        bookinfo = self.bookinfo
+                    }):cacheSelectedChapters(tonumber(chapters_index), nil, function(success)
+                        self:refreshItems(true)
+                    end)
                 end
             }
 
@@ -326,9 +320,13 @@ end
 function ChapterListing:onSwipe(arg, ges_ev)
     local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
     if direction == "south" then
-        NetworkMgr:runWhenOnline(function()
-            self:onRefreshChapters()
-        end)
+        if NetworkMgr:isConnected() then
+            UIManager:nextTick(function()
+                self:onRefreshChapters()
+            end)
+        else
+            NetworkMgr:runWhenConnected(function() self:onRefreshChapters() end)  
+        end
         return
     end
     Menu.onSwipe(self, arg, ges_ev)
@@ -339,19 +337,21 @@ function ChapterListing:onRefreshChapters()
         MessageBox:loading("正在刷新章节数据", function()
             return Backend:refreshChaptersCache({
                 cache_id = self.bookinfo.cache_id,
-                bookUrl = self.bookinfo.bookUrl
-            }, self.ui_refresh_time)
+                bookUrl = self.bookinfo.bookUrl,
+                origin = self.bookinfo.origin,
+                name = self.bookinfo.name,
+            }, self._ui_refresh_time)
         end, function(state, response)
             if state == true then
                 Backend:HandleResponse(response, function(data)
-                    Backend:show_notice('同步成功')
-                    self:refreshItems()
+                    MessageBox:notice('同步成功')
+                    self:refreshItems(nil, true)
                     self.all_chapters_count = nil
-                    self.ui_refresh_time = os.time()
+                    self._ui_refresh_time = time.now()
                 end, function(err_msg)
-                    Backend:show_notice(err_msg or '同步失败')
+                    MessageBox:notice(err_msg or '同步失败')
                     if err_msg ~= '处理中' then
-                        Backend:show_notice("请检查并刷新书架")
+                        MessageBox:notice("请检查并刷新书架")
                     end
                 end)
             end
@@ -364,89 +364,17 @@ function ChapterListing:showReaderUI(chapter)
     end
 end
 
-function ChapterListing:ChapterDownManager(begin_chapters_index, call_event, down_chapters_count, dismiss_callback,
-    cancel_callback)
-
-    if not H.is_num(begin_chapters_index) then
-        MessageBox:error('下载参数错误')
-        return
-    end
-
-    local book_cache_id = self.bookinfo.cache_id
-
-    call_event = call_event and call_event or 'next'
-
-    local begin_chapter = Backend:getChapterInfoCache(book_cache_id, begin_chapters_index)
-    begin_chapter.call_event = call_event
-
-    if not H.is_tbl(begin_chapter) or begin_chapter.chapters_index == nil then
-        MessageBox:error('没有可下载章节')
-        return
-    end
-
-    if down_chapters_count == nil then
-        down_chapters_count = Backend:getChapterCount(book_cache_id)
-    end
-
-    down_chapters_count = tonumber(down_chapters_count)
-    local status, err = Backend:preLoadingChapters(begin_chapter, down_chapters_count)
-
-    if not status then
-        MessageBox:error('后台下载任务提交出错', tostring(err))
-        return
-    end
-
-    local chapter_down_tasks = err
-
-    dbg.v('chapter_down_tasks:', chapter_down_tasks)
-
-    if H.is_tbl(chapter_down_tasks) and chapter_down_tasks[1] ~= nil and chapter_down_tasks[1].book_cache_id ~= nil then
-
-        local job = {
-            poll = function()
-
-                return Backend:check_the_background_download_job(chapter_down_tasks)
-            end,
-            requestCancellation = function()
-
-                Backend:quit_the_background_download_job()
-                if H.is_func(cancel_callback) then
-                    cancel_callback()
-                end
-
-            end
-        }
-
-        local dialog = require("Legado/DownloadUnreadChaptersJobDialog"):new{
-            show_parent = self,
-            job = job,
-            job_inspection_interval = 0.8,
-            dismiss_callback = function()
-                Backend:show_notice('下载结束')
-                self:refreshItems(true)
-                if H.is_func(dismiss_callback) then
-                    dismiss_callback()
-                end
-            end
-        }
-        dialog:show()
-    else
-        MessageBox:error('下载任务返回参数出错')
-    end
-
-end
-
 function ChapterListing:syncProgressShow(chapter)
     Backend:closeDbManager()
     MessageBox:loading("同步中 ", function()
         if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
             local response = Backend:saveBookProgress(chapter)
             if not (type(response) == 'table' and response.type == 'SUCCESS') then
-                local message = (type(response) == 'table' and response.message) or
+                local message = type(response) == 'table' and response.message or
                                     "进度上传失败，请稍后重试"
                 return {
                     type = 'ERROR',
-                    message = message
+                    message = message or ""
                 }
             end
         end
@@ -465,86 +393,132 @@ function ChapterListing:syncProgressShow(chapter)
                         chapters_index = bookinfo.durChapterIndex,
                         isRead = true
                     }, true)
-                    self:refreshItems(true)
-                    Backend:show_notice('同步完成')
+                    self:refreshItems(true, true)
+                    MessageBox:notice('同步完成')
                     self:switchItemTable(nil, self.item_table, tonumber(bookinfo.durChapterIndex))
-                    self.ui_refresh_time = os.time()
+                    self._ui_refresh_time = time.now()
                 end
             end, function(err_msg)
-                MessageBox:error('同步失败：' .. tostring(err_msg))
+                MessageBox:error('同步失败：', tostring(err_msg))
             end)
         end
     end)
 end
 
 function ChapterListing:openMenu()
-
+    
     local dialog
-
-    local buttons = {{{
-        text = Icons.FA_REFRESH .. " 自动换源",
+    local buttons = {{},{{
+        text = Icons.FA_GLOBE .. " 切换书源",
         callback = function()
-            UIManager:close(dialog)
-            NetworkMgr:runWhenOnline(function()
-                require("Legado/BookSourceResults"):autoChangeSource(self.bookinfo, function()
-                    self:onReturn()
+            if NetworkMgr:isConnected() then
+                UIManager:close(dialog)
+                -- autoChangeSource
+                UIManager:nextTick(function()
+                    require("Legado/BookSourceResults"):changeSourceDialog(self.bookinfo, function()
+                        self:onReturn()
+                    end)
                 end)
-            end)
-        end
+            else
+                MessageBox:notice("操作失败，请检查网络")
+            end
+        end,
+        align = "left",
     }}, {{
         text = Icons.FA_EXCHANGE .. " 排序反转",
         callback = function()
             UIManager:close(dialog)
-            local settings = Backend:getSettings()
-            if settings.chapter_sorting_mode == 'chapter_ascending' then
-                settings.chapter_sorting_mode = 'chapter_descending'
-            else
-                settings.chapter_sorting_mode = 'chapter_ascending'
-            end
-            Backend:HandleResponse(Backend:saveSettings(settings), function(data)
-                self:refreshItems(true)
-            end, function(err_msg)
-                MessageBox:error('设置失败:', err_msg)
-            end)
-        end
+            self:toggleSortMode()
+        end,
+        align = "left",
     }}, {{
-        text = table.concat({Icons.FA_THUMB_TACK, " 拉取网络进度"}),
+        text = table.concat({Icons.FA_THUMB_TACK, " 拉取进度"}),
         callback = function()
             if self.multilines_show_more_text == true then
-                Backend:show_notice('章节列表为空')
+                MessageBox:notice('章节列表为空')
                 return
             end
             UIManager:close(dialog)
             self:syncProgressShow()
-        end
+        end,
+        align = "left",
     }}, {{
-        text = Icons.FA_TRASH .. " 清空本书缓存",
+        text = Icons.FA_DOWNLOAD .. " 章节缓存",
         callback = function()
             UIManager:close(dialog)
-            Backend:closeDbManager()
-            MessageBox:loading("清理中 ", function()
-                return Backend:cleanBookCache(self.bookinfo.cache_id)
-            end, function(state, response)
-                if state == true then
-                    Backend:HandleResponse(response, function(data)
-                        Backend:show_notice("已清理，刷新重新可添加")
-                        self:onReturn()
+            MessageBox:confirm(
+                    string.format("《%s》: \n\n (部分书源存在访问频率限制，如遇章节缺失或内容不完整，可尝试: \n  长按章节分章下载、调低并发下载数)", self.bookinfo.name),
+                    function(result)
+                        if result then
+                            require("Legado/ExportDialog"):new({
+                                bookinfo = self.bookinfo
+                            }):cacheAllChapters(function(success)
+                                self:refreshItems(true)
+                            end)
+                        end
+                    end,
+                    {
+                        ok_text = "缓存全书",
+                        cancel_text = "取消",
+                        other_buttons_first = true,
+                        other_buttons = {{{
+                            text = "导出书籍",
+                            callback = function()
+                                require("Legado/ExportDialog"):new({ bookinfo = self.bookinfo }):exportBook()
+                            end,
+                        }, {
+                            text = "清除缓存",
+                            callback = function()
+                                MessageBox:confirm(
+                                    "请确认清除本书缓存：\n",
+                                    function(result)
+                                        if not result then return end
+                                        Backend:closeDbManager()
+                                        MessageBox:loading("清理中 ", function()
+                                            return Backend:cleanBookCache(self.bookinfo.cache_id)
+                                        end, function(state, response)
+                                            if state == true then
+                                                Backend:HandleResponse(response, function(data)
+                                                    MessageBox:success("已清理，刷新重新可添加")
+                                                    self:onReturn()
+                                                end, function(err_msg)
+                                                    MessageBox:error('请稍后重试：', err_msg)
+                                                end)
+                                            end
+                                        end)
+                                end)
+                            end,
+                        }}},
+                    }
+                )
+        end,
+        align = "left",
+    }},}
+    
+    local stream_mode_item =self:getStreamModeItem(function()
+        if dialog then UIManager:close(dialog) end
+    end)
+    if H.is_tbl(stream_mode_item) then
+        table.insert(buttons, stream_mode_item)
+    end
 
-                    end, function(err_msg)
-                        MessageBox:error('操作失败：', err_msg)
-                    end)
+    if not Device:isTouchDevice() then
+        table.insert(buttons, {{
+            text = Icons.FA_REFRESH .. ' ' .. "刷新目录",
+            callback = function()
+                UIManager:close(dialog)
+                self:onRefreshChapters()
+            end,
+            align = "left",
+        }})
+    end
 
-                end
-
-            end)
-
-        end
-    }}, {{
+    table.insert(buttons, {{
         text = Icons.FA_SHARE .. " 跳转到指定章节",
         callback = function()
             UIManager:close(dialog)
             if self.multilines_show_more_text == true then
-                Backend:show_notice('章节列表为空')
+                MessageBox:notice('章节列表为空')
                 return
             end
             if Device.isAndroid() then
@@ -555,44 +529,98 @@ function ChapterListing:openMenu()
                 UIManager:show(SpinWidget:new{
                     value = 1,
                     value_min = 1,
-                    value_max = tonumber(all_chapters_count) or 10,
+                    value_max = tonumber(self.all_chapters_count) or 10,
                     value_step = 1,
                     value_hold_step = 5,
                     ok_text = "跳转",
                     title_text = "请选择需要跳转的章节：",
                     info_text = "( 点击中间可直接输入数字 )",
                     callback = function(autoturn_spin)
-                        autoturn_spin.value = tonumber(autoturn_spin.value)
-                        self:onGotoPage(self:getPageNumber(autoturn_spin.value))
+                        local autoturn_spin_value = autoturn_spin and tonumber(autoturn_spin.value)
+                        self:onGotoPage(self:getPageNumber(autoturn_spin_value))
                     end
                 })
             else
                 self:onShowGotoDialog()
             end
 
-        end
-    }}}
+        end,
+        align = "left",
+    }})
 
-    if not Device:isTouchDevice() then
-        table.insert(buttons, 3, {{
-            text = Icons.FA_EXCLAMATION_CIRCLE .. ' ' .. "刷新目录",
-            callback = function()
-                UIManager:close(dialog)
-                self:onRefreshChapters()
-            end
-        }})
-    end
     local book_cache_id = self.bookinfo.cache_id
     local lastUpdated = Backend:getChapterLastUpdateTime(book_cache_id)
     lastUpdated = tonumber(lastUpdated)
+
+    local dimen
+    if self.title_bar and self.title_bar.left_button and self.title_bar.left_button.image then
+        dimen = self.title_bar.left_button.image.dimen
+    end
     dialog = ButtonDialog:new{
-        title = "chapters_cache_" .. os.date("%m-%d %H:%M:%S", lastUpdated),
-        title_align = "center",
-        title_face = Font:getFace("x_smalltfont"),
+        title = os.date("%m-%d %H:%M", lastUpdated),
+        title_align = "left",
+        -- title_face = Font:getFace("x_smalltfont"),
         info_face = Font:getFace("tfont"),
-        buttons = buttons
+        buttons = buttons,
+        shrink_unneeded_width = true,
+        anchor = dimen and function()
+            return dimen
+        end or nil,
     }
 
     UIManager:show(dialog)
 end
+
+function ChapterListing:toggleSortMode()
+    local book_cache_id = self.bookinfo.cache_id  
+    local current_sorting_mode = Backend:chapterSortingMode(book_cache_id)
+    local new_sorting_mode = (current_sorting_mode == 'ASC') and 'DESC' or 'ASC'
+    
+    Backend:HandleResponse(Backend:chapterSortingMode(book_cache_id, new_sorting_mode),
+        function(data) self:refreshItems(true) end,
+        function(err_msg)
+            MessageBox:error('切换排序模式失败: ', err_msg)
+        end
+    )
+end
+
+function ChapterListing:getStreamModeItem(close_dialog, callback)
+    local book_cache_id = self.bookinfo.cache_id
+    local is_comic = Backend:isBookTypeComic(book_cache_id)
+    if is_comic then
+        local extras_settings = Backend:getBookExtras(book_cache_id)
+        if H.is_tbl(extras_settings.data) then
+            local stream_image_view = extras_settings.data.stream_image_view
+            return {{
+                text = string.format("%s 流式漫画模式", (stream_image_view and Icons.FA_CHECK_SQUARE or Icons.FA_SQUARE_O)),
+                callback = function()
+                    if H.is_func(close_dialog) then close_dialog() end
+                    UIManager:nextTick(function()
+                        self:switchStreamMode(extras_settings, callback)
+                    end)
+                end,
+                align = "left",
+            }}
+        end
+    end
+end
+
+function ChapterListing:switchStreamMode(settings, callback)
+    local extras_settings = H.is_tbl(settings) and settings or Backend:getBookExtras(self.bookinfo.cache_id)
+    local stream_image_view = extras_settings.data.stream_image_view
+    MessageBox:confirm(string.format(
+        "当前模式: %s \r\n \r\n缓存模式: 边看边下载。\n缺点：占空间。\n优点：预加载后相对流畅。\r\n \r\n流式：不下载到磁盘。\n缺点：对网络要求较高且画质缺少优化，需要下载任一章节后才能开启（建议服务端开启图片代理）。\n优点：不占空间。",
+        (stream_image_view and '[流式]' or '[缓存]')), function(result)
+        if result then
+            stream_image_view = not stream_image_view or nil
+            extras_settings:saveSetting("stream_image_view", stream_image_view):flush()
+            MessageBox:notice("设置成功")
+            if H.is_func(callback) then callback() end
+        end
+    end, {
+        ok_text = "切换",
+        cancel_text = "取消"
+    })
+end
+
 return ChapterListing

@@ -1,0 +1,529 @@
+local time = require("ui/time")
+local logger = require("logger")
+local Screen = require("device").screen
+local util = require("util")
+local LuaSettings = require("luasettings")
+local socket_url = require("socket.url")
+local socketutil = require("socketutil")
+local Spore = require("Spore")
+local H = require("Legado/Helper")
+local safe_require = require("Legado.Helper.Require").require
+local errHandler = require("Legado.Helper.Error")
+
+local M = {
+    name = "legado_app",
+    client = nil,
+    settings = nil,
+    _need_login = false,
+    tokenManager = nil,
+}
+
+local AuthToken = {}
+function AuthToken:new(key)
+    local o = { key = key or "r3k", _memory_token = nil }
+    setmetatable(o, self)
+    self.__index = self
+    return o
+end
+
+function AuthToken:_getConfig()
+    return LuaSettings:open(H.getTempDirectory() .. '/cache.lua')
+end
+
+function AuthToken:get()
+    if self._memory_token then return self._memory_token end
+    local token = self:_getConfig():readSetting(self.key)
+    if H.is_str(token) and token ~= "" then
+        self._memory_token = token
+    end
+    return self._memory_token
+end
+
+function AuthToken:set(token)
+    if not H.is_str(token) or token == "" then
+        return self:clear()
+    end
+    self._memory_token = token
+    self:_getConfig():saveSetting(self.key, token):flush()
+end
+
+function AuthToken:clear()
+    self._memory_token = nil
+    self:_getConfig():delSetting(self.key):flush()
+end
+
+function M:extend(subclass_prototype)
+    local o = subclass_prototype or {}
+    setmetatable(o, self)
+    self.__index = self
+    return o
+end
+
+function M:new(o)
+    o = self:extend(o)
+    if o.init then o:init() end
+    return o
+end
+
+function M:init()
+    local spec_name = (self.name == "legado_app" or self.name == "base") and "base_spec" or (self.name .. "_spec")
+    local _spec, err_msg = safe_require("Legado.spore." .. spec_name)
+    if not _spec then
+        logger.err("LegadoSpec loading failed", err_msg)
+        return 
+    end
+    local is_debug = false
+    if is_debug then
+        Spore.debug = {  
+            write = function(self, ...)  
+                logger.info(table.concat({...}))  
+            end  
+        }
+    end
+    self.client = Spore.new_from_lua(_spec, { base_url = self.settings.server_address .. '/' })
+    self._need_login = H.is_func(self.client.login) and (self.settings.reader3_un or "") ~= ""
+    
+    if self._need_login then
+        self.tokenManager = AuthToken:new(self.name)
+        package.loaded["Spore.Middleware.Legado3Auth"] = require("Legado.spore.Middleware.Legado3Auth")
+    end
+    package.loaded["Spore.Middleware.FixJSON"] = require("Legado.spore.Middleware.FixJSON")
+    package.loaded["Spore.Middleware.Format.UrlEncoded"] = require("Legado.spore.Middleware.Format.UrlEncoded")
+end
+
+function M:getLuaConfig(path)
+    return LuaSettings:open(path)
+end
+
+function M:isNeedLogin(response)
+    if not ( self._need_login == true and H.is_tbl(response)) then return false end
+    local err_msg = response.data or response.errorMsg
+    return H.is_str(err_msg) and string.find(err_msg, 'NEED_LOGIN', 1, true) ~= nil
+end
+
+function M:reader3Login()
+    return nil, "login 函数未定义"
+end
+
+function M:ensureLogin()
+    if not self._need_login then return true end
+
+    local cache_token = self.tokenManager:get()
+    if cache_token then
+        return true, cache_token
+    end
+    return self:reader3Login()
+end
+
+function M:resetAndEnableMiddlewares(includeAuth)
+    self.client:reset_middlewares()
+    if includeAuth and self._need_login == true then
+        self.client:enable("Legado3Auth", { app = self })
+    end
+    self.client:enable("Format.UrlEncoded")
+    self.client:enable("Format.JSON")
+    self.client:enable("FixJSON")
+    self.client:enable("UserAgent", { 
+        useragent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" 
+    })
+end
+
+function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
+    local server_address = self.settings.server_address
+    logName = logName or 'handleResponse'
+    opts = opts or {}
+  
+    local timeouts = opts.timeouts
+    if not H.is_tbl(timeouts) or not H.is_num(timeouts[1]) or not H.is_num(timeouts[2]) then
+        timeouts = {8, 12}
+    end
+  
+    self:resetAndEnableMiddlewares(true)
+  
+    socketutil:set_timeout(timeouts[1], timeouts[2])
+    local status, res = errHandler.pcall(requestFunc)
+    socketutil:reset_timeout()
+  
+    if not (status and H.is_tbl(res) and H.is_tbl(res.body)) then
+  
+        logger.err(logName, "requestFunc err:", tostring(res))
+        local err_msg = errHandler.map_message(res)
+        return nil, string.format("Web 服务: %s", err_msg)
+    end
+  
+    if isRetry ~= true and res.body.isSuccess == false and self:isNeedLogin(res.body) then
+        if self.tokenManager then
+            self.tokenManager:clear()
+        end
+        self:ensureLogin()
+        logger.err("Need login, refreshed session and retrying")
+        return self:handleResponse(requestFunc, callback, opts, logName, true)
+    end
+
+    if res.body.isSuccess == true then
+          -- fix qread isSuccess == true 但是没有 data 或 data 为 字符的情况, 如 saveBookProgress
+          if not res.body.data then res.body.data = {} end
+          if H.is_func(callback)  then
+              return callback(res.body) 
+           end
+          return res.body.data
+    else
+        return nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错'
+    end
+end
+
+function M:getBookshelf(callback)
+  return self:handleResponse(function()
+      -- data=bookinfos
+      return self.client:getBookshelf({
+          refresh = 0,
+          v = os.time()
+      })
+  end, callback, {
+    timeouts = {8, 12}
+  }, 'getBookshelf')
+end
+
+function M:saveBook(bookinfo, callback)
+  if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl) and
+      H.is_str(bookinfo.originName)) then
+      return nil, "输入参数错误"
+  end
+
+  return self:handleResponse(function()
+      -- data=bookinfo
+      return self.client:saveBook({
+          v = os.time(),
+          name = bookinfo.name,
+          author = bookinfo.author,
+          bookUrl = bookinfo.bookUrl,
+          origin = bookinfo.origin,
+          originName = bookinfo.originName,
+          originOrder = bookinfo.originOrder or 0,
+          durChapterIndex = bookinfo.durChapterIndex or 0,
+          durChapterPos = bookinfo.durChapterPos or 0,
+          durChapterTime = bookinfo.durChapterTime or 0,
+          durChapterTitle = bookinfo.durChapterTitle or '',
+          wordCount = bookinfo.wordCount or '',
+          intro = bookinfo.intro or '',
+          totalChapterNum = bookinfo.totalChapterNum or 0,
+          kind = bookinfo.kind or '',
+          type = bookinfo.type or 0
+      })
+  end, nil, {
+      timeouts = {10, 12}
+  }, 'saveBook')
+
+end
+
+function M:deleteBook(bookinfo)
+  if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl)) then
+      return nil, "输入参数错误"
+  end
+
+  return self:handleResponse(function()
+      -- {"isSuccess":true,"errorMsg":"","data":"删除书籍成功"}
+      return self.client:deleteBook({
+
+          v = os.time(),
+          name = bookinfo.name,
+          author = bookinfo.author,
+          bookUrl = bookinfo.bookUrl,
+          origin = bookinfo.origin,
+          originName = bookinfo.originName,
+          originOrder = bookinfo.originOrder or 0,
+          durChapterIndex = bookinfo.durChapterIndex or 0,
+          durChapterPos = bookinfo.durChapterPos or 0,
+          durChapterTime = bookinfo.durChapterTime or 0,
+          durChapterTitle = bookinfo.durChapterTitle or '',
+          wordCount = bookinfo.wordCount or '',
+          intro = bookinfo.intro or '',
+          totalChapterNum = bookinfo.totalChapterNum or 0,
+          kind = bookinfo.kind or '',
+          type = bookinfo.type or 0
+      })
+  end, nil, {
+      timeouts = {6, 8}
+  }, 'deleteBook')
+end
+
+function M:getChapterList(bookinfo, callback)
+  if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then 
+    return nil, "参数错误"
+  end
+
+  local bookUrl = bookinfo.bookUrl
+  return self:handleResponse(function()
+        return self.client:getChapterList({
+            url = bookUrl,
+            v = os.time()
+        })
+  end, callback, {
+    timeouts = {10, 18}
+}, 'getChapterList')
+end
+
+function M:getBookContent(chapter, callback)
+  local bookUrl = chapter.bookUrl
+  local chapters_index = chapter.chapters_index
+  local down_chapters_index = chapter.chapters_index
+
+  if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
+      return nil, 'getBookContent参数错误'
+  end
+
+  return self:handleResponse(function()
+      -- data=string
+      return self.client:getBookContent({
+          url = bookUrl,
+          index = down_chapters_index,
+          v = os.time()
+      })
+  end, callback, {
+      timeouts = {18, 25}
+  }, 'getBookContent')
+end
+
+function M:refreshBookContent(chapter, callback)
+  local bookUrl = chapter.bookUrl
+  local chapters_index = chapter.chapters_index
+  local down_chapters_index = chapter.chapters_index
+
+  if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
+      return nil, '刷新章节出错'
+  end
+  
+  return self:handleResponse(function()
+          return self.client:refreshToc({
+              url = bookUrl,
+              v = os.time()
+          })
+      end, callback, {
+          timeouts = {10, 20}
+      }, 'refreshBookContent')
+end
+
+function M:saveBookProgress(chapter, callback)
+  if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
+      return nil, '参数错误'
+  end
+  local chapters_index = chapter.chapters_index
+
+  return self:handleResponse(function()
+      local timestamp = os.time()
+      return self.client:saveBookProgress({
+          name = chapter.name,
+          author = chapter.author or '',
+          durChapterPos = 0,
+          durChapterIndex = chapters_index,
+          durChapterTime = timestamp * 1000,
+          durChapterTitle = chapter.title or '',
+          index = chapters_index,
+          url = chapter.bookUrl,
+          v = timestamp,
+      })
+  end, callback, {
+      timeouts = {5, 8}
+  }, 'saveBookProgress')
+end
+
+function M:getProxyCoverUrl(coverUrl)
+    if not H.is_str(coverUrl) then return coverUrl end
+    local server_address = self.settings.server_address
+    return table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
+end
+function M:getProxyImageUrl(bookUrl, img_src)
+    local res_img_src = img_src
+    local width = Screen:getWidth() or 800
+    local server_address = self.settings.server_address
+    
+    local res_img_src = table.concat({server_address, '/image?url=', util.urlEncode(bookUrl), '&path=',
+    util.urlEncode(img_src), '&width=', width})
+
+    return res_img_src
+end
+function M:getProxyEpubUrl(bookUrl, htmlUrl)
+    return htmlUrl
+end
+
+function M:getAvailableBookSource(options, callback)
+    if not (H.is_tbl(options) and H.is_str(options.book_url) and 
+        options.name) then
+        return nil, '获取可用书源参数错误'
+    end
+
+    local bookUrl = options.book_url
+    local name = options.name
+    local author = options.author
+
+    local ret, err_msg = self:_searchBookSocket(name, {
+        name = name,
+        author = author
+    })
+    if ret == nil then
+        return ret, err_msg or "未知错误"
+    else
+        return {list = ret}
+    end
+end
+
+function M:changeBookSource(new_book_source, callback)
+    return self:saveBook(new_book_source, callback)
+end
+
+-- { errorMsg = "", list = err, lastIndex = 1}
+function M:searchBookMulti(options, callback)
+    local search_text = options.search_text
+    local ret, err_msg = self:_searchBookSocket(search_text)
+    if ret == nil then
+        return ret, err_msg or "未知错误"
+    else
+        return {list = ret}
+    end
+end
+
+function M:_searchBookSocket(search_text, filter, timeout)
+  if not (H.is_str(search_text) and search_text ~= '') then
+      return nil, "输入参数错误"
+  end
+
+  timeout = timeout or 60
+
+  local is_exact_search = false
+  if string.sub(search_text, 1, 1) == '=' then
+      search_text = string.sub(search_text, 2)
+      is_exact_search = true
+  end
+
+  local JSON = require("json")
+  local websocket = require('Legado/websocket')
+
+  local key_json = JSON.encode({
+      key = search_text
+  })
+
+  local client = websocket.client.sync({
+      timeout = 3
+  })
+
+  local parsed = socket_url.parse(self.settings.server_address)
+  local ws_scheme
+  if parsed.scheme == 'http' then
+      ws_scheme = 'ws'
+      if not parsed.port then
+          parsed.port = 80
+      end
+  else
+      ws_scheme = 'wss'
+      if not parsed.port then
+          parsed.port = 443
+      end
+  end
+
+  parsed.port = parsed.port + 1
+
+  local ws_server_address = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/searchBook")
+
+  local ok, err = client:connect(ws_server_address)
+  if not ok then
+      logger.err('ws连接出错', err)
+      err = errHandler.map_message(err)
+      return nil, "请求失败：" .. tostring(err)
+  end
+
+    local function filter_even(book)
+        if not H.is_tbl(book) then return false end
+
+        local has_name_filter = H.is_str(filter and filter.name) and filter.name   ~= ""
+        local has_author_filter = H.is_str(filter and filter.author) and filter.author ~= ""
+        local has_origin_filter = H.is_str(filter and filter.origin) and filter.origin ~= ""
+
+        if has_name_filter or has_author_filter or has_origin_filter then
+            local match_name = has_name_filter and H.is_str(book.name) and book.name == filter.name
+            local match_author = has_author_filter and H.is_str(book.author) and book.author == filter.author
+            local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == filter.origin
+
+            if has_name_filter and not match_name then return false end
+            if has_author_filter and not match_author then return false end
+            if has_origin_filter and not match_origin then return false end
+
+            return true
+        end
+
+        -- 否则走精确匹配逻辑
+        if is_exact_search then
+            return (H.is_str(book.name) and book.name == search_text)
+                or (H.is_str(book.author) and book.author == search_text)
+        end
+
+        -- 默认保留
+        return true
+    end
+
+  client:send(key_json)
+  ok, result = errHandler.pcall(function()
+      local response = {}
+      local start_time = time.now()
+      local deduplication = {}
+
+      while true do
+          local response_body = client:receive()
+          if not response_body then break end
+
+          if time.since(start_time) > time.s(timeout) then
+              logger.err("ws receive 超时")
+              break
+          end
+
+          local ok_decode, parsed_body = pcall(JSON.decode, response_body)
+          if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
+              for i, v in ipairs(parsed_body) do
+                if H.is_tbl(v) and H.is_str(v.name) and v.name ~= "" and H.is_str(v.bookUrl) and v.bookUrl ~= "" then
+                    local deduplication_key = table.concat({v.name, v.author or "", tostring(v.originOrder or 1)})
+                    if not deduplication[deduplication_key] and filter_even(v) then
+                        table.insert(response, v)
+                        deduplication[deduplication_key] = true
+                    end
+                 end
+              end
+          end
+      end
+      deduplication = nil
+      return response
+  end)
+
+  pcall(function()
+      client:close()
+  end)
+
+  if not ok then
+      logger.err('ws返回数据出错：', result)
+      return nil, 'ws返回数据出错：' .. tostring(result)
+  end
+
+  return result
+end
+
+function M:unsupportedMethod()
+    return nil, "后端暂不支持此功能"
+end
+
+function M:searchBookSingle(options, callback)
+    return self:unsupportedMethod()
+end
+function M:autoChangeBookSource(bookinfo, callbak)
+    return self:unsupportedMethod()
+end
+function M:getChaptersList(bookinfo)
+    return self:unsupportedMethod()
+end
+function M:getBookSourcesList(callback)
+    return self:unsupportedMethod()
+end
+function M:exploreBook(options, callback)
+    return self:unsupportedMethod()
+end
+function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
+    return self:unsupportedMethod()
+end
+return M

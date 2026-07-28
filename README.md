@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-CC_BY--NC_3.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/3.0/)
 [![KOReader Version](https://img.shields.io/badge/KOReader-v2024.01+-green.svg)](https://github.com/koreader/koreader)
 
->一个在 KOReader 中阅读 Legado 开源阅读书库的插件, 适配阅读3.0, 支持手机app和服务器版本，初衷是 Kindle 的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的网文阅读，提升老设备体验。
+>一个在 KOReader 中阅读 Legado 开源阅读书库的插件, 适配阅读3.0, 支持手机app、reader3、轻阅读后端，初衷是 Kindle 的浏览器体验不佳, 目的部分替代受限设备的浏览器实现流畅的网文阅读，提升老设备体验。
 
 ---
 
@@ -15,13 +15,13 @@
 ## 功能特性
 
 - 前后章节无缝翻页浏览
-- 离线缓存，自动预下载章节
+- 离线缓存，自动向前向后预缓存章节
 - 同步阅读进度
 - 书籍换源搜索
 - 碎片章节历史记录清除
 - 支持漫画流式阅读
 - 支持绑定按键或手势
-- 文件浏览器快捷方式
+- 文件浏览器云端书籍链接
 
 ---
 
@@ -29,10 +29,10 @@
 
 1.  下载最新版本的插件发布包 [release](https://github.com/pengcw/legado.koplugin/releases/)。
 2.  将 `plugins/legado.koplugin` 目录复制到设备上 KOReader 的插件目录 `koreader/plugins` 文件夹中。
-3. 重启 KOReader。
-4. 安装后在 `文件管理界面` 顶部菜单搜索部分找到插件菜单入口。
-4. 设置服务接口地址 (分为服务器版和阅读app，按说明格式填写)。
-5. (可选) 在 `点击与手势 > 手势管理器` 里设置快捷键 (比如在文件管理界面长按右下角开启书库，在阅读界面长按右下角返回章节目录)。
+3.  重启 KOReader。
+4.  安装后在 `文件管理界面` 顶部菜单搜索部分找到插件菜单入口。
+5.  设置服务接口地址。分为服务器版和手机阅读APP版，请按要求填写（例如：手机APP开启Web服务后填入 `http://192.168.1.8:1122`）。
+6.  (可选) 在 `点击与手势 > 手势管理器` 里设置快捷键 (比如在文件管理界面长按右下角开启书库，在阅读界面长按右下角返回章节目录)。
 
 
 ## 设备支持  
@@ -79,10 +79,11 @@
    - IP 地址输错的情况时有发生
    - 示例正确格式：`http://192.168.1.8:1122`
 
-2. **验证接口格式**  
+2. **核对接口格式**  
    - 开源阅读 app：**不需要**加 `/reader3` 后缀  
-   - 服务器版本：**需要**加 `/reader3`  
-   - 服务器版若有账号密码认证需按格式填入
+   - reader3 服务器版本：**需要**加 `/reader3`
+   - 轻阅读：**需要**加 `/api/5` 5为 api 版本号
+   - 若有账号密码认证需按格式填入
 
 3. **测试接口可访问性**  
    - 假设接口地址为：`http://192.168.1.8:1122`  
@@ -90,7 +91,7 @@
      ```url
      http://192.168.1.8:1122/test
      ```
-   - ✅ 正常：页面会显示 `test` 字符  
+   - ✅ 正常：页面会显示 `web/test` 字符  
    - ❌ 异常：无输出或其他 
 
 ---
@@ -180,19 +181,20 @@
 </details>
 </details>
 
-## 项目依赖与致谢
-
-本插件基于以下优秀开源项目构建：
-
-#### UI界面
-- 界面组件修改自 [Rakuyomi项目](https://github.com/hanatsumi/rakuyomi)
-- 核心框架依赖 [KOReader](https://github.com/koreader/koreader)
-
-#### 数据服务
-- 兼容 [开源阅读app](https://github.com/gedoor/legado) 接口
-- 支持 [reader-server](https://github.com/hectorqin/reader) 服务端
-
+### 相关项目
 ---
+
+- [KOReader](https://github.com/koreader/koreader)
+- [~~开源阅读app~~](https://github.com/gedoor/legado)
+- [~~reader-server~~](https://github.com/hectorqin/reader)
+- [轻阅读](https://github.com/autobcb/read)
+- [reader-rust](https://github.com/givenge/reader-rust)
+- [reader-next](https://github.com/Maple0517/reader-next)
+- [阅读 MD3](https://github.com/HapeLee/legado-with-MD3)
+- [阅读 Sigma](https://github.com/Luoyacheng/legado-E)
+- [阅读 Archive](https://github.com/Rimchars/legado)
+- [阅读 R](https://github.com/refgd/legado)
+- [更多...](https://legado.vossc.com/index.php)
 
 ### 开源声明
 > 本插件不提供内容，如有侵权请联系删除
