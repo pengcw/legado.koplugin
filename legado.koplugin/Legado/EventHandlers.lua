@@ -9,6 +9,7 @@ local FileManager = require("apps/filemanager/filemanager")
 local MessageBox = require("Legado/MessageBox")
 local Backend = require("Legado/Backend")
 local H = require("Legado/Helper")
+local TaskProg = require("Legado.task.Progress")
 local Patcher = require("Legado.patches")
 local PlgState = require("Legado/PlgState")
 
@@ -330,7 +331,7 @@ function Handlers:register(parent_ref)
                                     string.format("当前数据库大小为：%s\n\n是否确认压缩数据库？", formatted_old),
                                     function(result)
                                         if result then
-                                            MessageBox:loading("压缩中...", function()
+                                            TaskProg.loading("压缩中...", function()
                                                 return Backend:vacuumDatabase()
                                             end, function(state, response)
                                                 if state == true then
@@ -357,7 +358,7 @@ function Handlers:register(parent_ref)
                                     function(result)
                                         if result then
                                             Backend:closeDbManager()
-                                            MessageBox:loading("清除中", function()
+                                            TaskProg.loading("清除中", function()
                                                 return Backend:cleanAllBookCaches()
                                             end, function(state, response)
                                                 if state == true then

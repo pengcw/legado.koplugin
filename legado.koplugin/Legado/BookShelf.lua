@@ -8,6 +8,7 @@ local NetworkMgr = require("ui/network/manager")
 local time = require("ui/time")
 local MessageBox = require("Legado/MessageBox")
 local Backend = require("Legado/Backend")
+local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
 local Icons = require("Legado.res.icons")
 local PlgState = require("Legado/PlgState")
@@ -129,19 +130,26 @@ local function init_book_shelf(parent)
 
     function book_shelf:onRefreshLibrary()
         Backend:closeDbManager()
-        MessageBox:loading("Refreshing Library", function()
-            return Backend:refreshLibraryCache(PlgState.ui_refresh_time)
-        end, function(state, response)
-            if state == true then
-                Backend:HandleResponse(response, function(data)
-                    MessageBox:notice('同步成功')
-                    self:refreshItems()
-                    PlgState.ui_refresh_time = time.now()
-                end, function(err_msg)
-                    MessageBox:notice(tostring(err_msg) or '同步失败')
-                end)
-            end
-        end)
+        TaskProg.loading({
+            text = "Refreshing Library ",
+            dismissable = true,
+            runnable = function()
+                return Backend:refreshLibraryCache(PlgState.ui_refresh_time)
+            end,
+            callback = function(ok, result)
+                if ok == true then
+                    Backend:HandleResponse(result, function(data)
+                        MessageBox:notice('同步成功')
+                        if UIManager:isWidgetShown(self) then
+                            self:refreshItems()
+                        end
+                        PlgState.ui_refresh_time = time.now()
+                    end, function(err_msg)
+                        MessageBox:notice(tostring(err_msg) or '同步失败')
+                    end)
+                end
+            end,
+        })
     end
 
     function book_shelf:onMenuHold(item)
@@ -180,7 +188,7 @@ local function init_book_shelf(parent)
                             bookinfo.name), function(result)
                             if result then
                                 Backend:closeDbManager()
-                                MessageBox:loading("删除中...", function()
+                                TaskProg.loading("删除中...", function()
                                     Backend:deleteBook(bookinfo)
                                     return Backend:refreshLibraryCache()
                                 end, function(state, response)
