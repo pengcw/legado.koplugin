@@ -6,6 +6,7 @@ local makeRequest = require("Legado.Helper.Http")
 local H = require("Legado/Helper")
 local safe_require = require("Legado.Helper.Require").require
 local MessageBox = require("Legado/MessageBox")
+local TaskProg = require("Legado.task.Progress")
 
 local M = {}
 
@@ -58,34 +59,46 @@ function M:ota(ok_callback)
         end
     end
 
-    MessageBox:loading("检查更新", function()
-        return self:checkUpdate()
-    end, function(state, response)
-        if state == true and response and response.state == true then
-            MessageBox:confirm(string.format("有新版本可用: %s ,要下载并更新吗？",
-                response.release_version), function(result)
-                if result then
-                    -- multi process Android unzip prompts no permission
-                    MessageBox:loading("安装更新中", function()
-                        return self:_downloadUpdate(response.info)
-                    end, function(state, down_response)
-                        if state == true and down_response and down_response.path then
-                            install_ota(down_response.path)
-                        else
-                            local err_msg = (H.is_tbl(down_response) and down_response.error) or ""
-                            MessageBox:error("下载失败，请重试:" .. tostring(err_msg))
-                        end
-                    end)
-
+    local loading_dialog
+    loading_dialog = TaskProg.loading({
+        text = "检查更新 ",
+        dismissable = true,
+        runnable = function()
+            return self:checkUpdate()
+        end,
+        on_cancel = function()
+            MessageBox:notice("已取消")
+        end,
+        callback = function(ok, result)
+            if ok == true and result and result.state == true then
+                if loading_dialog and loading_dialog.close then
+                    loading_dialog:close()
                 end
-            end, {
-                ok_text = "升级",
-                cancel_text = "稍后"
-            })
-        elseif H.is_tbl(response) then
-            MessageBox:success(response.error or "已是最新版本")
-        end
-    end)
+                MessageBox:confirm(string.format("有新版本可用: %s ,要下载并更新吗？",
+                    result.release_version), function(result)
+                    if result then
+                        -- multi process Android unzip prompts no permission
+                        TaskProg.loading("安装更新中", function()
+                            return self:_downloadUpdate(result.info)
+                        end, function(state, down_response)
+                            if state == true and down_response and down_response.path then
+                                install_ota(down_response.path)
+                            else
+                                local err_msg = (H.is_tbl(down_response) and down_response.error) or ""
+                                MessageBox:error("下载失败，请重试:" .. tostring(err_msg))
+                            end
+                        end)
+
+                    end
+                end, {
+                    ok_text = "升级",
+                    cancel_text = "稍后"
+                })
+            elseif H.is_tbl(result) then
+                MessageBox:success(result.error or "已是最新版本")
+            end
+        end,
+    })
 end
 
 function M:_getLatestReleaseInfo()

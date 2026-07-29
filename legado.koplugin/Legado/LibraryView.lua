@@ -14,6 +14,7 @@ local DocSettings = require("docsettings")
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
+local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
 
 local PlgState = require("Legado/PlgState")
@@ -196,7 +197,7 @@ function LibraryView:openMenu(dimen)
             UIManager:close(dialog)
             MessageBox:confirm("即将同步远端书架，按最后阅读时间排序。此操作将覆盖本地书架排序（手动置顶的书籍不受影响)\n是否继续？", function(result)
                 if result then
-                    MessageBox:loading("同步中...", function()
+                    TaskProg.loading("同步中...", function()
                         return Backend:syncAndResortBooks()
                     end, function(state, response)
                         if state == true then
@@ -303,7 +304,7 @@ function LibraryView:loadAndRenderChapter(chapter)
         self:showReaderUI(cache_chapter)
     else
         Backend:closeDbManager()
-        return MessageBox:loading("正在下载正文", function()
+        return TaskProg.loading("正在下载正文 ", function()
             return Backend:downloadChapter(chapter)
         end, function(state, response)
             if state == true then

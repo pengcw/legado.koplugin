@@ -2378,17 +2378,14 @@ function M:launchProcess(job, callback, timeout)
     if not H.is_func(callback) then
         return TaskQueue.spawnProcess(job, nil, timeout)
     end
-    local Trapper = require("ui/trapper")
-    Trapper:wrap(function()
-        logger.dbg("Legado.launchProcess - START")
-        TaskQueue.spawnProcess(job, function(ok, r1, r2)
-            logger.dbg("Legado.launchProcess - END")
-            local cb_ok, cb_err = pcall(callback, ok, r1, r2)
-            if not cb_ok then
-                logger.err("Legado.launchProcess - Callback error:", tostring(cb_err))
-            end
-        end, timeout)
-    end)
+    logger.dbg("Legado.launchProcess - START")
+    TaskQueue.spawnProcess(job, function(ok, r1, r2)
+        logger.dbg("Legado.launchProcess - END")
+        local cb_ok, cb_err = pcall(callback, ok, r1, r2)
+        if not cb_ok then
+            logger.err("Legado.launchProcess - Callback error:", tostring(cb_err))
+        end
+    end, timeout)
 end
 
 function M:backupDbWithPreCheck()

@@ -8,6 +8,7 @@ local logger = require("logger")
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
+local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
 
 local CbzExporter = {
@@ -428,7 +429,7 @@ function M:cacheAllChapters(completion_callback)
     end
     local book_cache_id = bookinfo.cache_id
 
-    MessageBox:loading("正在统计已缓存章节", function()
+    TaskProg.loading("正在统计已缓存章节", function()
         return Backend:analyzeCacheStatus(book_cache_id)
     end, function(state, response)
         if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
@@ -497,7 +498,7 @@ function M:cacheSelectedChapters(start_chapter_index, down_chapter_count, comple
         target_chapter_count = actual_chapter_count
     end
 
-    MessageBox:loading("正在统计已缓存章节", function()
+    TaskProg.loading("正在统计已缓存章节", function()
         return Backend:analyzeCacheStatusForRange(book_cache_id , start_index, target_chapter_count - 1)
     end, function(state, response)
         if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
@@ -562,10 +563,10 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
     if retry_count > 0 then
         title_text = title_text .. string.format(" (重试 %d)", retry_count)
     end
-    local cache_msg = MessageBox:progressBar("缓存进度", {
+    local cache_msg = Progress.showBar("正在缓存章节...", {
         title = title_text,
         max = uncached_count
-    }) or MessageBox:showloadingMessage("正在缓存章节...")
+    })
 
     if not retry_count then retry_count = 0 end
     local retry_func = function()
@@ -692,7 +693,7 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, ret
 
     local book_cache_id = bookinfo.cache_id
 
-    MessageBox:loading("正在检查缓存完整性", function()
+    TaskProg.loading("正在检查缓存完整性", function()
         return Backend:analyzeCacheStatusForRange(book_cache_id, 0, chapter_count - 1, true)
     end, function(state, cache_status)
         if not (state == true and H.is_tbl(cache_status) and H.is_tbl(cache_status.cached_chapters) and H.is_tbl(cache_status.uncached_chapters)) then
@@ -821,7 +822,7 @@ end
 
 function M:_processEpubExport(bookinfo, chapters, only_cached)
     local export_settings = self:getEpubExportSettings()
-    MessageBox:loading("正在统计已缓存章节", function()
+    TaskProg.loading("正在统计已缓存章节", function()
         return self:_buildEpubFile(bookinfo, chapters, export_settings)
     end, function(state, build_result)
         if state == true and H.is_tbl(build_result) and build_result.success then
@@ -839,7 +840,7 @@ end
 function M:_processCbzExport(bookinfo, chapters, only_cached)
     local export_settings = self:getEpubExportSettings()
 
-    local cache_msg = MessageBox:progressBar("缓存进度", {
+    local cache_msg = Progress.showBar("缓存进度", {
         title = "导出进度",
         max = #chapters
     })
@@ -906,7 +907,7 @@ function M:exportBook()
         return
     end
 
-    MessageBox:loading("正在统计已缓存章节", function()
+    TaskProg.loading("正在统计已缓存章节", function()
         return Backend:analyzeCacheStatus(book_cache_id)
     end, function(state, response)
         if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then

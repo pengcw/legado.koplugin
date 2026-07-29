@@ -7,6 +7,7 @@ local logger = require("logger")
 local dbg = require("dbg")
 
 local MessageBox = require("Legado/MessageBox")
+local TaskProg = require("Legado.task.Progress")
 local Backend = require("Legado/Backend")
 local H = require("Legado/Helper")
 
@@ -244,7 +245,7 @@ function M:getTurnPageNextImageT(call_event_type, image_num)
         end
     end
 
-    return MessageBox:loading("", function()
+    return TaskProg.loading("", function()
 
         local retData = {}
         if H.is_str(current_img_src) then
