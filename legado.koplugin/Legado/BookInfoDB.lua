@@ -5,7 +5,7 @@ local dbg = require("dbg")
 local Device = require("device")
 local util = require("util")
 local H = require("Legado/Helper")
-local md5 = require("Legado.Helper.Crypto").md5
+local FS = require("Legado.Helper.FS")
 
 if not dbg.log then
     dbg.log = logger.dbg
@@ -210,7 +210,7 @@ function M:_initDB(is_repair)
         local last_backup_db = self.dbPath .. ".bak"
         local has_backup = util.fileExists(last_backup_db)
         if has_backup then
-            H.copyFileFromTo(last_backup_db, self.dbPath)
+            FS.copyFileFromTo(last_backup_db, self.dbPath)
             util.removeFile(last_backup_db)
             dbg.log("The backup database has been restored")
         else
@@ -545,7 +545,7 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
 
             if item.name ~= '' then
                 local show_book_title = ("%s (%s)"):format(item.name, item.author)
-                item.cache_id = tostring(md5(show_book_title))
+                item.cache_id = tostring(H.md5(show_book_title))
 
                 table.insert(batch_data, {
                     bookShelfId, item.cache_id, item.name, item.author, item.bookUrl, item.origin or "",

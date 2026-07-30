@@ -7,7 +7,8 @@ local socket_url = require("socket.url")
 local socketutil = require("socketutil")
 local Spore = require("Spore")
 local H = require("Legado/Helper")
-local safe_require = require("Legado.Helper.Require").require
+local Env = require("Legado.Helper.Env")
+local load_script = require("Legado.Helper.Loader").load_script
 local errHandler = require("Legado.Helper.Error")
 
 local M = {
@@ -27,7 +28,7 @@ function AuthToken:new(key)
 end
 
 function AuthToken:_getConfig()
-    return LuaSettings:open(H.getTempDirectory() .. '/cache.lua')
+    return LuaSettings:open(Env.getTempDirectory() .. '/cache.lua')
 end
 
 function AuthToken:get()
@@ -67,7 +68,7 @@ end
 
 function M:init()
     local spec_name = (self.name == "legado_app" or self.name == "base") and "base_spec" or (self.name .. "_spec")
-    local _spec, err_msg = safe_require("Legado.spore." .. spec_name)
+    local _spec, err_msg = load_script("Legado.spore." .. spec_name)
     if not _spec then
         logger.err("LegadoSpec loading failed", err_msg)
         return 
@@ -461,6 +462,7 @@ function M:_searchBookSocket(search_text, filter, timeout)
     end
 
   client:send(key_json)
+  local result
   ok, result = errHandler.pcall(function()
       local response = {}
       local start_time = time.now()

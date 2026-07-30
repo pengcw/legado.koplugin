@@ -76,7 +76,7 @@ M.checkAndCreateFolder = function(d_path)
     if not util.directoryExists(d_path) then
         util.makePath(d_path)
         if not util.directoryExists(d_path) then
-            os.execute(string.format('"mkdir -p "%s"', d_path))
+            os.execute(string.format('mkdir -p "%s"', d_path))
         end
     end
     return d_path
