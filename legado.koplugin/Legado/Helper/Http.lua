@@ -38,24 +38,40 @@ local function get_extension_from_mimetype(content_type)
 end
 
 local function get_image_format_head8(image_data)
-    if type(image_data) ~= "string" then
+    if type(image_data) ~= "string" or #image_data < 12 then
         return "bin"
     end
-    local header = image_data:sub(1, 8)
-
-    if header:sub(1, 3) == "\xFF\xD8\xFF" then
-        return "jpg"
-    elseif header:sub(1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then
-        return "png"
-    elseif header:sub(1, 4) == "\x52\x49\x46\x46" then
-        return "webp"
-    elseif header:sub(1, 2) == "\x42\x4D" then
-        return "bmp"
-    elseif header:sub(1, 4) == "\x47\x49\x46\x38" then
-        return "gif"
-    elseif header:sub(1, 4) == "\x49\x49\x2A\x00" or header:sub(1, 4) == "\x4D\x4D\x00\x2A" then
-        return "tiff"
+    local b1 = string.byte(image_data, 1)
+    if b1 == 0xFF then 
+        if string.sub(image_data, 1, 3) == "\xFF\xD8\xFF" then 
+            return "jpg" 
+        end
+    elseif b1 == 0x89 then 
+        if string.sub(image_data, 1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then 
+            return "png" 
+        end
+    elseif b1 == 0x52 then 
+        if string.sub(image_data, 1, 4) == "RIFF" and string.sub(image_data, 9, 12) == "WEBP" then 
+            return "webp" 
+        end
+    elseif b1 == 0x42 then 
+        if string.sub(image_data, 1, 2) == "BM" then 
+            return "bmp" 
+        end
+    elseif b1 == 0x47 then 
+        if string.sub(image_data, 1, 4) == "GIF8" then 
+            return "gif" 
+        end
+    elseif b1 == 0x49 then 
+        if string.sub(image_data, 1, 4) == "\x49\x49\x2A\x00" then 
+            return "tiff" 
+        end
+    elseif b1 == 0x4D then 
+        if string.sub(image_data, 1, 4) == "\x4D\x4D\x00\x2A" then 
+            return "tiff" 
+        end
     end
+    return "bin"
 end
 
 local function pGetUrlContent(options, is_create)
@@ -80,14 +96,26 @@ local function pGetUrlContent(options, is_create)
     local sink = {}
     -- Only use the custom TCP creator for plain HTTP; leave HTTPS to default so TLS/SNI works properly
     local use_custom_create = is_create and parsed and parsed.scheme == "http"
-    if is_pic then
-         -- Image requests prioritize
-        default_headers["Accept"] = "image/png, image/jpeg, image/webp, image/bmp;q=0.9, image/tiff;q=0.8, image/*;q=0.7"
+
+    local req_headers = {}
+    if options.headers then
+        for k, v in pairs(options.headers) do
+            req_headers[k] = v
+        end
+    else
+        for k, v in pairs(default_headers) do
+            req_headers[k] = v
+        end
+    end
+
+    if is_pic and not req_headers["Accept"] then
+        -- Image requests prioritize
+        req_headers["Accept"] = "image/png, image/jpeg, image/webp, image/bmp;q=0.9, image/tiff;q=0.8, image/*;q=0.7"
     end
     local request = {
         url = url,
         method = options.method or "GET",
-        headers = options.headers or default_headers,
+        headers = req_headers,
         sink = not file_fp and (maxtime and socketutil.table_sink(sink) or ltn12.sink.table(sink)) or
             (maxtime and socketutil.file_sink(file_fp) or ltn12.sink.file(file_fp)),
         source = options.source,

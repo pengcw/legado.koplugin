@@ -1,5 +1,7 @@
 local util = require("util")
 local H = require("Legado/Helper")
+local Env = require("Legado.Helper.Env")
+local FS = require("Legado.Helper.FS")
 local logger = require("logger")
 local ffiUtil = require("ffi/util")
 
@@ -23,7 +25,7 @@ local EpubExporter = {
 }
 
 -- CSS 文件路径
-local mianCss = string.format("%s/%s", H.getPluginDirectory(), "Legado/res/main.css")
+local mianCss = string.format("%s/%s", Env.getPluginDirectory(), "Legado/res/main.css")
 local resCss = "resources/legado.css"
 
 -- ============================================================
@@ -115,11 +117,11 @@ end
 
 -- 添加 CSS 资源到书籍缓存目录
 M.addCssRes = function(book_cache_id)
-    local book_cache_path = H.getBookCachePath(book_cache_id)
+    local book_cache_path = Env.getBookCachePath(book_cache_id)
     local book_css_path = string.format("%s/%s", book_cache_path, resCss)
 
     if not util.fileExists(book_css_path) then
-        H.copyFileFromTo(mianCss, book_css_path)
+        FS.copyFileFromTo(mianCss, book_css_path)
     end
     return book_css_path
 end
@@ -179,7 +181,7 @@ function EpubExporter:init(options)
     self.chapters = options.chapters or {}
     self.output_path = options.output_path
     self.book_cache_id = options.book_cache_id
-    self.book_cache_path = H.getBookCachePath(self.book_cache_id)
+    self.book_cache_path = Env.getBookCachePath(self.book_cache_id)
 
     -- 获取封面文件扩展名和 MIME 类型
     if self.cover_path then
@@ -564,7 +566,7 @@ function EpubExporter:packageEpub()
     addFile("OEBPS/toc.ncx", self:createNCX())
 
     -- res /resources
-    local resources_path = H.joinPath(self.book_cache_path, "resources")
+    local resources_path = FS.joinPath(self.book_cache_path, "resources")
     if util.directoryExists(resources_path) then
         util.findFiles(resources_path, function(file_path, fname, attr)
             if attr and attr.mode == "file" and H.is_str(fname) and fname ~= "" then
@@ -587,7 +589,7 @@ function EpubExporter:packageEpub()
     if self.custom_css then
         css_content = self.custom_css
     else
-        local default_css_path = string.format("%s/Legado/main.css.lua", H.getPluginDirectory())
+        local default_css_path = string.format("%s/Legado/main.css.lua", Env.getPluginDirectory())
         if util.fileExists(default_css_path) then
             css_content = util.readFromFile(default_css_path, "r")
         end

@@ -1,12 +1,13 @@
 local logger = require("logger")
 local util = require("util")
 local H = require("Legado/Helper")
+local Env = require("Legado.Helper.Env")
+local FS = require("Legado.Helper.FS")
 local socket_url = require("socket.url")
 local LuaSettings = require("luasettings")
-local md5 = require("Legado.Helper.Crypto").md5
 
 return function()
-    local settings_data = LuaSettings:open(H.getUserSettingsPath())
+    local settings_data = LuaSettings:open(Env.getUserSettingsPath())
     local settings = settings_data.data
     local is_changed = false
 
@@ -38,8 +39,8 @@ return function()
             if H.is_tbl(config) and H.is_str(config.url) and H.is_str(config_name) then
                 local parsed_url = socket_url.parse(config.url)
                 if H.is_tbl(parsed_url) and H.is_str(parsed_url.host) then
-                    local old_id = tostring(md5(parsed_url.host))
-                    local new_id = tostring(md5(config_name))
+                    local old_id = tostring(H.md5(parsed_url.host))
+                    local new_id = tostring(H.md5(config_name))
                     if old_id ~= new_id then
                         updates_to_perform[old_id] = new_id
                     end
@@ -49,7 +50,7 @@ return function()
         if next(updates_to_perform) ~= nil then
             local BookInfoDB = require("Legado/BookInfoDB")
             local dbManager = BookInfoDB:new({
-                dbPath = H.getTempDirectory() .. "/bookinfo.db"
+                dbPath = Env.getTempDirectory() .. "/bookinfo.db"
             })
             dbManager:transaction(function()
                 for old_id, new_id in pairs(updates_to_perform) do
@@ -83,16 +84,16 @@ return function()
     end
     
     -- > 1.1.4
-    local patches_file_path = H.joinPath(H.getUserPatchesDirectory(), '2-legado_plugin_func.lua')
-    local source_patches = H.joinPath(H.getPluginDirectory(), 'patches/2-legado_plugin_func.lua')
+    local patches_file_path = FS.joinPath(Env.getUserPatchesDirectory(), '2-legado_plugin_func.lua')
+    local source_patches = FS.joinPath(Env.getPluginDirectory(), 'patches/2-legado_plugin_func.lua')
     local disabled_patches = patches_file_path .. '.disabled'
     for _, file in ipairs({source_patches, patches_file_path, disabled_patches}) do
         if util.fileExists(file) then
             util.removeFile(file)
         end
     end
-    local plugin_dir = H.getPluginDirectory()
-    local old_patches_dir = H.joinPath(plugin_dir, 'patches')
+    local plugin_dir = Env.getPluginDirectory()
+    local old_patches_dir = FS.joinPath(plugin_dir, 'patches')
     if util.directoryExists(old_patches_dir) then
         local ffiUtil = require("ffi/util")
         ffiUtil.purgeDir(old_patches_dir)
@@ -100,7 +101,7 @@ return function()
     end
 
     -- > 1.1.5: Clean up obsolete task.pid.lua & legacy task_pid DB table
-    local old_task_pid = H.getTempDirectory() .. '/task.pid.lua'
+    local old_task_pid = Env.getTempDirectory() .. '/task.pid.lua'
     if util.fileExists(old_task_pid) then
         util.removeFile(old_task_pid)
     end

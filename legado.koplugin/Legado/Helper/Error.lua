@@ -10,10 +10,12 @@ M.pcall = function(f, ...)
         local err_msg = tostring(err or "unknown error")
         if logger and type(logger.err) == "function" and 
             G_reader_settings and G_reader_settings:isTrue("debug") then
-            local trace = debug.traceback(err, 2)
+            local trace = debug.traceback(err_msg, 2)
             logger.err("safe_call: ", trace)
         end
-        return string.match(err_msg, ":%d+: (.*)$") or err_msg
+        local first_line = err_msg:match("^(.-)\n%s*stack traceback:") or err_msg:match("^(.-)\r?\n") or err_msg
+        local clean_msg = first_line:match("^.-:%d+:%s*(.+)$") or first_line
+        return clean_msg:match("^%s*(.-)%s*$")
     end
     return xpcall(f, err_handler, ...)
 end

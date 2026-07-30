@@ -4,7 +4,9 @@ local logger = require("logger")
 local util = require("util")
 local makeRequest = require("Legado.Helper.Http")
 local H = require("Legado/Helper")
-local safe_require = require("Legado.Helper.Require").require
+local Env = require("Legado.Helper.Env")
+local FS = require("Legado.Helper.FS")
+local load_script = require("Legado.Helper.Loader").load_script
 local MessageBox = require("Legado/MessageBox")
 local TaskProg = require("Legado.task.Progress")
 
@@ -13,8 +15,8 @@ local M = {}
 local RELEASE_API = "https://api.github.com/repos/pengcw/legado.koplugin/releases/latest"
 
 function M:getMetaInfo()
-    local info, err_msg= safe_require("_meta")
-    local plg_path = H.getPluginDirectory()
+    local info, err_msg= load_script("_meta")
+    local plg_path = Env.getPluginDirectory()
     if not info then
         logger.warn(string.format("getMetaInfo load %s/_meta.lua err", plg_path))
         return
@@ -59,8 +61,7 @@ function M:ota(ok_callback)
         end
     end
 
-    local loading_dialog
-    loading_dialog = TaskProg.loading({
+    TaskProg.loading({
         text = "检查更新 ",
         dismissable = true,
         runnable = function()
@@ -71,9 +72,6 @@ function M:ota(ok_callback)
         end,
         callback = function(ok, result)
             if ok == true and result and result.state == true then
-                if loading_dialog and loading_dialog.close then
-                    loading_dialog:close()
-                end
                 MessageBox:confirm(string.format("有新版本可用: %s ,要下载并更新吗？",
                     result.release_version), function(result)
                     if result then
@@ -88,7 +86,6 @@ function M:ota(ok_callback)
                                 MessageBox:error("下载失败，请重试:" .. tostring(err_msg))
                             end
                         end)
-
                     end
                 end, {
                     ok_text = "升级",
@@ -150,7 +147,7 @@ function M:_downloadUpdate(release_info)
 
     local url = release_info.download_url
     local asset_name = release_info.asset_name
-    local temp_path_base = H.getTempDirectory()
+    local temp_path_base = Env.getTempDirectory()
     local temp_zip_path = string.format("%s/%s", temp_path_base, asset_name)
 
     if util.fileExists(temp_zip_path) then
@@ -317,7 +314,7 @@ function M:_installUpdate(update_zip_path)
         return "下载更新文件错误，请重试"
     end
 
-    local plg_path = H.getPluginDirectory()
+    local plg_path = Env.getPluginDirectory()
     local plg_path_tmp = plg_path .. ".tmp"
     local plg_path_bak = plg_path .. ".bak"
 
@@ -333,7 +330,7 @@ function M:_installUpdate(update_zip_path)
 
     logger.info("[installUpdate] 开始解压至临时目录: " .. plg_path_tmp)
     pcall(ffiUtil.purgeDir, plg_path_tmp)
-    H.checkAndCreateFolder(plg_path_tmp)
+    FS.checkAndCreateFolder(plg_path_tmp)
 
     local extract_ok, extract_err = _unZip(update_zip_path, plg_path_tmp)
     if not extract_ok then
@@ -359,7 +356,7 @@ function M:_installUpdate(update_zip_path)
     local rename_ok, rename_err = os.rename(base_dir, plg_path)
     if not rename_ok then
         logger.warn("[installUpdate] 目录重命名失败(" .. tostring(rename_err) .. ")，尝试降级复制")
-        rename_ok = H.copyRecursive(base_dir, plg_path)
+        rename_ok = FS.copyRecursive(base_dir, plg_path)
     end
 
     if rename_ok then

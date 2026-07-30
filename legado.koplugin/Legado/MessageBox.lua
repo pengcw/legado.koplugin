@@ -198,11 +198,13 @@ function M:notice(message, ...)
     if #args > 0 then
         message = string.format("%s %s", tostring(message), custom_concat(args, " "))
     end
-    Notification:notify(message, Notification.SOURCE_ALWAYS_SHOW)
+    local n = Notification:new{ text = message }  
+    UIManager:show(n)
+    return n
 end
 
 function M:askForRestart(msg)
-    self:confirm(msg or "", function(is_ok)
+    return self:confirm(msg or "", function(is_ok)
         if is_ok then UIManager:restartKOReader() end
     end, {
         ok_text = "重启",

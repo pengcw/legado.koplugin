@@ -23,6 +23,10 @@ M.getTempDirectory = function()
     return FS.checkAndCreateFolder(plg_cache_path)
 end
 
+M.getPluginName =function()
+    return PlgState.plg_name
+end
+
 M.getPluginDirectory = function()
     local plg_path_alt = table.concat({DataStorage:getDataDir(), "/plugins/", PlgState.plg_name, '.koplugin'})
     return PlgState.plg_path or plg_path_alt

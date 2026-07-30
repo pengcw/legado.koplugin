@@ -28,6 +28,7 @@ local util = require("util")
 local Device = require("device")
 local Backend = require("Legado/Backend")
 local H = require("Legado/Helper")
+local Env = require("Legado.Helper.Env")
 
 local Screen = Device.screen
 
@@ -66,8 +67,7 @@ function BookDetails:init()
             self.bookinfo.author = '未知'
         end
         local show_book_title = ("%s (%s)"):format(self.bookinfo.name, self.bookinfo.author)
-        local md5 = require("Legado.Helper.Crypto").md5
-        self.bookinfo.cache_id = tostring(md5(show_book_title))
+        self.bookinfo.cache_id = tostring(H.md5(show_book_title))
     end
 
     self.layout = {}
@@ -177,7 +177,7 @@ function BookDetails:getButtonGroup(other_elements_height)
                 local path_chooser = require("ui/widget/pathchooser"):new{
                     title ="长按图片选择",
                     select_directory = false,
-                    path = H.getHomeDir(),
+                    path = Env.getHomeDir(),
                     onConfirm = function(image_file)
                         if not H.is_str(image_file) then return end
                         if DocumentRegistry:isImageFile(image_file) then

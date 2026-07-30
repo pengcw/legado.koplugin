@@ -16,6 +16,8 @@ local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
 local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
+local Env = require("Legado.Helper.Env")
+local FS = require("Legado.Helper.FS")
 
 local PlgState = require("Legado/PlgState")
 local init_book_links = require("Legado/BookLinks")
@@ -418,11 +420,11 @@ function LibraryView:getSharedMetaData(dir)
 end
 
 function LibraryView:getBrowserHomeDir(skip_check)
-    local home_dir = H.getHomeDir()
+    local home_dir = Env.getHomeDir()
     if not H.is_str(home_dir) then return nil end
     
     local browser_dir_name = "Legado\u{200B}书目"
-    local expected_path = H.joinPath(home_dir, browser_dir_name)
+    local expected_path = FS.joinPath(home_dir, browser_dir_name)
     
     if not H.is_str(PlgState.book_links_homedir) or PlgState.book_links_homedir ~= expected_path then
         local clean_home_dir = home_dir:gsub("/+$", "")
@@ -435,7 +437,7 @@ function LibraryView:getBrowserHomeDir(skip_check)
     end
 
     if not skip_check then
-        local success, err = pcall(H.checkAndCreateFolder, PlgState.book_links_homedir)
+        local success, err = pcall(FS.checkAndCreateFolder, PlgState.book_links_homedir)
         if not (success and util.directoryExists(PlgState.book_links_homedir)) then
             return nil
         end
