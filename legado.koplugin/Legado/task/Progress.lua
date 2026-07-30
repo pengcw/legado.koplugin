@@ -2,13 +2,14 @@ local UIManager = require("ui/uimanager")
 local Screen = require("device").screen
 local InfoMessage = require("ui/widget/infomessage")
 local TaskQueue = require("Legado.task.Queue")
+local H = require("Legado/Helper")
 
-local Progress = {}
+local M = {}
 local SPINNER_STYLES = {{"|", "/", "-", "\\"}, {"\u{25D0}", "\u{25D3}", "\u{25D1}", "\u{25D2}"}}
 
 local function show_progress_info(message, options)
-    if type(message) ~= "string" then message = "" end
-    if type(options) ~= 'table' then options = {} end
+    if not H.is_str(message) then message = "" end
+    if not H.is_tbl(options) then options = {} end
 
     local defaultOptions = {
         text = "\u{231B}  " .. message,
@@ -30,7 +31,7 @@ local function show_progress_info(message, options)
     local spinner_index = 1
     local current_progress_text = ""
     local progress_max = defaultOptions.progress_max
-    local has_progress_max = type(progress_max) == "number"
+    local has_progress_max = H.is_num(progress_max)
     updateText = function()
         if has_progress_max and current_progress then
             current_progress_text = progress_max and string.format("[%s/%s]", current_progress, progress_max) or ""
@@ -77,30 +78,41 @@ local function show_progress_info(message, options)
     }
 end
 
-function Progress.loading(message_or_args, runnable, callback, options, allow_dismiss)
+function M.loading(message_or_args, runnable, callback, options, silent_cancel)
     local args = {}
-    if type(message_or_args) == "table" then
+    if H.is_tbl(message_or_args) then
         args = message_or_args
     else
-        args = type(options) == "table" and options or {}
-        args.text = type(message_or_args) == "string" and message_or_args or ""
+        if H.is_tbl(options) then
+            for k, v in pairs(options) do
+                args[k] = v
+            end
+        elseif H.is_boolean(options) and silent_cancel == nil then
+            silent_cancel = options
+        end
+        args.text = H.is_str(message_or_args) and message_or_args or ""
         args.runnable = runnable
         args.callback = callback
-        if allow_dismiss ~= nil then
-            args.dismissable = allow_dismiss
+        if silent_cancel ~= nil then
+            args.silent_cancel = silent_cancel
         end
     end
-    args.dismissable = args.dismissable or false
 
-    local message        = args.text or ""
-    local task_runnable  = args.runnable
-    local on_done        = args.callback
-    local is_dismissable = args.dismissable
-    local on_cancel_func = args.on_cancel or args.cancel_callback
-    local notify_bg_finish      = args.notify_bg_finish or false
-    local timeout        = args.timeout
+    args.silent_cancel = args.silent_cancel or args.silent or false
+    if args.dismissable == nil then
+        args.dismissable = args.silent_cancel and true or false
+    end
 
-    if type(task_runnable) ~= "function" then return end
+    local message          = args.text or ""
+    local task_runnable    = args.runnable
+    local on_done          = args.callback
+    local is_dismissable   = args.dismissable
+    local is_silent_cancel = args.silent_cancel
+    local on_cancel_func   = args.on_cancel or args.cancel_callback
+    local notify_bg_finish = args.notify_bg_finish or false
+    local timeout          = args.timeout
+
+    if not H.is_func(task_runnable) then return end
 
     local pid
     local is_cancelled = false
@@ -108,6 +120,7 @@ function Progress.loading(message_or_args, runnable, callback, options, allow_di
     local is_finished = false
     local message_dialog
     local confirm_dialog
+    local bg_switch_dialog
 
     local MessageBox = require("Legado/MessageBox")
 
@@ -116,8 +129,20 @@ function Progress.loading(message_or_args, runnable, callback, options, allow_di
             if is_cancelled or is_finished then return end
             if message_dialog and message_dialog.unschedule then message_dialog:unschedule() end
             
+            if is_silent_cancel then
+                is_cancelled = true
+                bg_switch_dialog = MessageBox:notice("取消操作")
+                if message_dialog and message_dialog.close then
+                    message_dialog:close()
+                end
+                if H.is_func(on_done) then
+                    on_done(false, "cancelled")
+                end
+                return
+            end
+
             if not on_cancel_func then
-                MessageBox:notice("已切换后台")
+                bg_switch_dialog = MessageBox:notice("已切至后台")
                 is_background = true 
                 return 
             end
@@ -133,10 +158,10 @@ function Progress.loading(message_or_args, runnable, callback, options, allow_di
 
                 if result then
                     is_cancelled = true
-                    if type(on_cancel_func) == "function" then
-                        pcall(on_cancel_func)
+                    if H.is_func(on_cancel_func) then
+                        pcall(on_cancel_func, pid)
                     end
-                    if type(on_done) == "function" then
+                    if H.is_func(on_done) then
                         on_done(false, "cancelled")
                     end
                 else
@@ -153,10 +178,12 @@ function Progress.loading(message_or_args, runnable, callback, options, allow_di
         if is_cancelled then return end
         
         if message_dialog and message_dialog.close then 
-            message_dialog:close() 
+            message_dialog:close()
         end
-        
-        if type(on_done) == 'function' then
+        if confirm_dialog then UIManager:close(confirm_dialog) end
+        if bg_switch_dialog then UIManager:close(bg_switch_dialog) end
+
+        if H.is_func(on_done) then
             if not ok then
                 on_done(false, return_values or "Task was cancelled or failed to complete")
             else
@@ -169,26 +196,14 @@ function Progress.loading(message_or_args, runnable, callback, options, allow_di
             MessageBox:notice(bg_msg)
         end
     end, timeout)
-
-    return {
-        pid = pid,
-        close = function()
-            if confirm_dialog and confirm_dialog.close then
-                confirm_dialog:close()
-            end
-            if message_dialog and message_dialog.close then 
-                message_dialog:close() 
-            end
-        end
-    }
 end
 
-function Progress.showBar(message, options)
-    if type(options) ~= 'table' then options = {} end
+function M.showBar(message, options)
+    if not H.is_tbl(options) then options = {} end
 
     local title = options.title or "progressbar"
     local sub_title = message or ""
-    local max = type(options.max) == "number" and options.max or 1
+    local max = H.is_num(options.max) and options.max or 1
     local show_parent = options.parent
 
     local progressbar_dialog
@@ -209,4 +224,4 @@ function Progress.showBar(message, options)
     return progressbar_dialog or show_progress_info(sub_title, {progress_max = max, parent = show_parent})
 end
 
-return Progress
+return M

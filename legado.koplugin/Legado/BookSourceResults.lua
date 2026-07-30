@@ -457,7 +457,7 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
             end, function(err_msg)
                 if err_msg == "没有更多了" then self.has_more_api_results = nil end
                 MessageBox:error(err_msg or '加载失败')
-            end)
+            end, nil, true)
         end
     end)
 end
@@ -466,7 +466,6 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
     if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
         return MessageBox:error('参数错误')
     end
-
     TaskProg.loading("正在换源 ", function()
         return Backend:autoChangeBookSource(bookinfo)
     end, function(state, response)
@@ -478,7 +477,7 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
                 MessageBox:error(err_msg or '操作失败')
             end)
         end
-    end)
+    end, nil, true)
 end
 
 function M:selectBookSource(selectCallback)
@@ -545,7 +544,7 @@ function M:selectBookSource(selectCallback)
                 MessageBox:notice('列表请求失败:', tostring(err_msg))
             end)
         end
-    end)
+    end, nil, true)
 end
 
 function M:changeBookSource(bookinfo)
@@ -713,7 +712,7 @@ function M:selectExploreCategory(source)
                     MessageBox:notice(err_msg or '加载失败')
                 end)
             end
-    end)
+    end, nil, true)
 end
 
 function M:handleExploreBook(source_info, url, is_more_call)

@@ -4,8 +4,8 @@ local H = require("Legado/Helper")
 local M = {}
 
 local function to_lock_name(target)
-    if type(target) == "string" then return target end
-    if type(target) == "table" and target.book_cache_id and target.chapters_index ~= nil then
+    if H.is_str(target) then return target end
+    if H.is_tbl(target) and target.book_cache_id and target.chapters_index ~= nil then
         return string.format("chapter:%s:%s", tostring(target.book_cache_id), tostring(target.chapters_index))
     end
     return tostring(target)
@@ -23,7 +23,7 @@ function M.isLocked(dbManager, target)
         params = { now_time }
     end
     local ok, res = pcall(function() return dbManager:execute(sql, params) end)
-    return ok and type(res) == "table" and #res > 0
+    return ok and H.is_tbl(res) and #res > 0
 end
 
 function M.cleanExpired(dbManager)
@@ -35,7 +35,7 @@ end
 
 function M.setLock(dbManager, targets, is_locked, ttl, owner_id)
     if not (dbManager and dbManager.isConnected and targets) then return false end
-    local list = (type(targets) == "table" and targets[1]) and targets or { targets }
+    local list = (H.is_tbl(targets) and targets[1]) and targets or { targets }
     local now_time = os.time()
     owner_id = owner_id or "main"
     ttl = ttl or 7200
