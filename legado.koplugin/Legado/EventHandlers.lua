@@ -118,7 +118,7 @@ function Handlers:register(parent_ref)
         end
 
         require("Legado/BookSourceResults"):searchBookDialog(function()
-            self.library_view:fetchAndShow()
+            if self.library_view then self.library_view:fetchAndShow() end
         end, def_search_input)
 
         return true
