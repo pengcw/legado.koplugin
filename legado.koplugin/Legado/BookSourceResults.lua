@@ -405,7 +405,7 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
                 MessageBox:notice(err_msg or '搜索请求失败')
             end)
         end
-    end)
+    end, nil, true)
 end
 
 function M:handleAvailableBookSource(bookinfo, is_more_call)
