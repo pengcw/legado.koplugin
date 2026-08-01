@@ -35,6 +35,8 @@ end
 
 function M.setLock(dbManager, targets, is_locked, ttl, owner_id)
     if not (dbManager and dbManager.isConnected and targets) then return false end
+    if H.is_tbl(targets) and #targets == 0 then return true end
+
     local list = (H.is_tbl(targets) and targets[1]) and targets or { targets }
     local now_time = os.time()
     owner_id = owner_id or "main"
@@ -64,7 +66,7 @@ function M.withLock(dbManager, target, fn, ttl, owner_id)
         return false, "lock_acquired_failed"
     end
     
-    owner_id = owner_id or "main"
+    owner_id = owner_id or string.format("owner_%d_%d", os.time(), math.random(1000, 9999))
     M.setLock(dbManager, target, true, ttl, owner_id)
     local ok, res1, res2 = pcall(fn)
     M.setLock(dbManager, target, false, nil, owner_id)
