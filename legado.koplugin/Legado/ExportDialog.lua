@@ -8,7 +8,10 @@ local logger = require("logger")
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
+local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
+local Env = require("Legado.Helper.Env")
+local FS = require("Legado.Helper.FS")
 
 local CbzExporter = {
     bookinfo = nil,
@@ -65,9 +68,9 @@ function CbzExporter:package()
     self.bookinfo.name = self.bookinfo.name or "未知书名"
     self.bookinfo.author = self.bookinfo.author or "未知作者"
 
-    local output_dir = self.output_path or H.getHomeDir()
-    local safe_filename = H.getSafeFilename(string.format("%s-%s",self.bookinfo.name, self.bookinfo.author))
-    local output_path = H.joinPath(output_dir, safe_filename .. ".cbz")
+    local output_dir = self.output_path or Env.getHomeDir()
+    local safe_filename = FS.getSafeFilename(string.format("%s-%s",self.bookinfo.name, self.bookinfo.author))
+    local output_path = FS.joinPath(output_dir, safe_filename .. ".cbz")
     local cbz_path_tmp = output_path .. '.tmp'
 
     if util.fileExists(output_path) then
@@ -128,11 +131,11 @@ function CbzExporter:package()
                 }
             end
 
-            tmp_base = H.joinPath(H.getTempDirectory(), ".tmp.sdr")
-            H.checkAndCreateFolder(tmp_base)
+            tmp_base = FS.joinPath(Env.getTempDirectory(), ".tmp.sdr")
+            FS.checkAndCreateFolder(tmp_base)
             local run_stamp = tostring(os.time()) .. "_" .. tostring(math.floor(math.random() * 100000))
-            main_temp_dir = H.joinPath(tmp_base, "cbz_temp_" .. run_stamp)
-            H.checkAndCreateFolder(main_temp_dir)
+            main_temp_dir = FS.joinPath(tmp_base, "cbz_temp_" .. run_stamp)
+            FS.checkAndCreateFolder(main_temp_dir)
 
             cbz:add("mimetype",  self:createMimetype(), true)
         else
@@ -181,9 +184,9 @@ function CbzExporter:package()
                         else
                             -- 兼容旧版本处理压缩文件
                             -- 为每个章节创建独立的临时目录
-                            local chapter_temp_dir = H.joinPath(main_temp_dir, "chapter_" .. current_progress)
+                            local chapter_temp_dir = FS.joinPath(main_temp_dir, "chapter_" .. current_progress)
                             -- logger.info(chapter_temp_dir)
-                            H.checkAndCreateFolder(chapter_temp_dir)
+                            FS.checkAndCreateFolder(chapter_temp_dir)
                             
                             -- 解压 CBZ 到临时目录
                             local cache_path_escaped = cache_chapter.cacheFilePath:gsub("'", "'\\''")
@@ -215,7 +218,7 @@ function CbzExporter:package()
                                 
                                 -- 将图片添加到 CBZ
                                 for _, file in ipairs(image_files) do
-                                    local file_path = H.joinPath(chapter_temp_dir, file.path)
+                                    local file_path = FS.joinPath(chapter_temp_dir, file.path)
                                     
                                     local img_data = util.readFromFile(file_path, "rb")
                                     if img_data then
@@ -328,7 +331,7 @@ function M:_getChapterCount(book_cache_id)
 end
 function M:showExportSuccessDialog(result, open_callback)
     local filename = result.path and result.path:match("([^/\\]+)$") or "未知"
-    local output_dir = result.path and result.path:match("(.+)[/\\]") or H.getHomeDir()
+    local output_dir = result.path and result.path:match("(.+)[/\\]") or Env.getHomeDir()
     
     MessageBox:confirm(
         string.format("导出成功！\n\n文件：%s\n位置：%s", filename, output_dir),
@@ -428,7 +431,7 @@ function M:cacheAllChapters(completion_callback)
     end
     local book_cache_id = bookinfo.cache_id
 
-    MessageBox:loading("正在统计已缓存章节", function()
+    TaskProg.loading("正在统计已缓存章节", function()
         return Backend:analyzeCacheStatus(book_cache_id)
     end, function(state, response)
         if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
@@ -497,7 +500,7 @@ function M:cacheSelectedChapters(start_chapter_index, down_chapter_count, comple
         target_chapter_count = actual_chapter_count
     end
 
-    MessageBox:loading("正在统计已缓存章节", function()
+    TaskProg.loading("正在统计已缓存章节", function()
         return Backend:analyzeCacheStatusForRange(book_cache_id , start_index, target_chapter_count - 1)
     end, function(state, response)
         if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
@@ -562,10 +565,10 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
     if retry_count > 0 then
         title_text = title_text .. string.format(" (重试 %d)", retry_count)
     end
-    local cache_msg = MessageBox:progressBar("缓存进度", {
+    local cache_msg = TaskProg.showBar("正在缓存章节...", {
         title = title_text,
         max = uncached_count
-    }) or MessageBox:showloadingMessage("正在缓存章节...")
+    })
 
     if not retry_count then retry_count = 0 end
     local retry_func = function()
@@ -692,7 +695,7 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, ret
 
     local book_cache_id = bookinfo.cache_id
 
-    MessageBox:loading("正在检查缓存完整性", function()
+    TaskProg.loading("正在检查缓存完整性", function()
         return Backend:analyzeCacheStatusForRange(book_cache_id, 0, chapter_count - 1, true)
     end, function(state, cache_status)
         if not (state == true and H.is_tbl(cache_status) and H.is_tbl(cache_status.cached_chapters) and H.is_tbl(cache_status.uncached_chapters)) then
@@ -777,9 +780,9 @@ function M:_buildEpubFile(bookinfo, chapters, export_settings)
         return {success = false, error = "没有可导出的章节" }
     end
 
-    local output_dir = export_settings.output_path or H.getHomeDir()
-    local safe_filename = H.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author))
-    local output_path = H.joinPath(output_dir, safe_filename .. ".epub")
+    local output_dir = export_settings.output_path or Env.getHomeDir()
+    local safe_filename = FS.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author))
+    local output_path = FS.joinPath(output_dir, safe_filename .. ".epub")
 
     if util.fileExists(output_path) then pcall(util.removeFile, output_path) end
 
@@ -821,7 +824,7 @@ end
 
 function M:_processEpubExport(bookinfo, chapters, only_cached)
     local export_settings = self:getEpubExportSettings()
-    MessageBox:loading("正在统计已缓存章节", function()
+    TaskProg.loading("正在统计已缓存章节", function()
         return self:_buildEpubFile(bookinfo, chapters, export_settings)
     end, function(state, build_result)
         if state == true and H.is_tbl(build_result) and build_result.success then
@@ -839,7 +842,7 @@ end
 function M:_processCbzExport(bookinfo, chapters, only_cached)
     local export_settings = self:getEpubExportSettings()
 
-    local cache_msg = MessageBox:progressBar("缓存进度", {
+    local cache_msg = TaskProg.showBar("缓存进度", {
         title = "导出进度",
         max = #chapters
     })
@@ -906,7 +909,7 @@ function M:exportBook()
         return
     end
 
-    MessageBox:loading("正在统计已缓存章节", function()
+    TaskProg.loading("正在统计已缓存章节", function()
         return Backend:analyzeCacheStatus(book_cache_id)
     end, function(state, response)
         if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
@@ -996,7 +999,7 @@ function M:showEpubExportSettings()
         if export_settings.output_path then
             return export_settings.output_path
         else
-            return H.getHomeDir()
+            return Env.getHomeDir()
         end
     end
 
@@ -1040,7 +1043,7 @@ function M:showEpubExportSettings()
                     local PathChooser = require("ui/widget/pathchooser")
                     local path_chooser = PathChooser:new{
                         title = "选择 CSS 文件",
-                        path = H.getHomeDir(),
+                        path = Env.getHomeDir(),
                         select_directory = false,
                         select_file = true,
                         file_filter = function(filename)

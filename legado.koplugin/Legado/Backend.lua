@@ -11,9 +11,10 @@ local time = require("ui/time")
 local UIManager = require("ui/uimanager")
 local TaskQueue = require("Legado.task.Queue")
 local H = require("Legado/Helper")
-local safe_pcall = require("Legado.Helper.Error").pcall
-local safe_require = require("Legado.Helper.Require").require
-local md5 = require("Legado.Helper.Crypto").md5
+local Env = require("Legado.Helper.Env")
+local FS = require("Legado.Helper.FS")
+local safe_call = require("Legado.Helper.Error").pcall
+local load_script = require("Legado.Helper.Loader").load_script
 local TaskLock = require("Legado.task.Lock")
 
 -- 太旧版本缺少这个函数
@@ -216,14 +217,14 @@ end
 
 function M:initialize()
     local ok, err_msg = pcall(function()
-        local fn, file_path = safe_require("Legado/_r3l_once")
+        local fn, file_path = load_script("Legado/_r3l_once")
         return fn and fn() == true and util.removeFile(file_path)
     end)
     if not ok then
         logger.err("run_once_task loading loading failed:", err_msg)
     end
 
-    self.settings_data = self:getLuaConfig(H.getUserSettingsPath())
+    self.settings_data = self:getLuaConfig(Env.getUserSettingsPath())
 
     if H.is_tbl(self.settings_data) and not (H.is_tbl(self.settings_data.data) and 
                 self.settings_data.data['current_conf_name']) then
@@ -249,7 +250,7 @@ function M:initialize()
 
     local BookInfoDB = require("Legado/BookInfoDB")
     self.dbManager = BookInfoDB:new({
-        dbPath = H.getTempDirectory() .. "/bookinfo.db"
+        dbPath = Env.getTempDirectory() .. "/bookinfo.db"
     })
     
     self:loadApiProvider()
@@ -282,12 +283,12 @@ function M:getLuaConfig(path)
     return LuaSettings:open(path)
 end
 function M:backgroundCacheConfig()
-    return self:getLuaConfig(H.getTempDirectory() .. '/cache.lua')
+    return self:getLuaConfig(Env.getTempDirectory() .. '/cache.lua')
 end
 
 function M:sharedChapterMetadata(book_cache_dir)
     if not (H.is_str(book_cache_dir) and util.pathExists(book_cache_dir)) then return {} end
-    local book_defaults_path = H.joinPath(book_cache_dir, "book_defaults.lua")
+    local book_defaults_path = FS.joinPath(book_cache_dir, "book_defaults.lua")
     return self:getLuaConfig(book_defaults_path)
 end
 function M:isBookTypeComic(book_cache_id)
@@ -367,7 +368,7 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
     local bookUrl = bookinfo.bookUrl
 
     return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
-        local status, err = safe_pcall(function()
+        local status, err = safe_call(function()
             return self.dbManager:upsertChapters(book_cache_id, response.data)
         end)
         if not status then
@@ -712,14 +713,14 @@ local book_chapter_resources = function(book_cache_id, filename, res_data, overw
 
     local catalogue, relpath, filepath
 
-    catalogue = string.format("%s/resources", H.getBookCachePath(book_cache_id))
+    catalogue = string.format("%s/resources", Env.getBookCachePath(book_cache_id))
     if H.is_str(filename) then
         relpath = string.format("resources/%s", filename)
         filepath = string.format("%s/%s", catalogue, filename)
     end
 
     if res_data and (overwrite or not util.fileExists(filepath or "")) then
-        H.checkAndCreateFolder(catalogue)
+        FS.checkAndCreateFolder(catalogue)
         util.writeToFile(res_data, filepath, true)
     end
 
@@ -822,7 +823,7 @@ processLink = function(book_cache_id, resources_src, base_url, is_proxy, callbac
     end
 
     -- logger.info("src_ext", ext, "resources_src", resources_src)
-    local resources_id = md5(processed_src)
+    local resources_id = H.md5(processed_src)
     local ext = extract_extension(processed_src, resources_src)
     local resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
 
@@ -936,7 +937,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
     local down_chapters_index = chapter.chapters_index
 
     content = H.is_str(content) and content or tostring(content)
-    filePath = filePath or H.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
+    filePath = filePath or Env.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
  
     local first_line = string.match(content, "([^\n]*)\n?") or content
     local PAGE_TYPES = {
@@ -980,7 +981,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                 return chapter_writeToFile(chapter, filePath, err['data'])
             else
                 filePath = filePath .. '.cbz'
-                local status, err = safe_pcall(pDownload_CreateCBZ, chapter, filePath, img_sources)
+                local status, err = safe_call(pDownload_CreateCBZ, chapter, filePath, img_sources)
 
                 if not status then
                     error('CreateCBZ err: ' .. tostring(err))
@@ -1027,7 +1028,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
         if H.is_str(original_name) and original_name ~= "" and original_name:find("%.") then
             local dir_path, file_name = util.splitFilePathName(filePath)
             if H.is_str(dir_path) then
-                filePath = H.joinPath(dir_path, original_name)
+                filePath = FS.joinPath(dir_path, original_name)
             end
         end
 
@@ -1185,6 +1186,8 @@ function M:_pDownloadChapter(chapter, is_recursive)
     local chapters_index = chapter.chapters_index
     local chapter_title = chapter.title or ''
     local down_chapters_index = chapter.chapters_index
+    -- qread only
+    local origin = chapter.origin
 
     if bookUrl == nil or not book_cache_id then
         error('_pDownloadChapter input parameters err' .. tostring(bookUrl) .. tostring(book_cache_id))
@@ -1244,7 +1247,7 @@ function M:getCacheChapterFilePath(chapter, not_write_db)
         end
     end
 
-    local filePath = H.getChapterCacheFilePath(book_cache_id, chapters_index, book_name)
+    local filePath = Env.getChapterCacheFilePath(book_cache_id, chapters_index, book_name)
 
     local extensions = {'html', 'cbz', 'xhtml', 'txt', 'png', 'jpg'}
 
@@ -1664,8 +1667,8 @@ function M:getChapterLastUpdateTime(bookCacheId)
 end
 
 function M:getBookExtras(book_cache_id)
-    local book_cache_dir = H.getBookCachePath(book_cache_id)
-    return self:getLuaConfig(H.joinPath(book_cache_dir, "cache.lua"))
+    local book_cache_dir = Env.getBookCachePath(book_cache_id)
+    return self:getLuaConfig(FS.joinPath(book_cache_dir, "cache.lua"))
 end
 
 function M:chapterSortingMode(bookCacheId, mode)
@@ -1718,7 +1721,7 @@ function M:cleanBookCache(book_cache_id)
 
     self.dbManager:clearBook(bookShelfId, book_cache_id)
 
-    local book_cache_path = H.getBookCachePath(book_cache_id)
+    local book_cache_path = Env.getBookCachePath(book_cache_id)
     if book_cache_path and util.pathExists(book_cache_path) then
 
         ffiUtil.purgeDir(book_cache_path)
@@ -1738,9 +1741,9 @@ function M:cleanAllBookCaches()
     local bookShelfId = self:getCurrentBookShelfId()
     self.dbManager:removeBookShelf(bookShelfId)
     self:closeDbManager()
-    local books_cache_dir = H.getTempDirectory()
+    local books_cache_dir = Env.getTempDirectory()
     ffiUtil.purgeDir(books_cache_dir)
-    H.getTempDirectory()
+    Env.getTempDirectory()
     self:saveSettings()
     return wrap_response(true)
 end
@@ -1920,7 +1923,7 @@ function M:get_default_cover_cache(book_cache_id)
     if not (H.is_str(book_cache_id) and book_cache_id ~= "") then
         return nil
     end
-    local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
+    local cover_path_no_ext = Env.getCoverCacheFilePath(book_cache_id)
     return self:findCustomCoverFileInDir(cover_path_no_ext)
 end
 
@@ -1968,11 +1971,11 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
         end
     end
 
-    local cover_path_no_ext = H.getCoverCacheFilePath(book_cache_id)
+    local cover_path_no_ext = Env.getCoverCacheFilePath(book_cache_id)
     local lock_path = cover_path_no_ext .. ".downloading"
     
     if util.fileExists(lock_path) then
-        if not H.isFileOlderThan(lock_path, 60) then
+        if not FS.isFileOlderThan(lock_path, 60) then
             logger.warn("download_cover_img: Cover download already in progress", book_cache_id)
             return nil, nil
         else
@@ -1981,7 +1984,7 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
     end
     
     local dir = util.splitFilePathName(cover_path_no_ext)
-    H.checkAndCreateFolder(dir)
+    FS.checkAndCreateFolder(dir)
     util.writeToFile("", lock_path)
 
     local img_src = self:getProxyCoverUrl(cover_url)
@@ -2138,7 +2141,7 @@ function M:downloadChapter(chapter)
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
 
-    local status, err = safe_pcall(function()
+    local status, err = safe_call(function()
         return self:_pDownloadChapter(chapter)
     end)
     if not status then
@@ -2155,7 +2158,7 @@ function M:getCurrentBookShelfId()
         logger.err("[Fatal] BookShelfId is null — cannot proceed without a valid BookShelfId")
         return nil
     end
-    return tostring(md5(current_conf_name))
+    return tostring(H.md5(current_conf_name))
 end
 
 local function check_web_conf(url, server_type, user, pwd)
@@ -2253,7 +2256,7 @@ function M:deleteWebConfig(conf_name)
     end
 
     -- Use the config name to generate the bookshelf ID for deletion
-    local book_shelf_id = tostring(md5(conf_name))
+    local book_shelf_id = tostring(H.md5(conf_name))
     pcall(function() self.dbManager:disableBookShelf(book_shelf_id) end)
 
     self.settings_data.data.web_configs[conf_name] = nil
@@ -2336,7 +2339,7 @@ end
 function M:saveSettings(settings)
     if not H.is_tbl(settings) then
         self.settings_data:flush()
-        self.settings_data = LuaSettings:open(H.getUserSettingsPath())
+        self.settings_data = LuaSettings:open(Env.getUserSettingsPath())
         return wrap_response(true)
     end
     
@@ -2359,7 +2362,7 @@ function M:saveSettings(settings)
 
     self.settings_data.data = settings
     self.settings_data:flush()
-    self.settings_data = LuaSettings:open(H.getUserSettingsPath())
+    self.settings_data = LuaSettings:open(Env.getUserSettingsPath())
     return wrap_response(true)
 end
 
@@ -2378,23 +2381,20 @@ function M:launchProcess(job, callback, timeout)
     if not H.is_func(callback) then
         return TaskQueue.spawnProcess(job, nil, timeout)
     end
-    local Trapper = require("ui/trapper")
-    Trapper:wrap(function()
-        logger.dbg("Legado.launchProcess - START")
-        TaskQueue.spawnProcess(job, function(ok, r1, r2)
-            logger.dbg("Legado.launchProcess - END")
-            local cb_ok, cb_err = pcall(callback, ok, r1, r2)
-            if not cb_ok then
-                logger.err("Legado.launchProcess - Callback error:", tostring(cb_err))
-            end
-        end, timeout)
-    end)
+    logger.dbg("Legado.launchProcess - START")
+    TaskQueue.spawnProcess(job, function(ok, r1, r2)
+        logger.dbg("Legado.launchProcess - END")
+        local cb_ok, cb_err = pcall(callback, ok, r1, r2)
+        if not cb_ok then
+            logger.err("Legado.launchProcess - Callback error:", tostring(cb_err))
+        end
+    end, timeout)
 end
 
 function M:backupDbWithPreCheck()
-    local temp_dir = H.getTempDirectory()
-    local last_backup_db = H.joinPath(temp_dir, "bookinfo.db.bak")
-    local bookinfo_db_path = H.joinPath(temp_dir, "bookinfo.db")
+    local temp_dir = Env.getTempDirectory()
+    local last_backup_db = FS.joinPath(temp_dir, "bookinfo.db.bak")
+    local bookinfo_db_path = FS.joinPath(temp_dir, "bookinfo.db")
 
     if not util.fileExists(bookinfo_db_path) then
         logger.warn("legado plugin: source database file does not exist - " .. bookinfo_db_path)
@@ -2421,7 +2421,7 @@ function M:backupDbWithPreCheck()
     if has_backup then
         util.removeFile(last_backup_db)
     end
-    H.copyFileFromTo(bookinfo_db_path, last_backup_db)
+    FS.copyFileFromTo(bookinfo_db_path, last_backup_db)
     logger.info("legado plugin: backup successful")
     setting_data.last_backup_time = os.time()
     self:saveSettings(setting_data)

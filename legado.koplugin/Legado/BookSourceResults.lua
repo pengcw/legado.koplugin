@@ -13,6 +13,7 @@ local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
+local TaskProg = require("Legado.task.Progress")
 local PlgState = require("Legado/PlgState")
 
 local M = {
@@ -325,7 +326,7 @@ function M:handleSingleSourceSearch(searchText)
         if not H.is_tbl(item) then return end
         local book_source_url = item.url
         local book_source_name = item.name
-        MessageBox:loading(string.format("%s 查询中 ", item.text or ""), function()
+        TaskProg.loading(string.format("%s 查询中 ", item.text or ""), function()
             return Backend:searchBookSingle({
                 search_text = searchText, 
                 book_source_url = book_source_url,
@@ -352,7 +353,7 @@ function M:handleSingleSourceSearch(searchText)
                     MessageBox:notice(err_msg or '搜索请求失败')
                 end)
             end
-        end)
+        end, nil, true)
     end)
 end
 
@@ -364,7 +365,7 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
     
     self.last_index = self.last_index ~= nil and self.last_index or -1
 
-    MessageBox:loading(string.sub(search_text, 1, 1) ~= '=' and string.format("正在搜索 [%s] ", search_text) or
+    TaskProg.loading(string.sub(search_text, 1, 1) ~= '=' and string.format("正在搜索 [%s] ", search_text) or
                            string.format("精准搜索 [%s] ", string.sub(search_text, 2)), function()
         return Backend:searchBookMulti({
             search_text = search_text, 
@@ -404,7 +405,7 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
                 MessageBox:notice(err_msg or '搜索请求失败')
             end)
         end
-    end)
+    end, nil, true)
 end
 
 function M:handleAvailableBookSource(bookinfo, is_more_call)
@@ -422,7 +423,7 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
         last_index = is_more_call and self.last_index,
         search_size = 8,
     }
-    MessageBox:loading(
+    TaskProg.loading(
         string.format("搜索[%s]可用书源 ", bookinfo.name), function()
         return Backend:getAvailableBookSource(options)
     end, function(state, response)
@@ -456,7 +457,7 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
             end, function(err_msg)
                 if err_msg == "没有更多了" then self.has_more_api_results = nil end
                 MessageBox:error(err_msg or '加载失败')
-            end)
+            end, nil, true)
         end
     end)
 end
@@ -465,8 +466,7 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
     if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
         return MessageBox:error('参数错误')
     end
-
-    MessageBox:loading("正在换源 ", function()
+    TaskProg.loading("正在换源 ", function()
         return Backend:autoChangeBookSource(bookinfo)
     end, function(state, response)
         if state == true then
@@ -477,12 +477,12 @@ function M:autoChangeSource(bookinfo, onReturnCallback)
                 MessageBox:error(err_msg or '操作失败')
             end)
         end
-    end)
+    end, nil, true)
 end
 
 function M:selectBookSource(selectCallback)
     
-    MessageBox:loading("获取源列表 ", function()
+    TaskProg.loading("获取源列表 ", function()
         return Backend:getBookSourcesList()
     end, function(state, response)
         if state == true then
@@ -544,7 +544,7 @@ function M:selectBookSource(selectCallback)
                 MessageBox:notice('列表请求失败:', tostring(err_msg))
             end)
         end
-    end)
+    end, nil, true)
 end
 
 function M:changeBookSource(bookinfo)
@@ -562,7 +562,7 @@ function M:changeBookSource(bookinfo)
         return
     end
     Backend:closeDbManager()
-    MessageBox:loading("更换中 ", function()
+    TaskProg.loading("更换中 ", function()
         return Backend:changeBookSource(new_bookinfo)
     end, function(state, response)
         if state == true then
@@ -580,7 +580,7 @@ function M:addBookToLibrary(bookinfo)
         return MessageBox:notice('参数错误')
     end
     Backend:closeDbManager()
-    MessageBox:loading("添加中 ", function()
+    TaskProg.loading("添加中 ", function()
         return Backend:addBookToLibrary(bookinfo)
     end, function(state, response)
         if state == true then
@@ -699,7 +699,7 @@ function M:selectExploreCategory(source)
         UIManager:show(category_dialog)
     end
 
-    MessageBox:loading("正在获取探索信息...", function()
+    TaskProg.loading("正在获取探索信息...", function()
             return Backend:getBookSourcesExploreUrl(bookSourceUrl)
     end, function(state, response)
             if state == true then
@@ -712,7 +712,7 @@ function M:selectExploreCategory(source)
                     MessageBox:notice(err_msg or '加载失败')
                 end)
             end
-    end)
+    end, nil, true)
 end
 
 function M:handleExploreBook(source_info, url, is_more_call)
@@ -728,7 +728,7 @@ function M:handleExploreBook(source_info, url, is_more_call)
         page = self.explore_page,
     }
   
-    MessageBox:loading("正在加载书籍...", function()
+    TaskProg.loading("正在加载书籍...", function()
        return Backend:exploreBook(options)
     end, function(state, response)
         if state == true then
@@ -758,7 +758,7 @@ function M:handleExploreBook(source_info, url, is_more_call)
                 MessageBox:notice(err_msg or '加载失败')
             end)
         end
-    end)
+    end, nil, true)
 end
 
 return M

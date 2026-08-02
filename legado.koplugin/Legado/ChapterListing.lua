@@ -16,6 +16,7 @@ local Screen = Device.screen
 local Backend = require("Legado/Backend")
 local Icons = require("Legado.res.icons")
 local MessageBox = require("Legado/MessageBox")
+local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
 
 if not dbg.log then
@@ -252,7 +253,8 @@ function ChapterListing:onMenuHold(item)
                 book_cache_id = chapter.book_cache_id,
                 isDownLoaded = isDownLoaded,
                 bookUrl = chapter.bookUrl,
-                title = chapter.title
+                title = chapter.title,
+                origin = chapter.origin,
             }), function(data)
                 self:refreshItems(true)
                 if isDownLoaded == true then
@@ -334,28 +336,33 @@ end
 
 function ChapterListing:onRefreshChapters()
         Backend:closeDbManager()
-        MessageBox:loading("正在刷新章节数据", function()
-            return Backend:refreshChaptersCache({
-                cache_id = self.bookinfo.cache_id,
-                bookUrl = self.bookinfo.bookUrl,
-                origin = self.bookinfo.origin,
-                name = self.bookinfo.name,
-            }, self._ui_refresh_time)
-        end, function(state, response)
-            if state == true then
-                Backend:HandleResponse(response, function(data)
-                    MessageBox:notice('同步成功')
-                    self:refreshItems(nil, true)
-                    self.all_chapters_count = nil
-                    self._ui_refresh_time = time.now()
-                end, function(err_msg)
-                    MessageBox:notice(err_msg or '同步失败')
-                    if err_msg ~= '处理中' then
-                        MessageBox:notice("请检查并刷新书架")
-                    end
-                end)
-            end
-    end)
+        TaskProg.loading({
+            text = "正在刷新章节数据 ",
+            dismissable = true,
+            runnable = function()
+                return Backend:refreshChaptersCache({
+                    cache_id = self.bookinfo.cache_id,
+                    bookUrl = self.bookinfo.bookUrl,
+                    origin = self.bookinfo.origin,
+                    name = self.bookinfo.name,
+                }, self._ui_refresh_time)
+            end,
+            callback = function(ok, result)
+                if ok == true then
+                    Backend:HandleResponse(result, function(data)
+                        MessageBox:notice('同步成功')
+                        self:refreshItems(nil, true)
+                        self.all_chapters_count = nil
+                        self._ui_refresh_time = time.now()
+                    end, function(err_msg)
+                        MessageBox:notice(err_msg or '同步失败')
+                        if err_msg ~= '处理中' then
+                            MessageBox:notice("请检查并刷新书架")
+                        end
+                    end)
+                end
+            end,
+        })
 end
 
 function ChapterListing:showReaderUI(chapter)
@@ -366,43 +373,47 @@ end
 
 function ChapterListing:syncProgressShow(chapter)
     Backend:closeDbManager()
-    MessageBox:loading("同步中 ", function()
-        if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
-            local response = Backend:saveBookProgress(chapter)
-            if not (type(response) == 'table' and response.type == 'SUCCESS') then
-                local message = type(response) == 'table' and response.message or
-                                    "进度上传失败，请稍后重试"
-                return {
-                    type = 'ERROR',
-                    message = message or ""
-                }
-            end
-        end
-        return Backend:refreshLibraryCache()
-    end, function(state, response)
-        if state == true then
-            Backend:HandleResponse(response, function(data)
-
-                local bookCacheId = self.bookinfo.cache_id
-                local bookinfo = Backend:getBookInfoCache(bookCacheId)
-
-                if H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex) then
-
-                    Backend:MarkReadChapter({
-                        book_cache_id = bookCacheId,
-                        chapters_index = bookinfo.durChapterIndex,
-                        isRead = true
-                    }, true)
-                    self:refreshItems(true, true)
-                    MessageBox:notice('同步完成')
-                    self:switchItemTable(nil, self.item_table, tonumber(bookinfo.durChapterIndex))
-                    self._ui_refresh_time = time.now()
+    TaskProg.loading({
+        text = "同步中 ",
+        dismissable = true,
+        runnable = function()
+            if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
+                local response = Backend:saveBookProgress(chapter)
+                if not (type(response) == 'table' and response.type == 'SUCCESS') then
+                    local message = type(response) == 'table' and response.message or
+                                        "进度上传失败，请稍后重试"
+                    return {
+                        type = 'ERROR',
+                        message = message or ""
+                    }
                 end
-            end, function(err_msg)
-                MessageBox:error('同步失败：', tostring(err_msg))
-            end)
-        end
-    end)
+            end
+            return Backend:refreshLibraryCache()
+        end,
+        callback = function(ok, result)
+            if ok == true then
+                Backend:HandleResponse(result, function(data)
+                    local bookCacheId = self.bookinfo.cache_id
+                    local bookinfo = Backend:getBookInfoCache(bookCacheId)
+                    if H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex) then
+                        Backend:MarkReadChapter({
+                            book_cache_id = bookCacheId,
+                            chapters_index = bookinfo.durChapterIndex,
+                            isRead = true
+                        }, true)
+                        if UIManager:isWidgetShown(self) then
+                            self:refreshItems(true, true)
+                            self:switchItemTable(nil, self.item_table, tonumber(bookinfo.durChapterIndex))
+                        end
+                        MessageBox:notice('同步完成')
+                        self._ui_refresh_time = time.now()
+                    end
+                end, function(err_msg)
+                    MessageBox:error('同步失败：', tostring(err_msg))
+                end)
+            end
+        end,
+    })
 end
 
 function ChapterListing:openMenu()
@@ -474,7 +485,7 @@ function ChapterListing:openMenu()
                                     function(result)
                                         if not result then return end
                                         Backend:closeDbManager()
-                                        MessageBox:loading("清理中 ", function()
+                                        TaskProg.loading("清理中 ", function()
                                             return Backend:cleanBookCache(self.bookinfo.cache_id)
                                         end, function(state, response)
                                             if state == true then

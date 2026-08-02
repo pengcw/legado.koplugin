@@ -1,7 +1,14 @@
 local util = require("util")
-local logger = require("logger")
 
 local M = {}
+
+M.base64 = function(str)
+    return require("ffi/sha2").bin_to_base64(str)
+end
+
+M.md5 = function(str)
+    return require("ffi/sha2").md5(str)
+end
 
 M.if_nil = function(a, b)
     if nil == a then
@@ -59,14 +66,6 @@ M.is_list = function(t)
     end
 end
 
-M.okeys = function(t)
-    local r = {}
-    for k in M.opairs(t) do
-        r[#r + 1] = k
-    end
-    return r
-end
-
 M.all = function(iterable, fn)
     for k, v in pairs(iterable) do
         if not fn(k, v) then
@@ -102,29 +101,14 @@ M.map = function(t, f)
     return _t
 end
 
-M.join = function(l, s)
-    return table.concat(M.map(l, tostring), s, 1)
-end
-
-M.foreachv = function(t, f)
-    for i, v in M.opairs(t) do
-        f(i, v)
-    end
-end
-
 M.foreach = function(t, f)
     for k, v in pairs(t) do
         f(k, v)
     end
 end
 
-M.mapv = function(t, f)
-    local _t = {}
-    for i, value in M.opairs(t) do
-        local _, kv, v = i, f(value, i)
-        table.insert(_t, v or kv)
-    end
-    return _t
+M.join = function(l, s)
+    return table.concat(M.map(l, tostring), s, 1)
 end
 
 -- pay attention to infinite recursion
@@ -138,15 +122,6 @@ end
 
 M.n_to_b = function(n)
     return n == 1
-end
-
-local Env = require("Legado.Helper.Env")
-local FS = require("Legado.Helper.FS")
-for k, v in pairs(FS) do
-    M[k] = v
-end
-for k, v in pairs(Env) do
-    M[k] = v
 end
 
 return M

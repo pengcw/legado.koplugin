@@ -9,6 +9,8 @@ local FileManager = require("apps/filemanager/filemanager")
 local MessageBox = require("Legado/MessageBox")
 local Backend = require("Legado/Backend")
 local H = require("Legado/Helper")
+local FS = require("Legado.Helper.FS")
+local TaskProg = require("Legado.task.Progress")
 local Patcher = require("Legado.patches")
 local PlgState = require("Legado/PlgState")
 
@@ -31,7 +33,8 @@ function Handlers:register(parent_ref)
 
     function parent_ref:onShowLegadoLibraryView()
         if not (self.ui and self.ui.document) then
-            self:openLibraryView()
+            local library_obj = LibraryView:getInstance()
+            if library_obj then library_obj:fetchAndShow() end
         end
         return true
     end
@@ -115,7 +118,7 @@ function Handlers:register(parent_ref)
         end
 
         require("Legado/BookSourceResults"):searchBookDialog(function()
-            self:openLibraryView()
+            if self.library_view then self.library_view:fetchAndShow() end
         end, def_search_input)
 
         return true
@@ -321,22 +324,29 @@ function Handlers:register(parent_ref)
                     text = "清理与维护",
                     sub_item_table = {
                         {
+                            text = "任务队列",
+                            keep_menu_open = true,
+                            callback = function()
+                                require("Legado.task.QueueStatus"):show()
+                            end,
+                        },
+                        {
                             text = "压缩数据库",
                             keep_menu_open = true,
                             callback = function()
                                 local old_size = Backend:getDBFileSize()
-                                local formatted_old = H.formatFileSize(old_size)
+                                local formatted_old = FS.formatFileSize(old_size)
                                 MessageBox:confirm(
                                     string.format("当前数据库大小为：%s\n\n是否确认压缩数据库？", formatted_old),
                                     function(result)
                                         if result then
-                                            MessageBox:loading("压缩中...", function()
+                                            TaskProg.loading("压缩中...", function()
                                                 return Backend:vacuumDatabase()
                                             end, function(state, response)
                                                 if state == true then
                                                     Backend:HandleResponse(response, function(data)
-                                                        local old_str = H.formatFileSize(data.old_size)
-                                                        local new_str = H.formatFileSize(data.new_size)
+                                                        local old_str = FS.formatFileSize(data.old_size)
+                                                        local new_str = FS.formatFileSize(data.new_size)
                                                         MessageBox:info(string.format("数据库压缩完成！\n压缩前: %s\n压缩后: %s", old_str, new_str))
                                                     end, function(err_msg)
                                                         MessageBox:error("压缩失败：", tostring(err_msg))
@@ -357,7 +367,7 @@ function Handlers:register(parent_ref)
                                     function(result)
                                         if result then
                                             Backend:closeDbManager()
-                                            MessageBox:loading("清除中", function()
+                                            TaskProg.loading("清除中", function()
                                                 return Backend:cleanAllBookCaches()
                                             end, function(state, response)
                                                 if state == true then

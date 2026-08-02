@@ -14,7 +14,10 @@ local DocSettings = require("docsettings")
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
 local MessageBox = require("Legado/MessageBox")
+local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
+local Env = require("Legado.Helper.Env")
+local FS = require("Legado.Helper.FS")
 
 local PlgState = require("Legado/PlgState")
 local init_book_links = require("Legado/BookLinks")
@@ -196,7 +199,7 @@ function LibraryView:openMenu(dimen)
             UIManager:close(dialog)
             MessageBox:confirm("即将同步远端书架，按最后阅读时间排序。此操作将覆盖本地书架排序（手动置顶的书籍不受影响)\n是否继续？", function(result)
                 if result then
-                    MessageBox:loading("同步中...", function()
+                    TaskProg.loading("同步中...", function()
                         return Backend:syncAndResortBooks()
                     end, function(state, response)
                         if state == true then
@@ -303,7 +306,7 @@ function LibraryView:loadAndRenderChapter(chapter)
         self:showReaderUI(cache_chapter)
     else
         Backend:closeDbManager()
-        return MessageBox:loading("正在下载正文", function()
+        return TaskProg.loading("正在下载正文 ", function()
             return Backend:downloadChapter(chapter)
         end, function(state, response)
             if state == true then
@@ -417,11 +420,11 @@ function LibraryView:getSharedMetaData(dir)
 end
 
 function LibraryView:getBrowserHomeDir(skip_check)
-    local home_dir = H.getHomeDir()
+    local home_dir = Env.getHomeDir()
     if not H.is_str(home_dir) then return nil end
     
     local browser_dir_name = "Legado\u{200B}书目"
-    local expected_path = H.joinPath(home_dir, browser_dir_name)
+    local expected_path = FS.joinPath(home_dir, browser_dir_name)
     
     if not H.is_str(PlgState.book_links_homedir) or PlgState.book_links_homedir ~= expected_path then
         local clean_home_dir = home_dir:gsub("/+$", "")
@@ -434,7 +437,7 @@ function LibraryView:getBrowserHomeDir(skip_check)
     end
 
     if not skip_check then
-        local success, err = pcall(H.checkAndCreateFolder, PlgState.book_links_homedir)
+        local success, err = pcall(FS.checkAndCreateFolder, PlgState.book_links_homedir)
         if not (success and util.directoryExists(PlgState.book_links_homedir)) then
             return nil
         end

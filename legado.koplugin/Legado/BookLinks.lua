@@ -6,6 +6,7 @@ local DocSettings = require("docsettings")
 local Backend = require("Legado/Backend")
 local NetworkMgr = require("ui/network/manager")
 local H = require("Legado/Helper")
+local FS = require("Legado.Helper.FS")
 
 local function init_book_links(parent)
     if parent.book_links then
@@ -92,11 +93,11 @@ local function init_book_links(parent)
 
         local book_name = bookinfo.name
         local book_lnk_name = string.format("%s-%s", book_name, bookinfo.author or "未知作者")
-        book_lnk_name = H.getSafeFilename(book_lnk_name)
+        book_lnk_name = FS.getSafeFilename(book_lnk_name)
         if not book_lnk_name then return end
         
         book_lnk_name = string.format("%s\u{200B}.html", book_lnk_name)
-        local book_lnk_path = H.joinPath(home_dir, book_lnk_name)
+        local book_lnk_path = FS.joinPath(home_dir, book_lnk_name)
         if book_lnk_path and util.fileExists(book_lnk_path) then
             return book_lnk_path, book_lnk_name
         end

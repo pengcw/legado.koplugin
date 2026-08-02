@@ -81,36 +81,46 @@ return {
         },
         getBookshelf = {
             path = "/getBookshelf",
-            method = "GET",
+            method = "POST",
             required_params = {"version"},
+            payload = {"version"},
+            form_payload = true,
             expected_status = {200}
         },
         getChapterList = {
             path = "/getChapterList",
-            method = "GET",
+            method = "POST",
             required_params = {"bookSourceUrl", "url"},
+            payload = {"bookSourceUrl", "url"},
+            form_payload = true,
             expected_status = {200}
         },
         getBookContent = {
             path = "/getBookContent",
-            method = "GET",
+            method = "POST",
             required_params = {"index", "url", "bookSourceUrl"},
             -- type 0 使用缓存 1 强制刷新
             optional_params = {"type"},
+            payload = {"type", "index", "url", "bookSourceUrl"},
+            form_payload = true,
             expected_status = {200}
         },
         getBookSources = {
             path = "/getBookSources",
-            method = "GET",
+            method = "POST",
             -- 1 所有 0 已开启
             required_params = {"isall"},
+            payload = {"isall"},
+            form_payload = true,
             expected_status = {200}
         },
         searchBook = {
             path = "/searchBook",
-            method = "GET",
+            method = "POST",
             required_params = {"key", "bookSourceUrl"},
             optional_params = {"page"},
+            payload = {"key", "bookSourceUrl", "page"},
+            form_payload = true,
             expected_status = {200}
         },
         -- 查找书籍可用书源
@@ -141,6 +151,7 @@ return {
                        "durChapterPos", "durChapterTime", "durChapterTitle", "wordCount", "intro", "totalChapterNum",
                        "kind", "type"},
             unattended_params = true,
+            form_payload = true,
             expected_status = {200}
         },
         deleteBook = {
@@ -153,6 +164,7 @@ return {
                        "durChapterPos", "durChapterTime", "durChapterTitle", "wordCount", "intro", "totalChapterNum",
                        "kind", "type"},
             unattended_params = true,
+            form_payload = true,
             expected_status = {200}
         },
         saveBookProgress = {

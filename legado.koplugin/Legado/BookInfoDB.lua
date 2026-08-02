@@ -5,7 +5,7 @@ local dbg = require("dbg")
 local Device = require("device")
 local util = require("util")
 local H = require("Legado/Helper")
-local md5 = require("Legado.Helper.Crypto").md5
+local FS = require("Legado.Helper.FS")
 
 if not dbg.log then
     dbg.log = logger.dbg
@@ -113,6 +113,92 @@ CREATE INDEX IF NOT EXISTS idx_chapters_bookcacheid_lastupdated ON chapters (boo
 CREATE INDEX IF NOT EXISTS idx_task_locks_expire ON task_locks (expire_time);
 ]]
 
+-- 查询字段的顺序必须与映射函数的 row[x] 索引完全一致
+local COLS_BOOK_FULL = "bookCacheId, name, author, bookUrl, origin, originName, originOrder, durChapterIndex, durChapterPos, durChapterTime, durChapterTitle, wordCount, intro, totalChapterNum, kind, sortOrder, cacheExt, coverUrl"
+local function _mapBookRow(row, bookShelfId)
+    if not row then return nil end
+    return {
+        book_self_id = bookShelfId,
+        cache_id = row[1],
+        name = row[2],
+        author = row[3],
+        bookUrl = row[4],
+        origin = row[5],
+        originName = row[6],
+        originOrder = tonumber(row[7]) or 0,
+        durChapterIndex = tonumber(row[8]) or 0,
+        durChapterPos = tonumber(row[9]) or 0,
+        durChapterTime = tonumber(row[10]) or 0,
+        durChapterTitle = row[11] or "",
+        wordCount = row[12] or "",
+        intro = row[13] or "",
+        totalChapterNum = tonumber(row[14]) or 0,
+        kind = row[15] or "",
+        sortOrder = tonumber(row[16]) or 0,
+        cacheExt = row[17],
+        coverUrl = row[18]
+    }
+end
+
+local COLS_CHAPTER_FULL = "c.chapterIndex, c.title, c.isRead, c.cacheFilePath, b.name, b.author, b.bookUrl, b.durChapterIndex, b.durChapterTime, b.totalChapterNum, b.cacheExt, b.origin"
+local function _mapChapterRow(row, bookCacheId)
+    if not row then return nil end
+    return {
+        book_cache_id = bookCacheId,
+        chapters_index = tonumber(row[1]) or 0,
+        title = row[2] or "",
+        isRead = row[3] == 1,
+        cacheFilePath = row[4],
+        isDownLoaded = not not row[4],
+        name = row[5],
+        author = row[6],
+        bookUrl = row[7],
+        durChapterIndex = tonumber(row[8]) or 0,
+        durChapterTime = tonumber(row[9]) or 0,
+        totalChapterNum = tonumber(row[10]) or 0,
+        cacheExt = row[11],
+        origin = row[12]
+    }
+end
+
+local COLS_BOOK_UI = "bookCacheId, name, author, originName, coverUrl"
+local function _mapBookRowUI(row)
+    if not row then return nil end
+    return {
+        cache_id = row[1],
+        name = row[2],
+        author = row[3],
+        originName = row[4],
+        cover = row[5],
+    }
+end
+
+local COLS_CHAPTER_UI = "c.chapterIndex, c.title, c.isRead, c.cacheFilePath, b.durChapterIndex"
+local function _mapChapterRowUI(row)
+    if not row then return nil end
+    return {
+        chapters_index = tonumber(row[1]) or 0,
+        title = row[2] or "",
+        isRead = row[3] == 1,
+        isDownLoaded = not not row[4],
+        durChapterIndex = tonumber(row[5]) or 0,
+        cacheFilePath = row[4]
+    }
+end
+
+local COLS_CHAPTER_NOT_DOWNLOADED = "c.chapterIndex, c.title, b.bookUrl, b.name, b.origin"
+local function _mapChapterNotDownloadedRow(row, bookCacheId)
+    if not row then return nil end
+    return {
+        book_cache_id = bookCacheId,
+        chapters_index = tonumber(row[1]) or 0,
+        title = row[2],
+        bookUrl = row[3],
+        name = row[4],
+        origin = row[5],
+    }
+end
+
 function M:new(o)
     o = o or {}
     setmetatable(o, self)
@@ -210,7 +296,7 @@ function M:_initDB(is_repair)
         local last_backup_db = self.dbPath .. ".bak"
         local has_backup = util.fileExists(last_backup_db)
         if has_backup then
-            H.copyFileFromTo(last_backup_db, self.dbPath)
+            FS.copyFileFromTo(last_backup_db, self.dbPath)
             util.removeFile(last_backup_db)
             dbg.log("The backup database has been restored")
         else
@@ -279,21 +365,13 @@ function M:transaction(write_func, opts)
 
         if use_savepoint then
             if ok then
-                local release_sql = string.format("RELEASE %s", savepoint_name)
-                conn:exec(release_sql)
+                conn:exec(string.format("RELEASE %s", savepoint_name))
             else
-                local rollback_sql = string.format("ROLLBACK TO %s", savepoint_name)
-                pcall(conn.exec, conn, rollback_sql)
-
+                pcall(conn.exec, conn, string.format("ROLLBACK TO %s", savepoint_name))
             end
         else
-            if ok then
-                pcall(conn.exec, conn, "COMMIT")
-
-            else
-                pcall(conn.exec, conn, "ROLLBACK")
-
-            end
+            local status = ok and "COMMIT" or "ROLLBACK"
+            pcall(conn.exec, conn, status)
             self.in_transaction = false
         end
 
@@ -338,24 +416,15 @@ function M:batch_insert(sql_template, data_list, batch_size)
     batch_size = batch_size or 500
     validate_data_list(data_list)
 
+    local _, param_count = sql_template:gsub("%?", "")
+
     local function process_batch(batch_data)
         return self:transaction(function()
             local stmt = self:getDB():prepare(sql_template)
 
-            local param_count = select(2, sql_template:gsub("%?", "%?"))
-
             for _, params in ipairs(batch_data) do
-                if #params ~= param_count then
-                    error(string.format(
-                        "The number of parameters does not match (requires %d, actual %d, parameter %s)", param_count,
-                        #params, custom_concat(params, ", ")))
-                end
-
-                for i, v in ipairs(params) do
-                    validate_param_type(v, i)
-
-                    stmt:bind1(i, adapt_value(v))
-
+                for i = 1, param_count do
+                    stmt:bind1(i, adapt_value(params[i]))
                 end
 
                 local step_ok, step_err = pcall(stmt.step, stmt)
@@ -368,7 +437,7 @@ function M:batch_insert(sql_template, data_list, batch_size)
 
             stmt:clearbind():close()
         end, {
-            enable_savepoint = false
+            enable_savepoint = true
         })()
     end
 
@@ -539,22 +608,24 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
 
     local batch_data = {}
     for _, item in ipairs(legado_data) do
-        if H.is_str(item.name) and H.is_str(item.author) and H.is_str(item.bookUrl) then
-            item.name = util.trim(item.name)
-            item.author = util.trim(item.author)
+        local name = H.is_str(item.name) and util.trim(item.name) or ""
+        -- 修复进度上传, 作者不处理空格
+        local author = tostring(item.author)
+        local bookUrl = item.bookUrl
+        
+        if name ~= "" and H.is_str(bookUrl) then
+            -- 修复进度上传, 这里可能导致作者不一致
+            -- if author == "" then author = "未知" end
+            local show_book_title = ("%s (%s)"):format(name, author)
+            item.cache_id = tostring(H.md5(show_book_title))
 
-            if item.name ~= '' then
-                local show_book_title = ("%s (%s)"):format(item.name, item.author)
-                item.cache_id = tostring(md5(show_book_title))
-
-                table.insert(batch_data, {
-                    bookShelfId, item.cache_id, item.name, item.author, item.bookUrl, item.origin or "",
-                    item.originName or "", item.originOrder or 0, item.durChapterIndex or 0,
-                    item.durChapterPos or 0, item.durChapterTime or 0, item.durChapterTitle or "",
-                    item.wordCount or "", item.coverUrl or "", item.intro or "", item.totalChapterNum or 0,
-                    item.type or 0, 1, item.kind or ''
-                })
-            end
+            table.insert(batch_data, {
+                bookShelfId, item.cache_id, name, author, bookUrl, item.origin or "",
+                item.originName or "", item.originOrder or 0, item.durChapterIndex or 0,
+                item.durChapterPos or 0, item.durChapterTime or 0, item.durChapterTitle or "",
+                item.wordCount or "", item.coverUrl or "", item.intro or "", item.totalChapterNum or 0,
+                item.type or 0, 1, item.kind or ''
+            })
         end
     end
 
@@ -572,31 +643,12 @@ function M:getAllBooks(bookShelfId)
     if not H.is_str(bookShelfId) then
         return {}
     end
-    local sql_stmt = [[
-    SELECT bookCacheId, name, author, bookUrl, origin, originName, 
-    originOrder, durChapterIndex, durChapterPos FROM books WHERE isEnabled = 1 AND bookShelfId = ?;
-    ]]
+    local sql_stmt = string.format("SELECT %s FROM books WHERE isEnabled = 1 AND bookShelfId = ?;", COLS_BOOK_FULL)
     local result = self:execute(sql_stmt, {bookShelfId})
     local books = {}
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            books[i] = {
-                book_self_id = bookShelfId,
-
-                cache_id = row[1],
-
-                name = row[2],
-                author = row[3],
-                bookUrl = row[4],
-                origin = row[5],
-                originName = row[6],
-                originOrder = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterPos = row[9]
-            }
+    if result then
+        for i = 1, #result do
+            books[i] = _mapBookRow(result[i], bookShelfId)
         end
     end
 
@@ -607,20 +659,12 @@ function M:getAllBooksByUI(bookShelfId)
     if not H.is_str(bookShelfId) then
         return {}
     end
-    local sql_stmt = [[
-    SELECT bookCacheId, name, author, originName FROM books WHERE isEnabled = 1 AND bookShelfId = ? ORDER BY sortOrder = 0 DESC, sortOrder DESC;
-    ]]
+    local sql_stmt = string.format("SELECT %s FROM books WHERE isEnabled = 1 AND bookShelfId = ? ORDER BY sortOrder = 0 DESC, sortOrder DESC;", COLS_BOOK_UI)
     local result = self:execute(sql_stmt, {bookShelfId})
     local books = {}
-    if H.is_tbl(result) and #result > 0 then
-        for i = 1, #result, 1 do
-            local row = result[i]
-            books[i] = {
-                cache_id = row[1],
-                name = row[2],
-                author = row[3],
-                originName = row[4]
-            }
+    if result then
+        for i = 1, #result do
+            books[i] = _mapBookRowUI(result[i])
         end
     end
 
@@ -631,47 +675,14 @@ function M:getBookinfo(bookShelfId, bookCacheId)
     if not H.is_str(bookShelfId) or not H.is_str(bookCacheId) then
         return {}
     end
-    local sql_stmt = [[
-    SELECT bookCacheId, name, author, bookUrl, origin, originName, 
-    originOrder, durChapterIndex, durChapterPos, durChapterTime, durChapterTitle, 
-    wordCount, intro, totalChapterNum, kind, sortOrder, cacheExt, coverUrl FROM books WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId =? ;
-    ]]
+    local sql_stmt = string.format("SELECT %s FROM books WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId = ?;", COLS_BOOK_FULL)
     local result = self:execute(sql_stmt, {bookShelfId, bookCacheId})
-    local book = {}
+    
     if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            book[i] = {
-                book_self_id = bookShelfId,
-                cache_id = row[1],
-                name = row[2],
-                author = row[3],
-                bookUrl = row[4],
-                origin = row[5],
-                originName = row[6],
-                originOrder = tonumber(row[7]),
-                durChapterIndex = tonumber(row[8]),
-                durChapterPos = tonumber(row[9]),
-                durChapterTime = tonumber(row[10]),
-                durChapterTitle = row[11],
-                wordCount = row[12],
-                intro = row[13],
-                totalChapterNum = tonumber(row[14]),
-                kind = row[15],
-                sortOrder = tonumber(row[16]),
-                cacheExt = row[17],
-                coverUrl = row[18]
-            }
-        end
+        return _mapBookRow(result[1], bookShelfId)
     end
 
-    if type(book[1]) ~= 'table' then
-        return {}
-    end
-
-    return book[1]
+    return {}
 end
 
 function M:upsertChapters(bookCacheId, chapters)
@@ -712,49 +723,18 @@ function M:getAllChapters(bookCacheId)
     if not H.is_str(bookCacheId) then
         return {}
     end
-    local sql_stmt = [[
-    SELECT 
-    c.chapterIndex, 
-    c.title, 
-    c.isRead,
-    c.cacheFilePath,
-    b.name,
-    b.author,
-    b.bookUrl,
-    b.durChapterIndex,
-    b.durChapterTime,
-    b.totalChapterNum,
-    b.origin  
-FROM chapters AS c
-INNER JOIN books AS b
-    ON c.bookCacheId = b.bookCacheId 
-WHERE 
-    b.isEnabled = 1 AND c.bookCacheId = ? 
-ORDER BY c.chapterIndex ASC;
-    ]]
+    local sql_stmt = string.format([[
+    SELECT %s 
+    FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId 
+    WHERE b.isEnabled = 1 AND c.bookCacheId = ? 
+    ORDER BY c.chapterIndex ASC;
+    ]], COLS_CHAPTER_FULL)
 
     local result = self:execute(sql_stmt, bookCacheId)
     local chapters = {}
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            chapters[i] = {
-                book_cache_id = bookCacheId,
-                chapters_index = tonumber(row[1]),
-                title = row[2],
-                isRead = row[3] == 1,
-                cacheFilePath = row[4],
-                isDownLoaded = not not row[4],
-                name = row[5],
-                author = row[6],
-                bookUrl = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterTime = tonumber(row[9]),
-                totalChapterNum = tonumber(row[10]),
-                origin = row[11]
-            }
+    if result then
+        for i = 1, #result do
+            chapters[i] = _mapChapterRow(result[i], bookCacheId)
         end
     end
 
@@ -765,40 +745,17 @@ function M:getAllChaptersByUI(bookCacheId, is_desc_sort)
     if not H.is_str(bookCacheId) then
         return {}
     end
-    local sql_stmt = [[
-    SELECT
-    c.chapterIndex, 
-    c.title, 
-    c.isRead, 
-    c.cacheFilePath,
-    b.durChapterIndex 
-FROM chapters AS c
-INNER JOIN books AS b
-    ON c.bookCacheId = b.bookCacheId 
-WHERE 
-    b.isEnabled = 1 AND c.bookCacheId = ? 
-ORDER BY c.chapterIndex ]]
+    local sql_stmt = string.format([[
+    SELECT %s 
+    FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId 
+    WHERE b.isEnabled = 1 AND c.bookCacheId = ? 
+    ORDER BY c.chapterIndex ]], COLS_CHAPTER_UI) .. (is_desc_sort and "DESC;" or "ASC;")
 
-    if is_desc_sort == true then
-        sql_stmt = sql_stmt .. ' DESC;'
-    else
-        sql_stmt = sql_stmt .. ' ASC;'
-    end
     local result = self:execute(sql_stmt, bookCacheId)
     local chapters = {}
-    if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-            local chapterIndex = tonumber(row[1])
-            chapters[i] = {
-                chapters_index = chapterIndex,
-                title = row[2],
-                isRead = row[3] == 1,
-                isDownLoaded = not not row[4],
-                durChapterIndex = tonumber(row[5]),
-                cacheFilePath = row[4]
-            }
+    if result then
+        for i = 1, #result do
+            chapters[i] = _mapChapterRowUI(result[i])
         end
     end
 
@@ -855,60 +812,19 @@ function M:getChapterInfo(bookCacheId, chapterIndex)
         return {}
     end
 
-    local sql_stmt = [[
-    SELECT 
-    c.chapterIndex, 
-    c.title, 
-    c.isRead, 
-    c.cacheFilePath,
-    b.name,
-    b.author,
-    b.bookUrl,
-    b.durChapterIndex,
-    b.durChapterTime,
-    b.totalChapterNum,
-    b.cacheExt,
-    b.origin 
-FROM chapters AS c
-INNER JOIN books AS b
-    ON c.bookCacheId = b.bookCacheId 
-WHERE 
-    b.isEnabled = 1 AND c.bookCacheId = ? AND c.chapterIndex = ?;
-    ]]
+    local sql_stmt = string.format([[
+    SELECT %s 
+    FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId 
+    WHERE b.isEnabled = 1 AND c.bookCacheId = ? AND c.chapterIndex = ?;
+    ]], COLS_CHAPTER_FULL)
 
     local result = self:execute(sql_stmt, {bookCacheId, chapterIndex})
-    local chapter = {}
-
+    
     if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            local chapterIndex = tonumber(row[1])
-            chapter[i] = {
-                book_cache_id = bookCacheId,
-                chapters_index = chapterIndex,
-                title = row[2],
-                isRead = row[3] == 1,
-                cacheFilePath = row[4],
-                isDownLoaded = not not row[4],
-                name = row[5],
-                author = row[6],
-                bookUrl = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterTime = tonumber(row[9]),
-                totalChapterNum = tonumber(row[10]),
-                cacheExt = row[11],
-                origin = row[12]
-            }
-        end
+        return _mapChapterRow(result[1], bookCacheId)
     end
 
-    if not H.is_tbl(chapter[1]) then
-        return {}
-    end
-
-    return chapter[1]
+    return {}
 end
 
 function M:getcompleteReadAheadChapters(current_chapter)
@@ -1005,19 +921,14 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
         call_event_type = 'next'
     end
 
-    local sql_stmt = [[
-        SELECT
-        c.chapterIndex,
-        c.title,
-        b.bookUrl,
-        b.name,
-        b.origin
-    FROM chapters AS c
-    INNER JOIN books AS b
-        ON c.bookCacheId = b.bookCacheId
-    WHERE
-         c.bookCacheId = ? AND b.isEnabled = 1 AND c.isRead = 0 AND c.cacheFilePath IS NULL
-         ]]
+    local sql_stmt = string.format([[
+        SELECT %s
+        FROM chapters AS c
+        INNER JOIN books AS b
+            ON c.bookCacheId = b.bookCacheId
+        WHERE
+             c.bookCacheId = ? AND b.isEnabled = 1 AND c.isRead = 0 AND c.cacheFilePath IS NULL
+             ]], COLS_CHAPTER_NOT_DOWNLOADED)
 
     local suffix = "  AND c.chapterIndex > ?  ORDER BY c.chapterIndex ASC LIMIT "
 
@@ -1030,23 +941,10 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
     local result = self:execute(sql_stmt, {bookCacheId, current_chapters_index})
 
     local chapters = {}
-    if result and #result > 0 then
-        for i = 1, #result, 1 do
-            local row = result[i]
-            local chapterIndex = tonumber(row[1])
-            chapters[i] = {
-                book_cache_id = bookCacheId,
-                title = row[2],
-                bookUrl = row[3],
-                chapters_index = chapterIndex,
-                name = row[4],
-                origin = row[5],
-            }
+    if result then
+        for i = 1, #result do
+            chapters[i] = _mapChapterNotDownloadedRow(result[i], bookCacheId)
         end
-    end
-
-    if not H.is_tbl(chapters[1]) then
-        return {}
     end
 
     return chapters
@@ -1066,25 +964,10 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
         call_event_type = 'next'
     end
 
-    local sql_stmt = [[
-        SELECT 
-        c.chapterIndex, 
-        c.title, 
-        c.isRead, 
-        c.cacheFilePath,
-        b.name,
-        b.author,
-        b.bookUrl,
-        b.durChapterIndex,
-        b.durChapterTime,
-        b.totalChapterNum,
-        b.cacheExt,
-        b.origin 
-    FROM chapters AS c
-    INNER JOIN books AS b
-        ON c.bookCacheId = b.bookCacheId 
-    WHERE 
-         c.bookCacheId = ? AND b.isEnabled = 1 ]]
+    local sql_stmt = string.format([[
+        SELECT %s 
+        FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId 
+        WHERE c.bookCacheId = ? AND b.isEnabled = 1 ]], COLS_CHAPTER_FULL)
 
     if is_downloaded == false then
         sql_stmt = sql_stmt .. ' AND c.cacheFilePath IS NULL '
@@ -1094,7 +977,6 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
 
     local suffix = "  AND c.chapterIndex > ?  ORDER BY c.chapterIndex ASC LIMIT 1;"
     if call_event_type ~= 'next' then
-
         suffix = "  AND c.chapterIndex < ? ORDER BY c.chapterIndex DESC LIMIT 1;"
     end
 
@@ -1102,38 +984,11 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
 
     local result = self:execute(sql_stmt, {bookCacheId, current_chapters_index})
 
-    local chapter = {}
-
     if result and #result > 0 then
-
-        for i = 1, #result, 1 do
-            local row = result[i]
-
-            local chapterIndex = tonumber(row[1])
-            chapter[i] = {
-                book_cache_id = bookCacheId,
-                title = row[2],
-                isRead = row[3] == 1,
-                cacheFilePath = row[4],
-                isDownLoaded = not not row[4],
-                name = row[5],
-                author = row[6],
-                bookUrl = row[7],
-                durChapterIndex = tonumber(row[8]),
-                durChapterTime = tonumber(row[9]), -- type cdata?
-                totalChapterNum = tonumber(row[10]),
-                chapters_index = chapterIndex,
-                cacheExt = row[11],
-                origin = row[12],
-            }
-        end
+        return _mapChapterRow(result[1], bookCacheId)
     end
 
-    if not H.is_tbl(chapter[1]) then
-        return {}
-    end
-
-    return chapter[1]
+    return {}
 end
 
 function M:updateIsRead(chapter, isRead, is_update_timestamp)
