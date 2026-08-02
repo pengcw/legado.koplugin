@@ -73,8 +73,8 @@ function M:ota(ok_callback)
         callback = function(ok, result)
             if ok == true and result and result.state == true then
                 MessageBox:confirm(string.format("有新版本可用: %s ,要下载并更新吗？",
-                    result.release_version), function(result)
-                    if result then
+                    result.release_version), function(is_update)
+                    if is_update then
                         -- multi process Android unzip prompts no permission
                         TaskProg.loading("安装更新中", function()
                             return self:_downloadUpdate(result.info)
@@ -82,8 +82,8 @@ function M:ota(ok_callback)
                             if state == true and down_response and down_response.path then
                                 install_ota(down_response.path)
                             else
-                                local err_msg = (H.is_tbl(down_response) and down_response.error) or ""
-                                MessageBox:error("下载失败，请重试:" .. tostring(err_msg))
+                                local err_msg = (H.is_tbl(down_response) and down_response.error) or tostring(down_response or "未知错误")
+                                MessageBox:error("下载失败，请重试: " .. err_msg)
                             end
                         end)
                     end
@@ -110,6 +110,10 @@ function M:_getLatestReleaseInfo()
     })
     if not (ok and H.is_tbl(res) and res.data) then
         logger.warn("获取版本失败：", res)
+        return
+    end
+    if res.status_code and res.status_code ~= 200 then
+        logger.warn("获取版本信息失败，HTTP 状态码：", res.status_code)
         return
     end
 
@@ -351,7 +355,13 @@ function M:_installUpdate(update_zip_path)
     logger.info("[installUpdate] 验证通过，正在备份并部署新版本")
     
     pcall(ffiUtil.purgeDir, plg_path_bak)
-    os.rename(plg_path, plg_path_bak)
+    local bak_ok, bak_err = os.rename(plg_path, plg_path_bak)
+    if not bak_ok then
+        local err_msg = "备份当前版本失败: " .. tostring(bak_err)
+        logger.err("[installUpdate] " .. err_msg)
+        cleanup(false)
+        return err_msg
+    end
 
     local rename_ok, rename_err = os.rename(base_dir, plg_path)
     if not rename_ok then
@@ -368,7 +378,11 @@ function M:_installUpdate(update_zip_path)
         logger.err("[installUpdate] " .. err_msg .. "，正在回滚旧版本")
         
         pcall(ffiUtil.purgeDir, plg_path)
-        os.rename(plg_path_bak, plg_path)
+        local rb_ok = os.rename(plg_path_bak, plg_path)
+        if not rb_ok then
+            logger.warn("回滚重命名失败，尝试复制恢复")
+            FS.copyRecursive(plg_path_bak, plg_path)
+        end
         cleanup(false)
         return err_msg
     end
