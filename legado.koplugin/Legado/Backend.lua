@@ -1186,6 +1186,8 @@ function M:_pDownloadChapter(chapter, is_recursive)
     local chapters_index = chapter.chapters_index
     local chapter_title = chapter.title or ''
     local down_chapters_index = chapter.chapters_index
+    -- qread only
+    local origin = chapter.origin
 
     if bookUrl == nil or not book_cache_id then
         error('_pDownloadChapter input parameters err' .. tostring(bookUrl) .. tostring(book_cache_id))

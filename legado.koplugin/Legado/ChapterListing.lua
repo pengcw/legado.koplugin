@@ -253,7 +253,8 @@ function ChapterListing:onMenuHold(item)
                 book_cache_id = chapter.book_cache_id,
                 isDownLoaded = isDownLoaded,
                 bookUrl = chapter.bookUrl,
-                title = chapter.title
+                title = chapter.title,
+                origin = chapter.origin,
             }), function(data)
                 self:refreshItems(true)
                 if isDownLoaded == true then

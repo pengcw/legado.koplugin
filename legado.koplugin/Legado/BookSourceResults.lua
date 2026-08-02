@@ -353,7 +353,7 @@ function M:handleSingleSourceSearch(searchText)
                     MessageBox:notice(err_msg or '搜索请求失败')
                 end)
             end
-        end)
+        end, nil, true)
     end)
 end
 
@@ -758,7 +758,7 @@ function M:handleExploreBook(source_info, url, is_more_call)
                 MessageBox:notice(err_msg or '加载失败')
             end)
         end
-    end)
+    end, nil, true)
 end
 
 return M
