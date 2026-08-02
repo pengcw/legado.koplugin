@@ -324,6 +324,13 @@ function Handlers:register(parent_ref)
                     text = "清理与维护",
                     sub_item_table = {
                         {
+                            text = "任务队列",
+                            keep_menu_open = true,
+                            callback = function()
+                                require("Legado.task.QueueStatus"):show()
+                            end,
+                        },
+                        {
                             text = "压缩数据库",
                             keep_menu_open = true,
                             callback = function()
