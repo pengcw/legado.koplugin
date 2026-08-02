@@ -33,6 +33,12 @@ function M.cleanExpired(dbManager)
     return true
 end
 
+function M.cleanAll(dbManager)
+    if not (dbManager and dbManager.isConnected) then return false end
+    pcall(function() dbManager:execute("DELETE FROM task_locks") end)
+    return true
+end
+
 function M.setLock(dbManager, targets, is_locked, ttl, owner_id)
     if not (dbManager and dbManager.isConnected and targets) then return false end
     if H.is_tbl(targets) and #targets == 0 then return true end

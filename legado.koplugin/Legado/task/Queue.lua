@@ -38,6 +38,7 @@ function Channel:new(name, max_workers, on_finish, start_paused)
     obj.cooldown_until = 0                 
     obj._cooldown_timer_scheduled = false
     obj.is_paused = start_paused or false
+    obj.created_at = socket.gettime()
     return obj
 end
 
@@ -473,7 +474,8 @@ function Channel:getStatus()
         max_workers = self.max_workers,
         pending = pending,
         running = running,
-        is_paused = self.is_paused
+        is_paused = self.is_paused,
+        total_elapsed = socket.gettime() - (self.created_at or socket.gettime())
     }
 end
 
