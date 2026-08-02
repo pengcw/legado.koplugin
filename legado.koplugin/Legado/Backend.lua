@@ -253,6 +253,9 @@ function M:initialize()
         dbPath = Env.getTempDirectory() .. "/bookinfo.db"
     })
     
+    local TaskLock = require("Legado/task/Lock")
+    pcall(function() TaskLock.cleanAll(self.dbManager) end)
+    
     self:loadApiProvider()
 end
 
@@ -1518,7 +1521,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     for i = #chapter_down_tasks, 1, -1 do
         local dlChapter = chapter_down_tasks[i]
         
-        if not self:isTaskRunning(dlChapter) then
+        if dlChapter.isDownLoaded ~= true and not self:isTaskRunning(dlChapter) then
             dlChapter.is_pre_loading = true
             table.insert(tasks_to_insert, dlChapter)
             
@@ -1557,12 +1560,22 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                 }
             )
         else
-            logger.dbg('Legado.preLoadingChapters - Task already in queue/running, skip:', dlChapter.chapters_index)
+            logger.dbg('Legado.preLoadingChapters - Task already processed/locked, skip:', dlChapter.chapters_index)
         end
     end
+    
     if #tasks_to_insert > 0 then
-        pcall(function() TaskLock.setLock(self.dbManager, tasks_to_insert, true, chapter_timeout, batch_id) end)
+        local lock_ttl = math.max(3600, chapter_timeout * #tasks_to_insert)
+        pcall(function() TaskLock.setLock(self.dbManager, tasks_to_insert, true, lock_ttl, batch_id) end)
+    else
+        -- If all tasks were skipped but we have a callback waiting, resolve it now
+        if has_result_progress_callback and not has_error then
+            UIManager:nextTick(function()
+                result_progress_callback(true, "所选章节已在后台下载或已完成")
+            end)
+        end
     end
+    
     if ch then ch:resume() end
     return true
 end

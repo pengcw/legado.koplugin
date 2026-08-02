@@ -15,8 +15,38 @@ function QueueStatus:show()
         local has_channels = false
         for ch_name, status in pairs(engine_status) do
             has_channels = true
+            
+            local display_name = ch_name
+            local is_bulk = ch_name:match("^PreloadBulk_")
+            local is_preload = ch_name:match("^Preload_")
+            
+            if ch_name == "Menu_Covers" then
+                display_name = "[系统] 封面下载"
+            elseif is_bulk or is_preload then
+                local book_id = is_bulk and ch_name:match("^PreloadBulk_(.*)") or ch_name:match("^Preload_(.*)")
+                local prefix = is_bulk and "[批量下载]" or "[预读缓存]"
+                local book_name = book_id
+                
+                if book_id then
+                    local Backend = require("Legado/Backend")
+                    local ok, book_info = pcall(function() return Backend:getBookInfoCache(book_id) end)
+                    if ok and type(book_info) == "table" and book_info.name then
+                        book_name = "《" .. book_info.name .. "》"
+                    end
+                end
+                display_name = prefix .. " " .. book_name
+            end
+            
             local pause_str = status.is_paused and " [已暂停]" or ""
-            table.insert(lines, string.format("- 通道: %s%s (线程 %d/%d)", ch_name, pause_str, status.active_workers, status.max_workers))
+            local time_str = ""
+            if is_bulk and status.total_elapsed and status.total_elapsed > 0 then
+                if status.total_elapsed > 60 then
+                    time_str = string.format(" [用时 %dm%ds]", math.floor(status.total_elapsed / 60), status.total_elapsed % 60)
+                else
+                    time_str = string.format(" [用时 %.1fs]", status.total_elapsed)
+                end
+            end
+            table.insert(lines, string.format("- 任务: %s%s%s (线程 %d/%d)", display_name, time_str, pause_str, status.active_workers, status.max_workers))
             
             if #status.running > 0 then
                 for _, r in ipairs(status.running) do
@@ -53,6 +83,9 @@ function QueueStatus:show()
                     MessageBox:confirm("确定清空所有排队中的后台任务吗？", function(is_ok)
                         if is_ok then
                             TaskQueue:destroyAll()
+                            local Backend = require("Legado/Backend")
+                            local TaskLock = require("Legado/task/Lock")
+                            pcall(function() TaskLock.cleanAll(Backend.dbManager) end)
                             MessageBox:notice("所有任务队列已清空！")
                         end
                     end)

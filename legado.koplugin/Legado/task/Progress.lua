@@ -13,7 +13,6 @@ local function show_progress_info(message, options)
 
     local defaultOptions = {
         text = "\u{231B}  " .. message,
-        dismissable = options.dismissable,
         show_icon = false,
         update_interval = 0.2
     }
@@ -21,6 +20,8 @@ local function show_progress_info(message, options)
     for key, value in pairs(options) do
         defaultOptions[key] = value
     end
+
+    defaultOptions.dismissable = (options.dismissable == true)
 
     local spinner_chars = SPINNER_STYLES[math.random(1, #SPINNER_STYLES)]
     local updateText
@@ -205,6 +206,8 @@ function M.showBar(message, options)
     local sub_title = message or ""
     local max = H.is_num(options.max) and options.max or 1
     local show_parent = options.parent
+    local dismissable = (options.dismissable == true)
+    local dismiss_text = dismissable and (options.dismiss_text or "是否切换到后台?") or nil
 
     local progressbar_dialog
     local ok, ProgressbarDialog = pcall(require, "ui/widget/progressbardialog")
@@ -213,15 +216,77 @@ function M.showBar(message, options)
             title = title,
             subtitle = sub_title,
             progress_max = max,
-            refresh_time_seconds = 0.4
+            refresh_time_seconds = 0.4,
+            dismiss_text = dismiss_text,
+            dismissable = dismissable,
+            on_dismiss = options.on_dismiss,
         }
         -- fix bar fill color on Koreader 2025.08
         if progressbar_dialog.progress_bar then  
             progressbar_dialog.progress_bar.fillcolor = require("ffi/blitbuffer").COLOR_BLACK
         end
+        if dismissable then
+            local orig_onCloseWidget = progressbar_dialog.onCloseWidget
+            progressbar_dialog.onCloseWidget = function(self_dialog, ...)
+                self_dialog.is_closed = true
+                if H.is_func(orig_onCloseWidget) then
+                    return orig_onCloseWidget(self_dialog, ...)
+                end
+            end
+
+            local orig_reportProgress = progressbar_dialog.reportProgress
+            progressbar_dialog.reportProgress = function(self_dialog, progress)
+                if self_dialog.is_closed then
+                    return
+                end
+
+                if self_dialog.dismiss_box then
+                    -- Suppress UI repaint while confirm box is open to prevent E-ink flashing
+                    if self_dialog.progress_bar_visible and self_dialog.progress_bar then
+                        self_dialog.progress_bar:setPercentage(progress / self_dialog.progress_max)
+                    end
+                else
+                    if H.is_func(orig_reportProgress) then
+                        orig_reportProgress(self_dialog, progress)
+                    end
+                end
+            end
+
+            progressbar_dialog.onDismiss = function(self_dialog)
+                if self_dialog.dismiss_box then return end
+                
+                if self_dialog.dismiss_text then
+                    local MessageBox = require("Legado/MessageBox")
+                    self_dialog.dismiss_box = MessageBox:confirm(self_dialog.dismiss_text, function(ok)
+                        self_dialog.dismiss_box = nil
+                        if ok then
+                            UIManager:close(self_dialog)
+                            MessageBox:notice("已切至后台, 可在任务队列查看")
+                            if H.is_func(self_dialog.on_dismiss) then
+                                self_dialog.on_dismiss(self_dialog)
+                            end
+                        else
+                            -- Force catch up redraw after dismiss box closes
+                            if self_dialog.progress_bar_visible and H.is_func(self_dialog.redrawProgressbar) then
+                                self_dialog:redrawProgressbar()
+                            end
+                        end
+                    end, {ok_text = "后台运行", cancel_text = "取消"})
+                else
+                    UIManager:close(self_dialog)
+                    if H.is_func(self_dialog.on_dismiss) then
+                        self_dialog.on_dismiss(self_dialog)
+                    end
+                end
+            end
+            
+            -- Fix: Bind gesture and key events to our custom onDismiss
+            progressbar_dialog.onTapClose = progressbar_dialog.onDismiss
+            progressbar_dialog.onAnyKeyPressed = progressbar_dialog.onDismiss
+        end
         progressbar_dialog:show()
     end
-    return progressbar_dialog or show_progress_info(sub_title, {progress_max = max, parent = show_parent})
+    return progressbar_dialog or show_progress_info(sub_title, {progress_max = max, parent = show_parent, dismissable = dismissable})
 end
 
 return M
