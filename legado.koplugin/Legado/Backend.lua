@@ -182,8 +182,8 @@ local function pDownload_CreateCBZ(chapter, filePath, img_sources)
 end
 
 function M:HandleResponse(response, on_success, on_error)
-    on_success = H.is_func(on_success) and on_success or function() end
-    on_error   = H.is_func(on_error)   and on_error   or function() end
+    on_success = H.is_func(on_success) and on_success or function(...) end
+    on_error   = H.is_func(on_error)   and on_error   or function(...) end
     if not H.is_tbl(response) then
         return on_error("Response is nil")
     end
@@ -252,8 +252,6 @@ function M:initialize()
     self.dbManager = BookInfoDB:new({
         dbPath = Env.getTempDirectory() .. "/bookinfo.db"
     })
-    
-    local TaskLock = require("Legado/task/Lock")
     pcall(function() TaskLock.cleanAll(self.dbManager) end)
     
     self:loadApiProvider()
@@ -271,7 +269,7 @@ function M:checkOta(is_compel)
         self:saveSettings(setting_data)
 
         legado_update:ota(function()
-            local setting_data = self:getSettings()
+            setting_data = self:getSettings()
             setting_data.last_check_ota = os.time()
             self:saveSettings(setting_data)
         end)
@@ -426,9 +424,9 @@ function M:changeBookSource(newBookSource)
     return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
         if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
             local bookShelfId = self:getCurrentBookShelfId()
-            local response = {response.data}
+            local r_data = {response.data}
             local status, err = pcall(function()
-                return self.dbManager:upsertBooks(bookShelfId, response, true)
+                return self.dbManager:upsertBooks(bookShelfId, r_data, true)
             end)
             if not status then
                 dbg.log('changeBookSource数据写入', tostring(err))
@@ -763,7 +761,6 @@ local replace_css_urls = function(css_text, replace_fn)
         if not ok or type(new_path) ~= "string" or new_path == "" then
             return "url(" .. prefix .. old_path .. suffix .. ")"
         end
-        return
     end))
 end
 
@@ -787,18 +784,18 @@ processLink = function(book_cache_id, resources_src, base_url, is_proxy, callbac
         return nil
     end
 
-    local function normalize_url(src, base_url, is_proxy)
-         if not H.is_str(base_url) then base_url = "" end
+    local function normalize_url(src, baseUrl, isProxy)
+         if not H.is_str(baseUrl) then baseUrl = "" end
          if src:sub(1, 2) == "//" then
-            local protocol = base_url:match("^(https?:)") or "https:"
+            local protocol = baseUrl:match("^(https?:)") or "https:"
             return protocol .. src
         elseif src:sub(1, 1) == "/" or src:sub(1, 2) == "./" or src:sub(1, 3) == "../" then
-            return socket_url.absolute(base_url, src)
-        elseif is_proxy == true then
-            return M:getProxyImageUrl(base_url, src)
+            return socket_url.absolute(baseUrl, src)
+        elseif isProxy == true then
+            return M:getProxyImageUrl(baseUrl, src)
         elseif not src:find("^%a+://") then
             -- not a complete URL, converted to an absolute path
-            return socket_url.absolute(base_url, src)
+            return socket_url.absolute(baseUrl, src)
         end
         return src
     end
@@ -1082,7 +1079,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                             if not open or open == "" then
                                 return
                             end
-                            open = open .. r2 or ""
+                            open = open .. (r2 or "")
                             local relpath = processLink(book_cache_id, path, html_url)
                             if H.is_str(relpath) then
                                 local replace_text = plain_text_replace(el_text, open .. path, open .. relpath)
@@ -1127,7 +1124,6 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                     if H.is_str(relpath) then
                         return table.concat({r1, r2, relpath, r2, r4})
                     end
-                    return
                 end)
             end
         end
@@ -1151,7 +1147,6 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                     return string.format('<div class="duokan-image-single">%s</div>',
                         table.concat({r1, r2, relpath, r2, ' class="picture-80" alt="" ', r4}))
                 end
-                return
             end)
         end
 
@@ -1957,8 +1952,8 @@ local function save_processed_image(data, output_path, ext)
             if status and err then
                 bb = err
                 if type(bb.getWidth) == "function" then
-                    local ok, err = pcall(bb.writeToFile, bb, output_path, ext, nil, nil)  
-                    final_success = ok and err
+                    local ok, w_err = pcall(bb.writeToFile, bb, output_path, ext, nil, nil)
+                    final_success = ok and w_err
                 end  
             end  
         end  
@@ -2084,7 +2079,7 @@ function M:after_reader_chapter_show(chapter)
         local _, extension = util.splitFileNameSuffix(cache_name)
 
         if extension and chapter.cacheExt ~= extension then
-            local status, err = pcall(function()
+            local p_status, p_err = pcall(function()
 
                 local bookShelfId = self:getCurrentBookShelfId()
                 self.dbManager:transaction(function()
@@ -2097,8 +2092,8 @@ function M:after_reader_chapter_show(chapter)
                 end)()
             end)
 
-            if not status then
-                dbg.log('updating cache ext err:', tostring(err))
+            if not p_status then
+                dbg.log('updating cache ext err:', tostring(p_err))
             end
         end
         -- document_cover

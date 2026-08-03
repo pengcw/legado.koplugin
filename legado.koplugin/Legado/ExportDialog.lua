@@ -100,8 +100,8 @@ function CbzExporter:package()
     local main_temp_dir
     
     local use_archiver = true
-    local ok, Archiver = pcall(require, "ffi/archiver")
-    if ok and Archiver then
+    local Archiver_ok, Archiver = pcall(require, "ffi/archiver")
+    if Archiver_ok and Archiver then
         cbz_lib = "archiver"
         cbz = Archiver.Writer:new{}
         if not cbz:open(cbz_path_tmp, "epub") then
@@ -656,6 +656,7 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
                 })
     end
 
+    local cache_progress_callback
     local handleCacheError = function(err_msg)
         -- 首次出错：静默重试，不关闭进度条，不弹新窗口
         if retry_count == 0 then
@@ -674,7 +675,7 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
         showRetryDialog(err_msg)
     end
 
-    local cache_progress_callback = function(progress, err_msg)
+    cache_progress_callback = function(progress, err_msg)
         if progress == false or progress == true then
             if progress == true then
                 handleCacheSuccess()
@@ -869,7 +870,7 @@ function M:_processCbzExport(bookinfo, chapters, only_cached)
             self:showReaderUI(path)
         end)
     else
-        self:showExportErrorDialog(H.is_tbl(result) and tosring(result.error) or tostring(result), function()
+        self:showExportErrorDialog(H.is_tbl(result) and tostring(result.error) or tostring(result), function()
             self:_generateBookFile(bookinfo, only_cached, true)
         end)
     end

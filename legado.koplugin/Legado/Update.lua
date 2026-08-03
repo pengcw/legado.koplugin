@@ -366,7 +366,7 @@ function M:_installUpdate(update_zip_path)
     local rename_ok, rename_err = os.rename(base_dir, plg_path)
     if not rename_ok then
         logger.warn("[installUpdate] 目录重命名失败(" .. tostring(rename_err) .. ")，尝试降级复制")
-        rename_ok = FS.copyRecursive(base_dir, plg_path)
+        rename_ok = FS.copyRecursive(base_dir, plg_path) and true or false
     end
 
     if rename_ok then

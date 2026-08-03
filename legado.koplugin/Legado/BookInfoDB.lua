@@ -213,7 +213,7 @@ function M:init()
     self:_initDB()
 end
 
-function M:nil_object()
+function M.nil_object()
     return setmetatable({
         __type_ext = 'nil',
         [1] = 'nil'

@@ -198,7 +198,7 @@ function M:notice(message, ...)
     if #args > 0 then
         message = string.format("%s %s", tostring(message), custom_concat(args, " "))
     end
-    local n = Notification:new{ text = message }  
+    local n = Notification:new{ text = message }
     UIManager:show(n)
     return n
 end

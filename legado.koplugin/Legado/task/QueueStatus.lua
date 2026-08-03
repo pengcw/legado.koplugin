@@ -84,7 +84,7 @@ function QueueStatus:show()
                         if is_ok then
                             TaskQueue:destroyAll()
                             local Backend = require("Legado/Backend")
-                            local TaskLock = require("Legado/task/Lock")
+                            local TaskLock = require("Legado.task.Lock")
                             pcall(function() TaskLock.cleanAll(Backend.dbManager) end)
                             MessageBox:notice("所有任务队列已清空！")
                         end

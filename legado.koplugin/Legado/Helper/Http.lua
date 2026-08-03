@@ -9,7 +9,7 @@ local FILE_BLOCK_TIMEOUT = 15
 local FILE_TOTAL_TIMEOUT = 60
 -- Upstream defaults
 local DEFAULT_BLOCK_TIMEOUT = 60
-local DEFAULT_TOTAL_TIMEOUT = -1   
+local DEFAULT_TOTAL_TIMEOUT = -1
 
 local default_headers = {
     -- Use a modern UA to avoid CDN/WAF blocking outdated or niche devices
@@ -42,33 +42,33 @@ local function get_image_format_head8(image_data)
         return "bin"
     end
     local b1 = string.byte(image_data, 1)
-    if b1 == 0xFF then 
-        if string.sub(image_data, 1, 3) == "\xFF\xD8\xFF" then 
-            return "jpg" 
+    if b1 == 0xFF then
+        if string.sub(image_data, 1, 3) == "\xFF\xD8\xFF" then
+            return "jpg"
         end
-    elseif b1 == 0x89 then 
-        if string.sub(image_data, 1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then 
-            return "png" 
+    elseif b1 == 0x89 then
+        if string.sub(image_data, 1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then
+            return "png"
         end
-    elseif b1 == 0x52 then 
-        if string.sub(image_data, 1, 4) == "RIFF" and string.sub(image_data, 9, 12) == "WEBP" then 
-            return "webp" 
+    elseif b1 == 0x52 then
+        if string.sub(image_data, 1, 4) == "RIFF" and string.sub(image_data, 9, 12) == "WEBP" then
+            return "webp"
         end
-    elseif b1 == 0x42 then 
-        if string.sub(image_data, 1, 2) == "BM" then 
-            return "bmp" 
+    elseif b1 == 0x42 then
+        if string.sub(image_data, 1, 2) == "BM" then
+            return "bmp"
         end
-    elseif b1 == 0x47 then 
-        if string.sub(image_data, 1, 4) == "GIF8" then 
-            return "gif" 
+    elseif b1 == 0x47 then
+        if string.sub(image_data, 1, 4) == "GIF8" then
+            return "gif"
         end
-    elseif b1 == 0x49 then 
-        if string.sub(image_data, 1, 4) == "\x49\x49\x2A\x00" then 
-            return "tiff" 
+    elseif b1 == 0x49 then
+        if string.sub(image_data, 1, 4) == "\x49\x49\x2A\x00" then
+            return "tiff"
         end
-    elseif b1 == 0x4D then 
-        if string.sub(image_data, 1, 4) == "\x4D\x4D\x00\x2A" then 
-            return "tiff" 
+    elseif b1 == 0x4D then
+        if string.sub(image_data, 1, 4) == "\x4D\x4D\x00\x2A" then
+            return "tiff"
         end
     end
     return "bin"
@@ -143,9 +143,9 @@ local function pGetUrlContent(options, is_create)
         logger.dbg("Response headers:", headers)
         return false, "Remote server error or unavailable"
     end
-    
+
     local content
-    if not file_fp then 
+    if not file_fp then
       content = table.concat(sink)
       if headers and headers["content-length"] then
         local content_length = tonumber(headers["content-length"])

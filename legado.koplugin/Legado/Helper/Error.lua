@@ -8,7 +8,7 @@ M.pcall = function(f, ...)
     end
     local function err_handler(err)
         local err_msg = tostring(err or "unknown error")
-        if logger and type(logger.err) == "function" and 
+        if logger and type(logger.err) == "function" and
             G_reader_settings and G_reader_settings:isTrue("debug") then
             local trace = debug.traceback(err_msg, 2)
             logger.err("safe_call: ", trace)
@@ -21,12 +21,12 @@ M.pcall = function(f, ...)
 end
 
 M.map_message = function(err_msg)
-    if type(err_msg) ~= "string" then 
+    if type(err_msg) ~= "string" then
         return "网络请求失败"
     end
     local lower_err = err_msg:lower()
     local err_map = {
-        ["wantread"] = "连接超时，请稍后重试", 
+        ["wantread"] = "连接超时，请稍后重试",
         ["connection refused"] = "连接被拒绝，请检查服务地址",
         ["no route to host"] = "无法连接到网络",
         ["network is unreachable"] = "网络不可用，请检查网络连接",

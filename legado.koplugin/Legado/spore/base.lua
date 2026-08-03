@@ -75,9 +75,9 @@ function M:init()
     end
     local is_debug = false
     if is_debug then
-        Spore.debug = {  
-            write = function(self, ...)  
-                logger.info(table.concat({...}))  
+        Spore.debug = {
+            write = function(def, ...)
+                logger.info(table.concat({...}))
             end  
         }
     end
@@ -334,7 +334,6 @@ function M:getProxyCoverUrl(coverUrl)
     return table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
 end
 function M:getProxyImageUrl(bookUrl, img_src)
-    local res_img_src = img_src
     local width = Screen:getWidth() or 800
     local server_address = self.settings.server_address
     

@@ -142,10 +142,10 @@ function Handlers:register(parent_ref)
 
     function parent_ref:openFile(file)
         if not H.is_str(file) then return end
-        local function open_regular_file(file)
+        local function open_regular_file(file_path)
             local ReaderUI = require("apps/reader/readerui")
             UIManager:broadcastEvent(Event:new("SetupShowReader"))
-            ReaderUI:showReader(file, nil, true)
+            ReaderUI:showReader(file_path, nil, true)
         end
         if not parent_ref:isBrowserBook(file) then
             open_regular_file(file)
@@ -681,9 +681,9 @@ function Handlers:register(parent_ref)
                     if chapter_direction == "next" then return end
                 end
 
-                local calculate_goto_page = function(chapter_direction, page_count)
-                    if chapter_direction == "next" then return 1
-                    elseif page_count and chapter_direction == "prev" then return page_count end
+                local calculate_goto_page = function(chapterDirection, page_count)
+                    if chapterDirection == "next" then return 1
+                    elseif page_count and chapterDirection == "prev" then return page_count end
                 end
 
                 local make_pages_continuous = function(chapter_event)
