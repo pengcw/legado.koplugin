@@ -88,8 +88,13 @@ local function pGetUrlContent(options, is_create)
     local file_fp = options.file
     local is_pic = options.is_pic
 
+    local function close_file()
+        if file_fp then pcall(function() file_fp:close() end) end
+    end
+
     local parsed = socket_url.parse(url)
     if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
+        close_file()
         return false, "Unsupported protocol"
     end
 
@@ -130,17 +135,20 @@ local function pGetUrlContent(options, is_create)
 
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
         logger.err("request interrupted:", code)
+        close_file()
         return false, "request interrupted:" .. tostring(code)
     end
 
     if headers == nil then
         logger.warn("No HTTP headers:", status or code or "network unreachable")
+        close_file()
         return false, "Network or remote server unavailable"
     end
 
     if type(code) ~= 'number' or code < 200 or code > 299 then
         logger.warn("HTTP status not okay:", status or code or "network unreachable")
         logger.dbg("Response headers:", headers)
+        close_file()
         return false, "Remote server error or unavailable"
     end
 
@@ -163,6 +171,8 @@ local function pGetUrlContent(options, is_create)
             extension = get_image_format_head8(content)
         end
     end
+
+    close_file()
 
     return true, {
         data = content,
