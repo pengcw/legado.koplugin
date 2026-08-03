@@ -14,6 +14,62 @@ local M = {}
 
 local RELEASE_API = "https://api.github.com/repos/pengcw/legado.koplugin/releases/latest"
 
+local GITHUB_PROXIES = {
+    "https://ghproxy.net/",
+    "https://ghfast.top/",
+    "https://gh-proxy.com/",
+}
+
+local UPDATE_ZIP_NAME = "legado_plugin_update.zip"
+local META_RAW_URL = "https://raw.githubusercontent.com/pengcw/legado.koplugin/main/legado.koplugin/_meta.lua"
+local RELEASE_DOWNLOAD_URL_FORMAT = "https://github.com/pengcw/legado.koplugin/releases/download/%s/%s"
+
+function M:_requestWithProxies(options)
+    local original_url = options.url
+    local candidates = { original_url }
+    
+    local proxies = {}
+    for _, prefix in ipairs(GITHUB_PROXIES) do
+        table.insert(proxies, prefix)
+    end
+
+    for i = #proxies, 2, -1 do
+        local j = math.random(i)
+        proxies[i], proxies[j] = proxies[j], proxies[i]
+    end
+
+    for _, prefix in ipairs(proxies) do
+        table.insert(candidates, prefix .. original_url)
+    end
+    
+    local last_err
+    for i, candidate_url in ipairs(candidates) do
+        options.url = candidate_url
+        
+        if options.file_path then
+            if util.fileExists(options.file_path) then
+                util.removeFile(options.file_path)
+            end
+            options.file = io.open(options.file_path, "wb")
+        end
+        
+        local ok, res = makeRequest(options)
+        
+        if options.file then
+            pcall(function() options.file:close() end)
+        end
+        
+        if ok then
+            return ok, res
+        end
+        
+        last_err = res or "请求失败"
+        logger.warn(string.format("下载请求失败 [%d/%d]: %s, error: %s", i, #candidates, candidate_url, tostring(last_err)))
+    end
+    
+    return false, last_err
+end
+
 function M:getMetaInfo()
     local info, err_msg= load_script("_meta")
     local plg_path = Env.getPluginDirectory()
@@ -98,6 +154,39 @@ function M:ota(ok_callback)
     })
 end
 
+function M:_getFallbackVersionInfo()
+    local ok, res = self:_requestWithProxies({
+        url = META_RAW_URL,
+        timeout = 10,
+        maxtime = 20,
+        method = "GET"
+    })
+    
+    if ok and H.is_tbl(res) and H.is_str(res.data) then
+        local table_content = res.data:match("return%s*(%b{})")
+        if table_content then
+            local func = (loadstring or load)("return " .. table_content)
+            if func then
+                if setfenv then setfenv(func, {}) end
+                local success, meta_info = pcall(func)
+                
+                if success and H.is_tbl(meta_info) and H.is_str(meta_info.version) then
+                    local normalized = string.match(meta_info.version, "v?([%d%.]+)")
+                    local download_url = string.format(RELEASE_DOWNLOAD_URL_FORMAT, normalized, UPDATE_ZIP_NAME)
+                    
+                    logger.dbg("[Update] 备用获取版本成功: " .. normalized)
+                    return {
+                        asset_name = UPDATE_ZIP_NAME,
+                        download_url = download_url,
+                        latest_version = normalized
+                    }
+                end
+            end
+        end
+    end
+    return nil
+end
+
 function M:_getLatestReleaseInfo()
     local ok, res = makeRequest({
         url = RELEASE_API,
@@ -108,37 +197,26 @@ function M:_getLatestReleaseInfo()
             ["User-Agent"] = "koreader-legado-plugin"
         }
     })
-    if not (ok and H.is_tbl(res) and res.data) then
-        logger.warn("获取版本失败：", res)
-        return
-    end
-    if res.status_code and res.status_code ~= 200 then
-        logger.warn("获取版本信息失败，HTTP 状态码：", res.status_code)
-        return
-    end
-
-    local json = require("json")
-    local success, data = pcall(json.decode, res.data, json.decode.simple)
-    if not success then
-        logger.warn("github 返回数据格式错误：", tostring(data))
-        return
-    end
-    if not (type(data) == "table" and data.tag_name and data.assets and data.assets[1]) then
-        logger.warn("获取版本数据错误：", res)
-        return
+    
+    if ok and H.is_tbl(res) and res.status_code == 200 and res.data then
+        local json = require("json")
+        local success, data = pcall(json.decode, res.data, json.decode.simple)
+        if success and type(data) == "table" and data.tag_name and data.assets and data.assets[1] then
+            local latest_version_tag = data.tag_name
+            local assets = data.assets
+            local normalized_latest_version = string.match(latest_version_tag, "v?([%d%.]+)")
+            local download_url = assets[1].browser_download_url
+            local asset_name = assets[1].name or UPDATE_ZIP_NAME
+            return {
+                asset_name = asset_name,
+                download_url = download_url,
+                latest_version = normalized_latest_version
+            }
+        end
     end
 
-    local release_info = data
-    local latest_version_tag = release_info.tag_name
-    local assets = release_info.assets
-    local normalized_latest_version = string.match(latest_version_tag, "v?([%d%.]+)")
-    local download_url = assets[1].browser_download_url
-    local asset_name = assets[1].name or "legado_plugin_update.zip"
-    return {
-        asset_name = asset_name,
-        download_url = download_url,
-        latest_version = normalized_latest_version
-    }
+    logger.warn("[Update] API 获取版本失败，尝试使用代理...")
+    return self:_getFallbackVersionInfo()
 end
 
 function M:_downloadUpdate(release_info)
@@ -154,27 +232,16 @@ function M:_downloadUpdate(release_info)
     local temp_path_base = Env.getTempDirectory()
     local temp_zip_path = string.format("%s/%s", temp_path_base, asset_name)
 
-    if util.fileExists(temp_zip_path) then
-        util.removeFile(temp_zip_path)
-    end
-
-    local file, err_open = io.open(temp_zip_path, "wb")
-    if not file then
-        return {
-            error = "downloadUpdate: io.open path error"
-        }
-    end
-
     local http_options = {
         url = url,
         method = "GET",
-        file = file,
+        file_path = temp_zip_path,
         timeout = 30,
         maxtime = 300,
         redirect = true,
     }
 
-    local ok, err = makeRequest(http_options)
+    local ok, err = self:_requestWithProxies(http_options)
     if not ok then
         util.removeFile(temp_zip_path)
         return {
