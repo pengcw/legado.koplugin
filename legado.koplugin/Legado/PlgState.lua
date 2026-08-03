@@ -1,4 +1,5 @@
 local M = {
+    ctx = nil,
     _selected_book = nil,
     _displayed_chapter = nil,
     _chapter_direction = nil,
@@ -76,6 +77,20 @@ function M:sharedMetaData(dir, meta_data)
         return M.shared_meta_data
     end
     return nil
+end
+
+function M:getUI()
+    return self.ctx and self.ctx.ui
+end
+
+function M:isReaderOpen()
+    local ui = self:getUI()
+    return ui ~= nil and ui.name == "ReaderUI"
+end
+
+function M:getDocument()
+    local ui = self:getUI()
+    return ui and ui.document
 end
 
 return M

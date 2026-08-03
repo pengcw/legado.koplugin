@@ -23,13 +23,18 @@ M.getTempDirectory = function()
     return FS.checkAndCreateFolder(plg_cache_path)
 end
 
-M.getPluginName =function()
-    return PlgState.plg_name
+M.getPluginName = function()
+    return PlgState.plg_name or "legado"
 end
 
 M.getPluginDirectory = function()
-    local plg_path_alt = table.concat({DataStorage:getDataDir(), "/plugins/", PlgState.plg_name, '.koplugin'})
-    return PlgState.plg_path or plg_path_alt
+    if PlgState.ctx and PlgState.ctx.path then
+        return PlgState.ctx.path
+    end
+    if PlgState.plg_path then
+        return PlgState.plg_path
+    end
+    return table.concat({DataStorage:getDataDir(), "/plugins/", M.getPluginName(), '.koplugin'})
 end
 
 M.getBookCachePath = function(book_cache_id)

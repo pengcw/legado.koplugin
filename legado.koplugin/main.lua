@@ -6,6 +6,7 @@ local Event = require("ui/event")
 local util = require("util")
 local logger = require("logger")
 local _ = require("gettext")
+local PlgState = require("Legado/PlgState")
 local H = require("Legado/Helper")
 local Backend = require("Legado/Backend")
 local LibraryView = require("Legado/LibraryView")
@@ -13,7 +14,7 @@ local Patcher = require("Legado.patches")
 local DocumentRegistry = require("document/documentregistry")
 local CreDocument = require("Legado/Document")
 local EventHandlers = require("Legado.EventHandlers")
-local PlgState = require("Legado/PlgState")
+
 
 local Legado = WidgetContainer:extend({
     name = "开源阅读插件",
@@ -21,14 +22,14 @@ local Legado = WidgetContainer:extend({
 })
 
 function Legado:init()
-    -- on open FileManager or ReaderUI
+    if self.path then
+        -- fix Android path
+        self.path = self.path:gsub("/+", "/")
+    end
+    PlgState.ctx = self
     if not PlgState.plg_name then
         PlgState.plg_name = "legado"
-        if self.path then
-            -- fix Android path
-            local path = self.path:gsub("/+", "/")
-            PlgState.plg_path = path
-        end
+        PlgState.plg_path = self.path
     end
     if not Backend.settings_data then
         Backend:initialize()
@@ -88,7 +89,7 @@ end
 
 function Legado:addToMainMenu(menu_items)
     if not (self.ui and menu_items) then return end
-    if not self.ui.document then -- FileManager menu only
+    if not PlgState:getDocument() then -- FileManager menu only
         local is_low_version = PlgState.is_low_version
         if is_low_version == nil then
             local ko_version = require("version"):getNormalizedCurrentVersion()
@@ -105,8 +106,8 @@ function Legado:addToMainMenu(menu_items)
             main_menu = self:genMainMenuItems(self.ui)
         end
         menu_items.Legado_main = main_menu
-    elseif self.ui.document.file and self.ui.name == "ReaderUI" and self.initializeFromReaderUI then
-        self:initializeFromReaderUI(self.ui.document, menu_items)
+    elseif PlgState:isReaderOpen() and PlgState:getDocument().file and self.initializeFromReaderUI then
+        self:initializeFromReaderUI(PlgState:getDocument(), menu_items)
     end
 end
 
@@ -119,12 +120,12 @@ function Legado:openLibraryView()
 end
 
 function Legado:isCachePath(file_path, instance)
-    if not (file_path and instance) then instance = self.ui end
+    if not (file_path and instance) then instance = PlgState:getUI() end
     return Patcher.is_legado_path(file_path, instance)
 end
 
 function Legado:isBrowserBook(file_path, instance)
-    if not (file_path and instance) then instance = self.ui end
+    if not (file_path and instance) then instance = PlgState:getUI() end
     return Patcher.is_legado_browser_book(file_path, instance)
 end
 
