@@ -521,10 +521,9 @@ function BookDetails:getCoverimage(path, book_cache_id)
             if H.is_str(cover_path) and util.fileExists(cover_path) then
                 -- supports gz compression
                 local get_cover_bitmap = function(cover_file)
-                    local DocumentRegistry = require("document/documentregistry")
                     local cover_doc = DocumentRegistry:openDocument(cover_file)
                     if cover_doc then
-                        local ok, cover_bb = pcall(cover_doc.getCoverPageImage, cover_doc)
+                        ok, cover_bb = pcall(cover_doc.getCoverPageImage, cover_doc)
                         cover_doc:close()
                         if ok and cover_bb and H.is_func(cover_bb.getWidth) then return cover_bb end 
                     end

@@ -540,7 +540,7 @@ function M:searchBookMulti(options, callback)
 
             if H.is_tbl(results) and H.is_tbl(results[1]) and H.is_str(results[1].bookUrl) and results[1].bookUrl ~= "" then
                 for _, book in ipairs(results) do
-                    if H.is_tbl(book) and filter_even(book) and H.is_str(book.name) and book.name ~= "" and 
+                    if H.is_tbl(book) and filter_even(book) and H.is_str(book.name) and book.name ~= "" and
                             H.is_str(book.bookUrl) and  book.bookUrl ~= "" then
                         table.insert(all_results, book)
                     end
@@ -552,7 +552,6 @@ function M:searchBookMulti(options, callback)
             logger.warn("Search failed for source:", source and source.bookSourceName or "")
         end
     end
-    
     if H.is_func(callback) then
         return callback({list = all_results})
     end

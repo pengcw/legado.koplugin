@@ -2,12 +2,9 @@ local UIManager = require("ui/uimanager")
 local CenterContainer = require("ui/widget/container/centercontainer")
 local Menu = require("ui/widget/menu")
 local Device = require("device")
-local Event = require("ui/event")
 local logger = require("logger")
-local ffiUtil = require("ffi/util")
 local util = require("util")
 local Screen = Device.screen
-local T = ffiUtil.template
 
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
