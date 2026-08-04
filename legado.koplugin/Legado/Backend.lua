@@ -420,6 +420,13 @@ end
 function M:searchBookMulti(options, callback)
     return wrap_response(self.apiClient:searchBookMulti(options, callback))
 end
+
+function M:searchBookMultiAsync(...)
+    if self.apiClient.searchBookMultiAsync then
+        return self.apiClient:searchBookMultiAsync(...)
+    end
+    return nil
+end
 function M:changeBookSource(newBookSource)
     return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
         if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then

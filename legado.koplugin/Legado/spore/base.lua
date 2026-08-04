@@ -378,7 +378,126 @@ function M:searchBookMulti(options, callback)
     if ret == nil then
         return ret, err_msg or "未知错误"
     else
-        return {list = ret}
+        return { list = ret, lastIndex = -1 }
+    end
+end
+
+function M:searchBookMultiAsync(options, on_chunk, on_finish)
+    local search_text = options.search_text or ""
+    local timeout = 60
+    local is_exact_search = false
+    if string.sub(search_text, 1, 1) == '=' then
+        search_text = string.sub(search_text, 2)
+        is_exact_search = true
+    end
+
+    local JSON = require("json")
+    local websocket = require('Legado/websocket')
+    local UIManager = require("ui/uimanager")
+    local socket = require("socket")
+    local time = require("ui/time")
+    
+    local key_json = JSON.encode({ key = search_text })
+    local client = websocket.client.sync({ timeout = 3 })
+    local socket_url = require("socket.url")
+    local parsed = socket_url.parse(self.settings.server_address)
+    local ws_scheme = parsed.scheme == 'http' and 'ws' or 'wss'
+    parsed.port = (parsed.port or (ws_scheme == 'ws' and 80 or 443)) + 1
+    local ws_server_address = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/searchBook")
+    
+    local ok, err = client:connect(ws_server_address)
+    if not ok then return on_finish(false, "连接失败：" .. tostring(err)) end
+    
+    client:send(key_json)
+    
+    local deduplication = {}
+    
+    local function filter_even(book)
+        if not H.is_tbl(book) then return false end
+        if is_exact_search then
+            return (book.name == search_text) or (book.author == search_text)
+        end
+        return true
+    end
+
+    local SearchTask = {}
+    function SearchTask:new(o)
+        o = o or {}
+        setmetatable(o, self)
+        self.__index = self
+        o.is_done = false
+        return o
+    end
+
+    function SearchTask:start(client, timeout, on_chunk, on_finish, filter_even)
+        self.client = client
+        self.start_time = time.now()
+        self.timeout = timeout
+        self.on_chunk = on_chunk
+        self.on_finish = on_finish
+        self.filter_even = filter_even
+        self.deduplication = {}
+        
+        self.JSON = require("json")
+        self.UIManager = require("ui/uimanager")
+        self.socket = require("socket")
+        self.zmq_ref = self.UIManager:insertZMQ(self)
+    end
+
+    function SearchTask:stop()
+        if self.is_done then return end
+        self.is_done = true
+        pcall(function() self.client:close() end)
+        if self.zmq_ref then self.UIManager:removeZMQ(self.zmq_ref) end
+    end
+
+    function SearchTask:waitEvent()
+        if self.is_done then return nil end
+        if time.since(self.start_time) > time.s(self.timeout) then
+            self:stop()
+            self.on_finish(false, "搜索超时")
+            return nil
+        end
+        
+        local recvt = self.socket.select({self.client.sock}, nil, 0)
+        if #recvt > 0 then
+            self.client.sock:settimeout(60) 
+            local response_body, recv_err = self.client:receive()
+            if not response_body then
+                if recv_err == "timeout" then return nil end
+                self:stop()
+                self.on_finish(true, nil)
+                return nil
+            end
+            
+            local ok_decode, parsed_body = pcall(self.JSON.decode, response_body)
+            if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
+                local chunk = {}
+                for i, v in ipairs(parsed_body) do
+                    if type(v) == "table" and type(v.name) == "string" and v.name ~= "" and type(v.bookUrl) == "string" and v.bookUrl ~= "" then
+                        local deduplication_key = table.concat({v.name, v.author or "", tostring(v.originOrder or 1)}, "|||")
+                        if not self.deduplication[deduplication_key] and self.filter_even(v) then
+                            table.insert(chunk, v)
+                            self.deduplication[deduplication_key] = true
+                        end
+                    end
+                end
+                if #chunk > 0 then
+                    self.on_chunk(chunk)
+                end
+            end
+        end
+        return nil
+    end
+    
+    local task = SearchTask:new()
+    task:start(client, timeout, on_chunk, on_finish, filter_even)
+    
+    return function() -- Return cancel function
+        if not task.is_done then
+            task:stop()
+            on_finish(false, "已取消")
+        end
     end
 end
 
@@ -431,6 +550,12 @@ function M:_searchBookSocket(search_text, filter, timeout)
       return nil, "请求失败：" .. tostring(err)
   end
 
+  -- 连接成功后，将底层的 read timeout 提升为整体超时（默认60s）
+  -- 否则如果服务端超过 3 秒没有返回数据，会报 timeout 并强制中断整个 socket 连接
+  if client.sock and client.sock.settimeout then
+      client.sock:settimeout(timeout)
+  end
+
     local function filter_even(book)
         if not H.is_tbl(book) then return false end
 
@@ -480,7 +605,7 @@ function M:_searchBookSocket(search_text, filter, timeout)
           if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
               for i, v in ipairs(parsed_body) do
                 if H.is_tbl(v) and H.is_str(v.name) and v.name ~= "" and H.is_str(v.bookUrl) and v.bookUrl ~= "" then
-                    local deduplication_key = table.concat({v.name, v.author or "", tostring(v.originOrder or 1)})
+                    local deduplication_key = table.concat({v.name, v.author or "", tostring(v.originOrder or 1)}, "|||")
                     if not deduplication[deduplication_key] and filter_even(v) then
                         table.insert(response, v)
                         deduplication[deduplication_key] = true
