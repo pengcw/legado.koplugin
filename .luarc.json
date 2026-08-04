@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "runtime.version": "LuaJIT",
+  "diagnostics.globals": [
+    "vim",
+    "describe",
+    "it",
+    "before_each",
+    "after_each",
+    "assert",
+    "spy",
+    "stub",
+    "love",
+    "G_reader_settings",
+    "G_defaults",
+    "G_reader_service",
+    "table.pack",
+    "table.unpack"
+  ],
+  "diagnostics.disable": [
+    "deprecated",
+    "undefined-field",
+    "need-check-nil",
+    "inject-field",
+    "redundant-parameter",
+    "cast-local-type",
+    "param-type-mismatch"
+  ],
+  "workspace.checkThirdParty": false,
+  "doc.privateName": [
+    "__*"
+  ]
+}
