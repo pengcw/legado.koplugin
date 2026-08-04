@@ -362,6 +362,52 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
     
     self.last_index = self.last_index ~= nil and self.last_index or -1
 
+    if Backend.apiClient.searchBookMultiAsync then
+        if not is_more_call then
+            self.results = {}
+            self.has_more_api_results = nil
+            self:createBookSourceMenu({
+                title = '多源搜索 (加载中...)',
+                subtitle = string.format("key: %s", search_text),
+            })
+        end
+
+        local cancel_func
+        if self.results_menu then
+            local orig_close = self.results_menu.close_callback
+            self.results_menu.close_callback = function()
+                if cancel_func then cancel_func() end
+                if orig_close then orig_close() end
+            end
+        end
+
+        cancel_func = Backend:searchBookMultiAsync({
+            search_text = search_text,
+            last_index = self.last_index
+        }, function(chunk)
+            if self.results_menu and UIManager:isWidgetShown(self.results_menu._container) then
+                self:refreshItems(false, chunk)
+            end
+        end, function(success, msg)
+            cancel_func = nil
+            if self.results_menu and UIManager:isWidgetShown(self.results_menu._container) then
+                local new_title = success and '多源搜索' or ('搜索中止 (' .. tostring(msg) .. ')')
+                self.results_menu.title = new_title
+                if self.results_menu.title_bar and self.results_menu.title_bar.setTitle then
+                    self.results_menu.title_bar:setTitle(new_title)
+                    UIManager:setDirty(self.results_menu._container or self.results_menu, "ui")
+                end
+                self.results_menu:updateItems()
+            end
+            if not success and msg ~= "已取消" then
+                MessageBox:notice(msg or "搜索失败")
+            elseif success and self.results and #self.results == 0 then
+                MessageBox:notice('未找到相关书籍')
+            end
+        end)
+        return
+    end
+
     TaskProg.loading(string.sub(search_text, 1, 1) ~= '=' and string.format("正在搜索 [%s] ", search_text) or
                            string.format("精准搜索 [%s] ", string.sub(search_text, 2)), function()
         return Backend:searchBookMulti({
