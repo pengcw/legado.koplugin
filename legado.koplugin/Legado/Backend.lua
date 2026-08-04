@@ -208,7 +208,7 @@ function M:loadApiProvider()
     elseif self:_isQingread() then
         client = require("Legado.spore.qread")
     else
-        client = require("Legado.spore.base")
+        client = require("Legado.spore.android_app")
     end
     self.apiClient = client:new{
         settings = self:getSettings()
