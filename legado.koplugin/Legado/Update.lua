@@ -197,8 +197,7 @@ function M:_getLatestReleaseInfo()
             ["User-Agent"] = "koreader-legado-plugin"
         }
     })
-    
-    if ok and H.is_tbl(res) and res.status_code == 200 and res.data then
+    if ok and H.is_tbl(res) and res.data then
         local json = require("json")
         local success, data = pcall(json.decode, res.data, json.decode.simple)
         if success and type(data) == "table" and data.tag_name and data.assets and data.assets[1] then

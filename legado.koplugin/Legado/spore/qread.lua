@@ -249,7 +249,7 @@ function M:saveBook(bookinfo, callback)
             type = bookinfo.type or 0
         })
   
-    end, nil, {
+    end, callback, {
         timeouts = {10, 12}
     }, 'saveBook')
   end
@@ -455,13 +455,14 @@ function M:getProxyCoverUrl(coverUrl)
     return res_cover_src
 end
 function M:getProxyImageUrl(bookUrl, img_src)
+    if not H.is_str(img_src) then return "" end
     local res_img_src
     local server_address = self.settings.server_address
     if string.sub(img_src, 1, 8) == "baseurl/" then
         local url_path = string.sub(img_src, 8)
         res_img_src = table.concat({server_address, url_path})
     else
-        res_img_src = table.concat({server_address, '/proxypng?url=', util.urlEncode(res_img_src)})
+        res_img_src = table.concat({server_address, '/proxypng?url=', util.urlEncode(img_src)})
     end
     return res_img_src
 end
