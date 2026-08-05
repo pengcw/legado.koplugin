@@ -43,6 +43,7 @@ local ChapterListing = Menu:extend{
     on_show_chapter_callback = nil,
     _ui_refresh_time = nil,
     refresh_menu_key = nil,
+    is_enable_shortcut = false,
 }
 
 function ChapterListing:init()

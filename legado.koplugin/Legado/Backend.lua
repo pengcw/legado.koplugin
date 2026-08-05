@@ -1,5 +1,4 @@
 local logger = require("logger")
-local Device = require("device")
 local NetworkMgr = require("ui/network/manager")
 local ffiUtil = require("ffi/util")
 local dbg = require("dbg")
@@ -16,6 +15,7 @@ local FS = require("Legado.Helper.FS")
 local safe_call = require("Legado.Helper.Error").pcall
 local load_script = require("Legado.Helper.Loader").load_script
 local TaskLock = require("Legado.task.Lock")
+local ImageUtil = require("Legado.Helper.ImageUtil")
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -43,25 +43,7 @@ local function wrap_response(data, err_message)
 end
 
 local function get_url_extension(url)
-    if type(url) ~= "string" or url == "" then
-        return ""
-    end
-    local parsed = socket_url.parse(url)
-    local path = parsed and parsed.path
-    if not path or path == "" then
-        return ""
-    end
-    path = socket_url.unescape(path):gsub("/+$", "")
-
-    local filename = path:match("([^/]+)$") or ""
-    local ext = filename:match("%.([%w]+)$")
-    -- logger.info(path, filename, ext)
-    return ext and ext:lower() or "", filename
-end
-
-local function convertToGrayscale(image_data)
-    local Png = require("Legado/Png")
-    return Png.processImage(Png.toGrayscale, image_data, 1)
+    return ImageUtil.get_url_extension(url)
 end
 
 local function pGetUrlContent(options)
@@ -69,116 +51,6 @@ local function pGetUrlContent(options)
         M.httpReq = require("Legado.Helper.Http")
     end
     return M.httpReq(options, true)
-end
-
-local function pDownload_CreateCBZ(chapter, filePath, img_sources)
-
-    dbg.v('CreateCBZ strat:')
-
-    if not filePath or not H.is_tbl(img_sources) then
-        error("Cbz param error:")
-    end
-
-    local is_convertToGrayscale = false
-
-    local cbz_path_tmp = filePath .. '.downloading'
-
-    if util.fileExists(cbz_path_tmp) then
-        if M:isTaskRunning(chapter) then
-            error("Other threads downloading, cancelled")
-        else
-            util.removeFile(cbz_path_tmp)
-        end
-    end
-
-    local cbz
-    local cbz_lib
-    local no_compression
-    local mtime
-
-    -- 20250525 PR # 2090: Archive.Writer replaces ZipWriter
-    local ok , ZipWriter = pcall(require, "ffi/zipwriter")
-    if ok and ZipWriter then
-        cbz_lib = "zipwriter"
-        no_compression = true
-
-        cbz = ZipWriter:new{}
-        if not cbz:open(cbz_path_tmp) then
-            error('CreateCBZ cbz:open err')
-        end
-        cbz:add("mimetype", "application/vnd.comicbook+zip", true)
-    else
-        cbz_lib = "archiver"
-        mtime = os.time()
-
-        local Archiver = require("ffi/archiver").Writer
-        cbz = Archiver:new{}
-        if not cbz:open(cbz_path_tmp, "epub") then
-            error(string.format("CreateCBZ cbz:open err: %s", tostring(cbz.err)))
-        end
-
-        cbz:setZipCompression("store")
-        cbz:addFileFromMemory("mimetype", "application/vnd.comicbook+zip", mtime)
-        cbz:setZipCompression("deflate")
-    end
-
-    for i, img_src in ipairs(img_sources) do
-
-        dbg.v('Download_Image start', i, img_src)
-        local status, err = pGetUrlContent({
-                url = img_src,
-                timeout = 15,
-                maxtime = 60,
-                is_pic = true,
-        })
-
-        if status and H.is_tbl(err) and err['data'] then
-
-            local imgdata = err['data']
-            local img_extension = err['ext']
-            if not img_extension or img_extension == "" then
-                img_extension = get_url_extension(img_src)
-            end
-            -- qread may fail to get ext
-            if not img_extension or img_extension == "" then
-                img_extension = "png"
-            end
-            local img_name = string.format("%d.%s", i, img_extension)
-            if is_convertToGrayscale == true and img_extension == 'png' then
-                local success, imgdata_new = convertToGrayscale(imgdata)
-                if success ~= true then
-
-                    goto continue
-                end
-                imgdata = imgdata_new.data
-            end
-
-            if cbz_lib == "zipwriter" then
-                cbz:add(img_name, imgdata, no_compression)
-            else
-                cbz:addFileFromMemory(img_name, imgdata, mtime)
-            end
-
-        else
-            dbg.v('Download_Image err', tostring(err))
-        end
-        ::continue::
-    end
-    if cbz and cbz.close then
-        cbz:close()
-    end
-    dbg.v('CreateCBZ cbz:close')
-
-    if util.fileExists(filePath) ~= true then
-        os.rename(cbz_path_tmp, filePath)
-    else
-        if util.fileExists(cbz_path_tmp) == true then
-            util.removeFile(cbz_path_tmp)
-        end
-        error('exist target file, cancelled')
-    end
-
-    return filePath
 end
 
 function M:HandleResponse(response, on_success, on_error)
@@ -216,6 +88,10 @@ function M:loadApiProvider()
 end
 
 function M:initialize()
+    local BookInfoDB = require("Legado/BookInfoDB")
+    self.dbManager = BookInfoDB:new({
+        dbPath = Env.getTempDirectory() .. "/bookinfo.db"
+    })
     local ok, err_msg = pcall(function()
         local fn, file_path = load_script("Legado/_r3l_once")
         return fn and fn() == true and util.removeFile(file_path)
@@ -247,13 +123,7 @@ function M:initialize()
         }
         self.settings_data:flush()
     end
-
-    local BookInfoDB = require("Legado/BookInfoDB")
-    self.dbManager = BookInfoDB:new({
-        dbPath = Env.getTempDirectory() .. "/bookinfo.db"
-    })
     pcall(function() TaskLock.cleanAll(self.dbManager) end)
-    
     self:loadApiProvider()
 end
 
@@ -988,7 +858,11 @@ function M:_AnalyzingChapters(chapter, content, filePath)
                 return chapter_writeToFile(chapter, filePath, err['data'])
             else
                 filePath = filePath .. '.cbz'
-                local status, err = safe_call(pDownload_CreateCBZ, chapter, filePath, img_sources)
+                
+                local function check_running_callback()
+                    return self:isTaskRunning(chapter)
+                end
+                local status, err = safe_call(ImageUtil.create_cbz_from_urls, filePath, img_sources, check_running_callback)
 
                 if not status then
                     error('CreateCBZ err: ' .. tostring(err))
@@ -1321,36 +1195,10 @@ function M:findNextChapter(current_chapter, is_downloaded)
 
 end
 
-local function get_img_src(html)
-    if type(html) ~= "string" then
-        return {}
-    end
-
-    local img_sources = {}
-    -- local img_pattern = "<img[^>]*src%s*=%s*([\"']?)([^%s\"'>]+)%1[^>]*>"
-    local img_pattern = '<img[^>]-src%s*=%s*["\']?([^"\'>%s]+)["\']?[^>]*>'
-
-    for src in html:gmatch(img_pattern) do
-        if src and src ~= "" then
-            table.insert(img_sources, src)
-        end
-    end
-
-    return img_sources
-end
-
 function M:getPorxyPicUrls(bookUrl, content)
-    local picUrls = get_img_src(content)
-    if not H.is_tbl(picUrls) or #picUrls < 1 then
-        return {}
-    end
-
-    local new_porxy_picurls = {}
-    for i, img_src in ipairs(picUrls) do
-        local new_url = self:getProxyImageUrl(bookUrl, img_src)
-        table.insert(new_porxy_picurls, new_url)
-    end
-    return new_porxy_picurls
+    return ImageUtil.extract_urls_from_html(content, function(src)
+        return self:getProxyImageUrl(bookUrl, src)
+    end)
 end
 
 function M:pDownload_Image(img_src, timeout)
@@ -1902,20 +1750,7 @@ function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
 end
 
 function M:findCustomCoverFileInDir(cover_path_no_ext)
-    local dir, image_filename = util.splitFilePathName(cover_path_no_ext)
-    if not (dir and image_filename) then
-        logger.err(string.format("findCustomCoverFileInDir: invalid name (%s, %s)", tostring(dir), tostring(image_filename)))
-        return nil
-    end
-    if not util.pathExists(dir) then return nil end
-    local extensions = { "jpg", "jpeg", "png", "webp", "bmp", "tiff" }
-    for _, ext in ipairs(extensions) do
-        local cover_full_path = string.format("%s.%s", cover_path_no_ext, ext)
-        if util.fileExists(cover_full_path) then
-            return cover_full_path, string.format("%s.%s",image_filename, ext)
-        end
-    end
-    return nil
+    return ImageUtil.findCustomCoverFileInDir(cover_path_no_ext)
 end
 
 function M:emitMetadataChanged(book_file)
@@ -1935,101 +1770,12 @@ function M:emitMetadataChanged(book_file)
 end
 
 function M:get_default_cover_cache(book_cache_id)
-    if not (H.is_str(book_cache_id) and book_cache_id ~= "") then
-        return nil
-    end
-    local cover_path_no_ext = Env.getCoverCacheFilePath(book_cache_id)
-    return self:findCustomCoverFileInDir(cover_path_no_ext)
-end
-
-local function save_processed_image(data, output_path, ext)  
-    local RenderImage = require("ui/renderimage")  
-    local bb = RenderImage:renderImageData(data, #data, false, nil, nil)  
-    local final_success = false
-    if bb and bb.writeToFile then  
-        local ok, err = pcall(bb.writeToFile, bb, output_path, ext, nil, nil)  
-        final_success = ok and err
-    else  
-        util.writeToFile(data, output_path, true)  
-        local DocumentRegistry = require("document/documentregistry")  
-        local temp_doc = DocumentRegistry:openDocument(output_path)  
-        if temp_doc then  
-            local status, err = pcall(temp_doc.getCoverPageImage, temp_doc)  
-            temp_doc:close()
-            if status and err then
-                bb = err
-                if type(bb.getWidth) == "function" then
-                    local ok, w_err = pcall(bb.writeToFile, bb, output_path, ext, nil, nil)
-                    final_success = ok and w_err
-                end  
-            end  
-        end  
-    end
-    if bb and bb.free then  
-        bb:free()  
-    end
-    return final_success  
+    return ImageUtil.get_default_cover_cache(book_cache_id)
 end
 
 function M:download_cover_img(book_cache_id, cover_url, is_force)
-     if not (H.is_str(book_cache_id) and book_cache_id ~= "" 
-        and H.is_str(cover_url) and cover_url ~= "") then
-        logger.err("download_cover_img: invalid parameter", book_cache_id, cover_url)
-        return nil, nil
-    end
-    
-    if not is_force then
-        local cover_full_path = self:get_default_cover_cache(book_cache_id)
-        if H.is_str(cover_full_path) then
-            local dir, image_filename = util.splitFilePathName(cover_full_path)
-            return cover_full_path, image_filename
-        end
-    end
-
-    local cover_path_no_ext = Env.getCoverCacheFilePath(book_cache_id)
-    local lock_path = cover_path_no_ext .. ".downloading"
-    
-    if util.fileExists(lock_path) then
-        if not FS.isFileOlderThan(lock_path, 60) then
-            logger.warn("download_cover_img: Cover download already in progress", book_cache_id)
-            return nil, nil
-        else
-            util.removeFile(lock_path)
-        end
-    end
-    
-    local dir = util.splitFilePathName(cover_path_no_ext)
-    FS.checkAndCreateFolder(dir)
-    util.writeToFile("", lock_path)
-
-    local img_src = self:getProxyCoverUrl(cover_url)
-    local ok, resp = pGetUrlContent({
-                        url = img_src,
-                        timeout = 15,
-                        maxtime = 60,
-                        is_pic = true,
-                })
-    if ok and resp and resp['data'] then
-        local ext = resp.ext or "jpg"
-        local final_img_path = string.format("%s.%s", cover_path_no_ext, ext)
-        
-        local is_success = save_processed_image(resp['data'], lock_path, ext)
-        if not is_success then
-            util.removeFile(lock_path)
-            logger.err("download_cover_img: Invalid cover image data")
-            return nil, nil
-        end
-        
-        if util.fileExists(final_img_path) then util.removeFile(final_img_path) end
-        os.rename(lock_path, final_img_path)
-        
-        local _, image_filename = util.splitFilePathName(final_img_path)
-        return final_img_path, image_filename
-    else
-        util.removeFile(lock_path)
-        logger.err("download_cover_img: failed", img_src, resp)
-        return nil, nil
-    end
+    local proxy_url = self:getProxyCoverUrl(cover_url)
+    return ImageUtil.download_cover(book_cache_id, proxy_url, is_force)
 end
 
 function M:with_lock(target, fn, ttl, owner_id)
@@ -2064,7 +1810,7 @@ function M:after_reader_chapter_show(chapter)
 
         local bookShelfId = self:getCurrentBookShelfId()
         self.dbManager:transaction(function()
-            self.dbManager:dynamicUpdateChapters(chapter, update_state)        
+            self.dbManager:dynamicUpdateChapters(chapter, update_state)
             return self.dbManager:dynamicUpdate('books', {
                 sortOrder = {
                     _set = "= CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER)"
@@ -2319,10 +2065,10 @@ function M:saveWebConfig(conf_name, web_config)
         if not self.settings_data.data.web_configs then
             self.settings_data.data.web_configs = {}
         end
-        
+
         local cf = self.settings_data.data.web_configs[conf_name]
         if H.is_tbl(cf) then
-            if web_config.url == cf.url and server_type == cf.type and user == cf.user and 
+            if web_config.url == cf.url and server_type == cf.type and user == cf.user and
                 pwd == cf.pwd and desc == cf.desc then
                 return wrap_response(nil, "配置没有改变")
             end
@@ -2330,7 +2076,7 @@ function M:saveWebConfig(conf_name, web_config)
 
         web_config.edit_name = nil
         self.settings_data.data.web_configs[conf_name] = web_config
-        
+
         if is_need_switch then
             -- 交由switchWebConfig写入，不然可能导致数据不一致
             return self:switchWebConfig(conf_name, true)
@@ -2365,7 +2111,7 @@ function M:saveSettings(settings)
             return false
         end
         if not (H.is_str(conf.server_address) and conf.server_address ~= "") then
-            return false 
+            return false
         end
         if not H.is_num(conf.server_type) then return false end
         return true

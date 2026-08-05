@@ -52,12 +52,12 @@ function M:saveBook(bookinfo, callback)
           kind = bookinfo.kind or '',
           type = bookinfo.type or 0
       })
-  end, nil, {
+  end, callback, {
       timeouts = {10, 12}
   }, 'saveBook')
 end
 
-function M:deleteBook(bookinfo)
+function M:deleteBook(bookinfo, callback)
   if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl)) then
       return nil, "输入参数错误"
   end
@@ -81,7 +81,7 @@ function M:deleteBook(bookinfo)
           kind = bookinfo.kind or '',
           type = bookinfo.type or 0
       })
-  end, nil, {
+  end, callback, {
       timeouts = {6, 8}
   }, 'deleteBook')
 end
@@ -172,6 +172,8 @@ function M:getProxyCoverUrl(coverUrl)
 end
 
 function M:getProxyImageUrl(bookUrl, img_src)
+    bookUrl = H.is_str(bookUrl) and bookUrl or ""
+    img_src = H.is_str(img_src) and img_src or ""
     local width = Screen:getWidth() or 800
     local server_address = self.settings.server_address
     
