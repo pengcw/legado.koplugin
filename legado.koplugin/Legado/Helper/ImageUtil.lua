@@ -5,7 +5,7 @@ local FS = require("Legado.Helper.FS")
 local Env = require("Legado.Helper.Env")
 local httpReq = require("Legado.Helper.Http")
 
-local ImageUtil = {}
+local M = {}
 
 local function save_processed(data, output_path, ext)
     local RenderImage = require("ui/renderimage")
@@ -36,7 +36,7 @@ local function save_processed(data, output_path, ext)
     return final_success
 end
 
-function ImageUtil.findCustomCoverFileInDir(cover_path_no_ext)
+function M.findCustomCoverFileInDir(cover_path_no_ext)
     if not H.is_str(cover_path_no_ext) then return nil end
     local dir, image_filename = util.splitFilePathName(cover_path_no_ext)
     if not (dir and image_filename) then
@@ -55,16 +55,16 @@ function ImageUtil.findCustomCoverFileInDir(cover_path_no_ext)
     return nil
 end
 
-function ImageUtil.get_default_cover_cache(book_cache_id)
+function M.get_default_cover_cache(book_cache_id)
     if not (H.is_str(book_cache_id) and book_cache_id ~= "") then
         return nil
     end
     local cover_path_no_ext = Env.getCoverCacheFilePath(book_cache_id)
-    return ImageUtil.findCustomCoverFileInDir(cover_path_no_ext)
+    return M.findCustomCoverFileInDir(cover_path_no_ext)
 end
 
 -- Function called frequently; keep logs minimal
-function ImageUtil.download_cover(book_cache_id, img_src, is_force)
+function M.download_cover(book_cache_id, img_src, is_force)
     if not (H.is_str(book_cache_id) and book_cache_id ~= ""
             and H.is_str(img_src) and img_src ~= "") then
         logger.err("download_cover: invalid parameter", book_cache_id, img_src)
@@ -72,7 +72,7 @@ function ImageUtil.download_cover(book_cache_id, img_src, is_force)
     end
 
     if not is_force then
-        local cover_full_path = ImageUtil.get_default_cover_cache(book_cache_id)
+        local cover_full_path = M.get_default_cover_cache(book_cache_id)
         if H.is_str(cover_full_path) then
             local dir, image_filename = util.splitFilePathName(cover_full_path)
             return cover_full_path, image_filename
@@ -139,12 +139,12 @@ function ImageUtil.download_cover(book_cache_id, img_src, is_force)
         return nil, nil
     end
 end
-function ImageUtil.convertToGrayscale(image_data)
+function M.convertToGrayscale(image_data)
     local Png = require("Legado/Png")
     return Png.processImage(Png.toGrayscale, image_data, 1)
 end
 
-function ImageUtil.extract_urls_from_html(content, proxy_resolver_func)
+function M.extract_urls_from_html(content, proxy_resolver_func)
     if type(content) ~= "string" then
         return {}
     end
@@ -164,7 +164,7 @@ function ImageUtil.extract_urls_from_html(content, proxy_resolver_func)
     return img_sources
 end
 
-function ImageUtil.get_url_extension(url)
+function M.get_url_extension(url)
     local socket_url = require("socket.url")
     if type(url) ~= "string" or url == "" then
         return ""
@@ -181,7 +181,7 @@ function ImageUtil.get_url_extension(url)
     return ext and ext:lower() or "", filename
 end
 
-function ImageUtil.create_cbz_from_urls(filePath, img_sources, check_running_callback)
+function M.create_cbz_from_urls(filePath, img_sources, check_running_callback)
     if not filePath or not H.is_tbl(img_sources) then
         error("Cbz param error:")
     end
@@ -237,14 +237,14 @@ function ImageUtil.create_cbz_from_urls(filePath, img_sources, check_running_cal
             local imgdata = resp['data']
             local img_extension = resp['ext']
             if not img_extension or img_extension == "" then
-                img_extension = ImageUtil.get_url_extension(img_src)
+                img_extension = M.get_url_extension(img_src)
             end
             if not img_extension or img_extension == "" then
                 img_extension = "png"
             end
             local img_name = string.format("%d.%s", i, img_extension)
             if is_convertToGrayscale == true and img_extension == 'png' then
-                local success, imgdata_new = ImageUtil.convertToGrayscale(imgdata)
+                local success, imgdata_new = M.convertToGrayscale(imgdata)
                 if success == true then
                     imgdata = imgdata_new.data
                 else
@@ -280,4 +280,4 @@ function ImageUtil.create_cbz_from_urls(filePath, img_sources, check_running_cal
     return filePath
 end
 
-return ImageUtil
+return M

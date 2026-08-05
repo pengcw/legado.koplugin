@@ -4,13 +4,41 @@ local FS = require("Legado.Helper.FS")
 
 local M = {}
 
-M.getUserSettingsPath = function()
-    return FS.joinPath(DataStorage:getSettingsDir(), PlgState.plg_name .. '.lua')
+local LEGADO_CACHE_PATH = "/cache/legado.cache/"
+local LEGADO_BOOK_DIR = "Legado\u{200B}书目"
+local REGEX_LEGADO_BOOK_DIR = string.format("/%s/", LEGADO_BOOK_DIR)
+local LEGADO_EXT = "\u{200B}.html"
+
+local function get_file_path(file_path, instance)
+    if instance and instance.document and instance.document.file then
+        return instance.document.file
+    end
+    return file_path
 end
 
-M.getUserPatchesDirectory = function()
-    local patches_dir = FS.joinPath(DataStorage:getDataDir(), 'patches')
-    return FS.checkAndCreateFolder(patches_dir)
+M.is_legado_path = function(file_path, instance)
+    local path = get_file_path(file_path, instance)
+    return type(path) == 'string' and path:lower():find(LEGADO_CACHE_PATH, 1, true) ~= nil
+end
+
+M.is_legado_browser_book = function(file_path, instance)
+    local path = get_file_path(file_path, instance)
+    return type(path) == "string"
+            and path:find(REGEX_LEGADO_BOOK_DIR, 1, true) ~= nil
+            and path:find(LEGADO_EXT, 1, true) ~= nil
+end
+
+M.is_legado_cache_file = function(file_path, instance)
+    local path = get_file_path(file_path, instance)
+    if not M.is_legado_path(path) then return false end
+    local extension = path:match("%.([^%.]+)$")
+    if not extension then return false end
+    local valid_extensions = {htm=true, html=true, xhtml=true, txt=true}
+    return valid_extensions[extension:lower()]
+end
+
+M.getUserSettingsPath = function()
+    return FS.joinPath(DataStorage:getSettingsDir(), PlgState.plg_name .. '.lua')
 end
 
 M.getKoreaderDirectory = function()
@@ -56,6 +84,19 @@ end
 M.getHomeDir = function()
     return G_reader_settings and G_reader_settings:readSetting("home_dir") or
                require("apps/filemanager/filemanagerutil").getDefaultDir()
+end
+
+M.getLinksDir = function()
+    return FS.joinPath(M.getHomeDir(), LEGADO_BOOK_DIR), LEGADO_BOOK_DIR
+end
+
+function M.getLinkName(name, author)
+    if type(name) ~= "string" or name == "" then return nil end
+    local valid_author = (type(author) == "string" and author ~= "") and author or "未知作者"
+    local book_lnk_name = string.format("%s-%s", name, valid_author)
+    book_lnk_name = FS.getSafeFilename(book_lnk_name)
+    if not book_lnk_name or book_lnk_name == "" then return nil end
+    return book_lnk_name .. LEGADO_EXT
 end
 
 return M

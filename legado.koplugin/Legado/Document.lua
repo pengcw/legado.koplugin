@@ -3,6 +3,7 @@ local DocSettings = require("docsettings")
 local logger = require("logger")
 local util = require("util")
 local H = require("Legado/Helper")
+local Env = require("Legado.Helper.Env")
 local Backend = require("Legado/Backend")
 
 local Document= CreDocument:extend{
@@ -12,45 +13,13 @@ local Document= CreDocument:extend{
     _is_cache_book = nil,
 }
 
-local LEGADO_CACHE_PATH = "/cache/legado.cache/"
-local LEGADO_BOOK_DIR = "/Legado\u{200B}书目/"
-local LEGADO_EXT = "\u{200B}.html"
-
 function Document:init()
     CreDocument.init(self)
-    if self:is_legado_cache_file() then
+    if Env.is_legado_cache_file(self.file) then
         self._is_cache_book = true
-    elseif self:is_legado_browser_book() then
+    elseif Env.is_legado_browser_book(self.file) then
         self._is_browser_book = true
     end
-    
-    if self._is_cache_book or self._is_browser_book then
-        -- Run backup check when a Legado book is actually opened
-        Backend:backupDbWithPreCheck()
-    end
-end
-
-function Document:is_legado_browser_book(file_path)
-    file_path = file_path or self.file
-    return type(file_path) == "string"
-                and file_path:find(LEGADO_BOOK_DIR, 1, true) ~= nil
-                and file_path:find(LEGADO_EXT, 1, true) ~= nil
-end
-
-function Document:is_legado_path(file_path)
-    file_path = file_path or self.file
-    return type(file_path) == 'string' and file_path:lower():find(LEGADO_CACHE_PATH, 1, true) ~= nil
-end
-
-function Document:is_legado_cache_file(file_path)
-    file_path = file_path or self.file
-    if not H.is_str(file_path) then return false end
-
-    local extension = file_path:match("%.([^%.]+)$")
-    if not extension then return false end
-
-    local valid_extensions = {htm=true, html=true, xhtml=true, txt=true}
-    return self:is_legado_path(file_path) and valid_extensions[extension:lower()]
 end
 
 function Document:get_book_metadata_from_lnk(fullpath)
