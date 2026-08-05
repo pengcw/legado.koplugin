@@ -84,7 +84,8 @@ return function()
     end
     
     -- > 1.1.4
-    local patches_file_path = FS.joinPath(Env.getUserPatchesDirectory(), '2-legado_plugin_func.lua')
+    local patches_dir = FS.joinPath(Env.getKoreaderDirectory(), 'patches')
+    local patches_file_path = FS.joinPath(patches_dir, '2-legado_plugin_func.lua')
     local source_patches = FS.joinPath(Env.getPluginDirectory(), 'patches/2-legado_plugin_func.lua')
     local disabled_patches = patches_file_path .. '.disabled'
     for _, file in ipairs({source_patches, patches_file_path, disabled_patches}) do
@@ -93,11 +94,11 @@ return function()
         end
     end
     local plugin_dir = Env.getPluginDirectory()
-    local old_patches_dir = FS.joinPath(plugin_dir, 'patches')
-    if util.directoryExists(old_patches_dir) then
+    local plg_patches_dir = FS.joinPath(plugin_dir, 'patches')
+    if util.directoryExists(plg_patches_dir) then
         local ffiUtil = require("ffi/util")
-        ffiUtil.purgeDir(old_patches_dir)
-        util.removePath(old_patches_dir)
+        ffiUtil.purgeDir(plg_patches_dir)
+        util.removePath(plg_patches_dir)
     end
 
     -- > 1.1.5: Clean up obsolete task.pid.lua & legacy task_pid DB table

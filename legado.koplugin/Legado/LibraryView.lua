@@ -422,9 +422,7 @@ end
 function LibraryView:getBrowserHomeDir(skip_check)
     local home_dir = Env.getHomeDir()
     if not H.is_str(home_dir) then return nil end
-    
-    local browser_dir_name = "Legado\u{200B}书目"
-    local expected_path = FS.joinPath(home_dir, browser_dir_name)
+    local expected_path, browser_dir_name = Env.getLinksDir()
     
     if not H.is_str(PlgState.book_links_homedir) or PlgState.book_links_homedir ~= expected_path then
         local clean_home_dir = home_dir:gsub("/+$", "")

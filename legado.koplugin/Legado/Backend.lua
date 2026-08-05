@@ -2155,25 +2155,21 @@ end
 function M:backupDbWithPreCheck()
     local temp_dir = Env.getTempDirectory()
     local last_backup_db = FS.joinPath(temp_dir, "bookinfo.db.bak")
-    local bookinfo_db_path = FS.joinPath(temp_dir, "bookinfo.db")
+    local setting_data = self:getSettings() or {}
+    local last_backup_time = tonumber(setting_data.last_backup_time) or 0
+    local has_backup = util.fileExists(last_backup_db)
+    local needs_backup = not has_backup or (os.time() - last_backup_time > 86400)
+    if not needs_backup then
+        return true
+    end
 
+    local bookinfo_db_path = FS.joinPath(temp_dir, "bookinfo.db")
     if not util.fileExists(bookinfo_db_path) then
         logger.warn("legado plugin: source database file does not exist - " .. bookinfo_db_path)
         return false
     end
 
-    local setting_data = self:getSettings()
-    local last_backup_time = setting_data.last_backup_time or 0
-    local has_backup = util.fileExists(last_backup_db)
-    local needs_backup = not has_backup or (os.time() - last_backup_time > 86400)
-
-    if not needs_backup then
-        return true
-    end
-
-    local status, err = pcall(function()
-        self:getBookShelfCache()
-    end)
+    local status, err = pcall(self.getBookShelfCache, self)
     if not status then
         logger.err("legado plugin: database pre-check failed - " .. tostring(err))
         return false
@@ -2186,6 +2182,7 @@ function M:backupDbWithPreCheck()
     logger.info("legado plugin: backup successful")
     setting_data.last_backup_time = os.time()
     self:saveSettings(setting_data)
+    return true
 end
 
 function M:enforceRateLimit(last_time, limit_ms)

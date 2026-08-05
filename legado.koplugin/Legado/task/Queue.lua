@@ -121,7 +121,7 @@ function Channel:_processNext()
         local gen_ok, gen_args = safe_call("args_generator", task.args_generator, task.current_retry)
         actual_args = (gen_ok and gen_args ~= nil) and gen_args or nil
         if not actual_args then
-            logger.err("Channel: Args generation failed, aborting task", self.name)
+            logger.dbg("Channel: Args generation failed, aborting task", self.name)
             safe_call("callback", task.callback, false, "Arguments generation failed", task.current_retry)
             UIManager:nextTick(function() self:_processNext() end)
             return
@@ -181,9 +181,9 @@ function Channel:_processNext()
                      task.status = "pending"
                      task.pid = nil
                     table.insert(self.queue, 1, task)
-                    logger.warn(string.format("Channel '%s': Task failed, retrying... (%d/%d)", self.name, task.current_retry, task.max_retries))
+                    logger.dbg(string.format("Channel '%s': Task failed, retrying... (%d/%d)", self.name, task.current_retry, task.max_retries))
                 else
-                    logger.err("Channel: Task failure or returned nil:", self.name)
+                    logger.dbg("Channel: Task failure or returned nil:", self.name)
                     safe_call("callback", task.callback, false, final_error, task.current_retry)
                 end
             end
@@ -232,7 +232,7 @@ function Channel:clearTasks()
     
     self.did_abort_current_drain = true
     if had_tasks and self.on_finish then
-        logger.warn("Channel: Forcefully aborted:", self.name)
+        logger.dbg("Channel: Forcefully aborted:", self.name)
         safe_call("on_finish (abort)", self.on_finish, true)
     end
     logger.dbg("Channel: Tasks cleared. New session for:", self.name)
@@ -281,7 +281,7 @@ function Channel:executeBatch(params)
     self.session_abort_hooks[batch_id] = function()
         if not is_aborted then
             is_aborted = true
-            logger.warn(string.format("Channel '%s': Batch externally aborted!", self.name))
+            logger.dbg(string.format("Channel '%s': Batch externally aborted!", self.name))
             if on_batch_end then safe_call("end", on_batch_end, true, results_map) end
         end
     end
@@ -372,7 +372,7 @@ function Channel:executeTree(params)
     self.session_abort_hooks[tree_id] = function()
         if not is_aborted then
             is_aborted = true
-            logger.warn(string.format("Channel '%s': Tree externally aborted!", self.name))
+            logger.dbg(string.format("Channel '%s': Tree externally aborted!", self.name))
             if params.on_tree_end then safe_call("end", params.on_tree_end, false, tree_results) end
         end
     end
@@ -553,9 +553,9 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
             else
                 need_pack = true 
                 if not job_ok then
-                    logger.warn("spawnProcess - execute_func crashed:", r1)
+                    logger.dbg("spawnProcess - execute_func crashed:", r1)
                 else
-                    logger.warn("spawnProcess - returned value from task_func is not a string")
+                    logger.dbg("spawnProcess - returned value from task_func is not a string")
                     r1 = "returned value from task_func is not a string"
                     job_ok = false
                 end
@@ -567,7 +567,7 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
             if enc_ok and str then
                 output_str = str
             else
-                logger.warn("spawnProcess - serialization failed:", str or "unknown error")
+                logger.dbg("spawnProcess - serialization failed:", str or "unknown error")
                 ret_tbl = { ok = false, r1 = "serialization_error", r2 = tostring(str) }
                 output_str = buffer.encode(ret_tbl) or ""
             end
@@ -616,7 +616,7 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
 
         local duration_seconds = socket.gettime() - start_time
         if timeout and duration_seconds >= timeout then
-            logger.warn("spawnProcess - timeout reached, killing subprocess", pid, duration_seconds)
+            logger.dbg("spawnProcess - timeout reached, killing subprocess", pid, duration_seconds)
             ffiUtil.terminateSubProcess(pid)
             safe_collect_and_clean(pid, parent_read_fd, 5, 3, "timed-out subprocess")
             parent_read_fd = nil
@@ -642,11 +642,11 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
                             if dec_ok and type(ret_tbl) == "table" then
                                 ok, r1, r2 = ret_tbl.ok, ret_tbl.r1, ret_tbl.r2
                             else
-                                logger.warn("spawnProcess - malformed serialized data")
+                                logger.dbg("spawnProcess - malformed serialized data")
                                 ok, r1, r2 = false, "decode_error", nil
                             end
                         else
-                            logger.warn("spawnProcess - malformed serialized data")
+                            logger.dbg("spawnProcess - malformed serialized data")
                             ok, r1, r2 = false, "decode_error", nil
                         end
                     else
@@ -654,7 +654,7 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
                         if dec_ok and type(ret_tbl) == "table" then
                             ok, r1, r2 = ret_tbl.ok, ret_tbl.r1, ret_tbl.r2
                         else
-                            logger.warn("spawnProcess - malformed serialized data")
+                            logger.dbg("spawnProcess - malformed serialized data")
                             ok, r1, r2 = false, "decode_error", nil
                         end
                     end

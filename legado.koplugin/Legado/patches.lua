@@ -5,6 +5,7 @@ local ReaderUI = require("apps/reader/readerui")
 local FileManager = require("apps/filemanager/filemanager")
 local filemanagerutil = require("apps/filemanager/filemanagerutil")
 local ReadHistory = require("readhistory")
+local Env = require("Legado.Helper.Env")
 
 -- Do not use util.wrapMethod; may be overridden by other plugins
 -- Minimal hook scope. Avoid restoring — may affect plugins that patch later
@@ -17,32 +18,9 @@ local M = {
     is_enabled = false,
 }
 
-local LEGADO_CACHE_PATH = "/cache/legado.cache/"
-local LEGADO_BOOK_DIR = "/Legado\u{200B}书目/"
-local LEGADO_EXT = "\u{200B}.html"
-
-local function get_file_path(file_path, instance)
-    if instance and instance.document and instance.document.file then
-        return instance.document.file
-    end
-    return file_path
-end
-
-function M.is_legado_path(file_path, instance)
-    local path = get_file_path(file_path, instance)
-    return type(path) == 'string' and path:lower():find(LEGADO_CACHE_PATH, 1, true) ~= nil
-end
-
-function M.is_legado_browser_book(file_path, instance)
-    local path = get_file_path(file_path, instance)
-    return type(path) == "string"
-            and path:find(LEGADO_BOOK_DIR, 1, true) ~= nil
-            and path:find(LEGADO_EXT, 1, true) ~= nil
-end
-
-M.readui_runtime = function(parent_ref)
-    if not parent_ref then return end
-    local ui = parent_ref.name == "ReaderUI" and parent_ref or parent_ref.ui
+M.readui_runtime = function(read_ui)
+    if not read_ui then return end
+    local ui = read_ui.name == "ReaderUI" and read_ui or read_ui.ui
     if not ui or ui.name ~= "ReaderUI" then return end
     if ui._ref_legado_wrapped == true then return end
 
@@ -58,7 +36,7 @@ M.readui_runtime = function(parent_ref)
             -- local beginning_page = self.ui.document:getNextPage(0)
             -- old_pos cannot be equal to 1, otherwise it won't work in scroll mode.
             local new_pos = scroll_mode and self.current_pos or self.current_page
-            if diff < 0 and old_pos == new_pos and M.is_legado_path(nil, self.ui) then
+            if diff < 0 and old_pos == new_pos and Env.is_legado_path(nil, self.ui) then
                 self.ui:handleEvent(Event:new("StartOfBook"))
             end
             return true
@@ -73,33 +51,13 @@ M.readui_runtime = function(parent_ref)
             local old_pos = self:getTopPage()
             orig_paging_onGotoViewRel(self, diff)
             local new_pos = self:getTopPage()
-            if diff < 0 and old_pos == 1 and old_pos == new_pos and M.is_legado_path(nil, self.ui) then
+            if diff < 0 and old_pos == 1 and old_pos == new_pos and Env.is_legado_path(nil, self.ui) then
                 self.ui:handleEvent(Event:new("StartOfBook"))
             end
             return true
         end
     end
 
-    if ui.status then
-        local orig_status_addToMainMenu = ui.status.addToMainMenu
-        ui.status.addToMainMenu = function(self, menu_items)
-            if not M.is_enabled or not M.is_legado_path(nil, self.ui) then
-                return orig_status_addToMainMenu(self, menu_items)
-            end
-        end
-    end
-
-    if ui.toc then
-        local orig_toc_onShowToc = ui.toc.onShowToc
-        ui.toc.onShowToc = function(self)
-            if M.is_enabled and M.is_legado_path(nil, self.ui) then
-                self.ui:handleEvent(Event:new("ShowLegadoToc"))
-                return true
-            else
-                return orig_toc_onShowToc(self)
-            end
-        end
-    end
     -- hook footer (fix koreader .cbz next chapter crash)
     if ui.view and ui.view.footer then
         local orig_footer_getBookProgress = ui.view.footer.getBookProgress
@@ -121,16 +79,7 @@ M.readui_runtime = function(parent_ref)
             end
         end
     end
-
-    if ui.bookinfo and ui.bookinfo.addToMainMenu then
-        local orig_bookinfo_addToMainMenu = ui.bookinfo.addToMainMenu
-        ui.bookinfo.addToMainMenu = function(self, menu_items)
-            if not M.is_enabled or not M.is_legado_path(nil, self.ui) then
-                return orig_bookinfo_addToMainMenu(self, menu_items)
-            end
-        end
-    end
-
+    
     return true
 end
 
@@ -152,28 +101,11 @@ M.install = function(parent_ref)
 
         local orig_FileManager_showOpenWithDialog = FileManager.showOpenWithDialog
         FileManager.showOpenWithDialog = function(self, file)
-            if M.is_enabled and file and M.is_legado_browser_book(file) then
+            if M.is_enabled and file and Env.is_legado_browser_book(file) then
                 self:handleEvent(Event:new("ShowLegadoLibraryView"))
             else
                 return orig_FileManager_showOpenWithDialog(self, file)
             end
-        end
-
-        local orig_FileManager_showFiles = FileManager.showFiles
-        FileManager.showFiles = function(self, path, focused_file, selected_files)
-            if M.is_enabled and M.is_legado_path(path) then
-                local home_dir = G_reader_settings:readSetting("home_dir") or
-                                    require("apps/filemanager/filemanagerutil").getDefaultDir()
-                if home_dir then
-                    local legado_homedir = home_dir .. LEGADO_BOOK_DIR
-                    if util.directoryExists(legado_homedir) then
-                        path = legado_homedir
-                    else
-                        path = home_dir
-                    end
-                end
-            end
-            return orig_FileManager_showFiles(self, path, focused_file, selected_files)
         end
     end
 
@@ -182,7 +114,7 @@ M.install = function(parent_ref)
         -- fix bookself.koplugin
         local orig_ReaderUI_showReader = ReaderUI.showReader
         ReaderUI.showReader = function(self, file, provider, seamless, is_provider_forced, after_open_callback)
-            if M.is_enabled and file and M.is_legado_browser_book(file) then
+            if M.is_enabled and file and Env.is_legado_browser_book(file) then
                 if parent_ref.openFile then parent_ref:openFile(file) end
             else
                 return orig_ReaderUI_showReader(self, file, provider, seamless, is_provider_forced, after_open_callback)
@@ -195,7 +127,7 @@ M.install = function(parent_ref)
 
         local orig_ReadHistory_addItem = ReadHistory.addItem
         ReadHistory.addItem = function(self, file, ts, no_flush)
-            if M.is_enabled and (M.is_legado_path(file) or M.is_legado_browser_book(file)) then
+            if M.is_enabled and (Env.is_legado_path(file) or Env.is_legado_browser_book(file)) then
                 return
             end
             return orig_ReadHistory_addItem(self, file, ts, no_flush)
@@ -215,7 +147,7 @@ M.install = function(parent_ref)
         local orig_filemanagerutil_genBookCoverButton = filemanagerutil.genBookCoverButton
         -- Note: genBookCoverButton does not take a `self` argument.
         filemanagerutil.genBookCoverButton = function(file, book_props, caller_callback, button_disabled)
-            if M.is_enabled and file and M.is_legado_browser_book(file) then
+            if M.is_enabled and file and Env.is_legado_browser_book(file) then
                 return {
                     text = "legado 选项",
                     enabled = true,
