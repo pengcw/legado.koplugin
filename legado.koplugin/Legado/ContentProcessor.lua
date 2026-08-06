@@ -511,44 +511,4 @@ function M.processChapter(chapter, content, filePath, context)
     end
 end
 
-return M    content = M.txt2html(book_cache_id, content, chapter_title)
-        end
-        return context.chapter_writeToFile(chapter, filePath, content)
-    end
-end
-
-return M    if context.is_txt then
-            filePath = filePath .. '.txt'
-            local paragraphs = M.splitParagraphsPreserveBlank(content)
-            if #paragraphs == 0 then chapter.content_is_nil = true end
-            
-            content = table.concat(paragraphs, "\n")
-            if not string.find(paragraphs[1] or "", chapter_title, 1, true) then
-                content = table.concat({"\t\t", tostring(chapter_title), "\n\n", content})
-            end
-        else
-            filePath = filePath .. '.html'
-            content = M.txt2html(book_cache_id, content, chapter_title)
-        end
-        return context.chapter_writeToFile(chapter, filePath, content)
-    end
-end
-
-return M    content = M.txt2html(book_cache_id, content, chapter_title)
-        end
-        return context.chapter_writeToFile(chapter, filePath, content)
-    end
-end
-
-return M      end
-        return context.chapter_writeToFile(chapter, filePath, content)
-    end
-end
-
-return M    content = M.txt2html(book_cache_id, content, chapter_title)
-        end
-        return context.chapter_writeToFile(chapter, filePath, content)
-    end
-end
-
 return M
