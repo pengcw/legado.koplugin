@@ -413,6 +413,44 @@ function M.processLink(book_cache_id, resources_src, base_url, is_proxy, context
     end
 end
 
+local DROPCAPS_SKIP = {
+    ["“"]=true, ["”"]=true, ["‘"]=true, ["’"]=true, ["《"]=true, ["》"]=true,
+    ["（"]=true, ["）"]=true, ["「"]=true, ["」"]=true, ["【"]=true, ["】"]=true,
+    ["("]=true, [")"]=true, ['"']=true, ["'"]=true, ["<"]=true, [">"]=true,
+    ["["]=true, ["]"]=true, ["—"]=true, ["…"]=true
+}
+
+local function get_dropcaps_info(line)
+    if not line or line == "" then return nil, nil, nil end
+    local leading_punc = {}
+    local p_count = 0
+    local target_char = nil
+    local rest_line = nil
+
+    local pos = 1
+    local line_len = #line
+
+    while pos <= line_len do
+        local char = line:match(util.UTF8_CHAR_PATTERN, pos)
+        if not char then break end
+
+        if DROPCAPS_SKIP[char] then
+            p_count = p_count + 1
+            leading_punc[p_count] = char
+            pos = pos + #char
+        else
+            target_char = char
+            rest_line = line:sub(pos + #char)
+            break
+        end
+    end
+
+    if target_char then
+        return table.concat(leading_punc), target_char, rest_line
+    end
+    return nil, nil, nil
+end
+
 function M.txt2html(book_cache_id, content, title)
     local dropcaps = false
     local lines = {}
@@ -435,15 +473,15 @@ function M.txt2html(book_cache_id, content, title)
                 end
             end
 
-            local rep_text = line:match(util.UTF8_CHAR_PATTERN)
+            local punc_prefix, rep_text, remaining_text = get_dropcaps_info(line)
             -- 增加对 rep_text 的有效性检查
             if rep_text and rep_text ~= "" then
-                -- 只有在成功获取到首字符时，才进行替换和格式化
-                line = M.plain_text_replace(line, rep_text, "", 1)
-                el_tags = string.format('<p style="text-indent: 0em;"><span class="duokan-dropcaps-two">%s</span>%s</p>', rep_text, line)
+                punc_prefix = punc_prefix or ""
+                remaining_text = remaining_text or ""
+                el_tags = string.format('<p style="text-indent: 0em;">%s<span class="duokan-dropcaps-two">%s</span>%s</p>', punc_prefix, rep_text, remaining_text)
                 dropcaps = true
             else
-                -- 如果没有有效的首字符（例如，行是空的或只包含不可见字符），则作为普通段落处理
+                -- 如果没有有效的首字符，则作为普通段落处理
                 el_tags = string.format('<p>%s</p>', line)
             end
         else
