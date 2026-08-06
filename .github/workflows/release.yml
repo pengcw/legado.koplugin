@@ -1,0 +1,112 @@
+name: Manual Package & Release Plugin
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract Version with Fallback
+        id: get_version
+        run: |
+          VERSION=$(python3 -c '
+          import re, os, sys
+          meta = "legado.koplugin/_meta.lua"
+          v = None
+          if os.path.exists(meta):
+              try:
+                  content = open(meta, "r", encoding="utf-8", errors="ignore").read()
+                  m = re.search(r"version\s*=\s*[\"]([^\"]+)[\"]", content)
+                  if m:
+                      v = m.group(1).strip()
+              except Exception as e:
+                  print(f"Warning: Failed to parse _meta.lua: {e}", file=sys.stderr)
+          if not v:
+              print("Warning: Version fallback activated (default: 1.0.0)", file=sys.stderr)
+              v = "1.0.0"
+          print(v)
+          ')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Create Plugin Directory Structure
+        run: |
+          mkdir -p build/plugins/legado.koplugin
+          
+          # 复制说明文件与协议文件（带容错处理）
+          [ -f README.md ] && cp README.md build/plugins/legado.koplugin/ || echo "Warning: README.md missing"
+          [ -f LICENSE ] && cp LICENSE build/plugins/legado.koplugin/ || echo "Warning: LICENSE missing"
+          
+          # 复制插件核心代码
+          if [ -d legado.koplugin ]; then
+            cp -r legado.koplugin/* build/plugins/legado.koplugin/
+            rm -rf build/plugins/legado.koplugin/tests
+          else
+            echo "Error: legado.koplugin directory is missing!" >&2
+            exit 1
+          fi
+
+      - name: Package Plugin to Zip
+        run: |
+          if [ ! -d "build/plugins/legado.koplugin" ]; then
+            echo "Error: Build directory structure missing!" >&2
+            exit 1
+          fi
+          
+          cd build
+          zip -r ../legado_plugin_update.zip plugins/
+          cd ..
+          
+          if [ ! -f "legado_plugin_update.zip" ]; then
+            echo "Error: Zip archive creation failed!" >&2
+            exit 1
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: legado_plugin_update
+          path: legado_plugin_update.zip
+
+      - name: Publish or Update GitHub Release (with Retries)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: v${{ steps.get_version.outputs.VERSION }}
+        run: |
+          MAX_RETRIES=3
+          RETRY_DELAY=5
+          SUCCESS=0
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "=== Attempt $i of $MAX_RETRIES: Publishing Release $TAG_NAME ==="
+            if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+              echo "Release $TAG_NAME 已经存在，正在覆盖更新 asset..."
+              if gh release upload "$TAG_NAME" legado_plugin_update.zip --clobber; then
+                SUCCESS=1
+                break
+              fi
+            else
+              echo "正在创建新 Release $TAG_NAME..."
+              if gh release create "$TAG_NAME" legado_plugin_update.zip --title "$TAG_NAME" --generate-notes; then
+                SUCCESS=1
+                break
+              fi
+            fi
+            echo "Attempt $i failed. Waiting ${RETRY_DELAY}s before retry..."
+            sleep $RETRY_DELAY
+          done
+
+          if [ $SUCCESS -ne 1 ]; then
+            echo "Error: Failed to publish or update release after $MAX_RETRIES attempts." >&2
+            exit 1
+          fi
