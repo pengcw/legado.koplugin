@@ -9,7 +9,12 @@ local ImageUtil = require("Legado.Helper.ImageUtil")
 local socket_url = require("socket.url")
 local ffi = require("ffi")
 
-local M = {}
+local M = {
+    config = {
+        enable_dropcaps = true,      -- 控制是否启用首字下沉排版
+        preserve_blank = true,       -- 控制是否保留空行
+    }
+}
 
 local PATTERNS = {
     IMG_TAG            = "<[iI][mM][gG][^>]*>",
@@ -463,7 +468,8 @@ function M.txt2html(book_cache_id, content, title)
         local el_tags
 
         local lower_line = line:lower()
-        if not dropcaps and line ~= "" and not lower_line:find("<img", 1, true) then
+        local allow_dropcaps = M.config and M.config.enable_dropcaps
+        if allow_dropcaps and not dropcaps and line ~= "" and not lower_line:find("<img", 1, true) then
             -- 尝试清理重复标题 >9 避免单字误判
             if #title > 9 and string.find(line, title, 1, true) == 1 then
                 line = M.utf8_trim(M.plain_text_replace(line, title, "", 1))
