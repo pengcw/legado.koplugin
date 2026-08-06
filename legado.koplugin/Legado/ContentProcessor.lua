@@ -469,33 +469,39 @@ function M.txt2html(book_cache_id, content, title)
 
         local lower_line = line:lower()
         local allow_dropcaps = M.config and M.config.enable_dropcaps
+        local is_title_line = false
+
         if allow_dropcaps and not dropcaps and line ~= "" and not lower_line:find("<img", 1, true) then
             -- 尝试清理重复标题 >9 避免单字误判
             if #title > 9 and string.find(line, title, 1, true) == 1 then
                 line = M.utf8_trim(M.plain_text_replace(line, title, "", 1))
                 if line == "" then
                     -- 抛弃仅重复标题行
-                    goto continue
+                    is_title_line = true
                 end
             end
 
-            local punc_prefix, rep_text, remaining_text = get_dropcaps_info(line)
-            -- 增加对 rep_text 的有效性检查
-            if rep_text and rep_text ~= "" then
-                punc_prefix = punc_prefix or ""
-                remaining_text = remaining_text or ""
-                el_tags = string.format('<p style="text-indent: 0em;">%s<span class="duokan-dropcaps-two">%s</span>%s</p>', punc_prefix, rep_text, remaining_text)
-                dropcaps = true
-            else
-                -- 如果没有有效的首字符，则作为普通段落处理
-                el_tags = string.format('<p>%s</p>', line)
+            if not is_title_line then
+                local punc_prefix, rep_text, remaining_text = get_dropcaps_info(line)
+                -- 增加对 rep_text 的有效性检查
+                if rep_text and rep_text ~= "" then
+                    punc_prefix = punc_prefix or ""
+                    remaining_text = remaining_text or ""
+                    el_tags = string.format('<p style="text-indent: 0em;">%s<span class="duokan-dropcaps-two">%s</span>%s</p>', punc_prefix, rep_text, remaining_text)
+                    dropcaps = true
+                else
+                    -- 如果没有有效的首字符，则作为普通段落处理
+                    el_tags = string.format('<p>%s</p>', line)
+                end
             end
         else
             el_tags = (line ~= "") and string.format('<p>%s</p>', line) or "<br>"
         end
-        n = n + 1
-        lines[n] = el_tags
-        ::continue::
+
+        if not is_title_line then
+            n = n + 1
+            lines[n] = el_tags
+        end
     end
 
     local epub = require("Legado/EpubHelper")
