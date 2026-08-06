@@ -23,9 +23,11 @@ local PATTERNS = {
 }
 
 local libutf8proc
-local function utf8_chars(str, reverse)
-    if libutf8proc == nil then
-        -- 兼容旧版
+local libutf8proc_available = false
+
+-- 在模块加载阶段预初始化 utf8proc，避免首次打开书籍延迟/卡顿
+do
+    pcall(function()
         if ffi.loadlib then
             libutf8proc = ffi.loadlib("utf8proc", "3")
         else
@@ -38,13 +40,81 @@ local function utf8_chars(str, reverse)
             end
         end
 
-        ffi.cdef [[
+        if libutf8proc then
+            ffi.cdef [[
 typedef int32_t utf8proc_int32_t;
 typedef uint8_t utf8proc_uint8_t;
 typedef ssize_t utf8proc_ssize_t;
 utf8proc_ssize_t utf8proc_iterate(const utf8proc_uint8_t *, utf8proc_ssize_t, utf8proc_int32_t *);
 ]]
+            libutf8proc_available = true
+        end
+    end)
+end
+
+-- 纯 Lua UTF-8 解码迭代器（无 C 库或加载失败时的后备方案）
+local function native_utf8_chars(str, reverse)
+    local str_len = #str
+    local pos = reverse and (str_len + 1) or 0
+
+    return function()
+        while true do
+            pos = reverse and (pos - 1) or (pos + 1)
+            if (reverse and pos < 1) or (not reverse and pos > str_len) then
+                return nil
+            end
+
+            local byte = str:byte(pos)
+            if not byte then return nil end
+
+            local bytes = 1
+            local codepoint = byte
+
+            if byte < 0x80 then
+                bytes = 1
+                codepoint = byte
+            elseif byte >= 0xC0 and byte <= 0xDF then
+                bytes = 2
+                if pos + 1 <= str_len then
+                    local b2 = str:byte(pos + 1)
+                    if b2 and b2 >= 0x80 and b2 <= 0xBF then
+                        codepoint = (byte - 0xC0) * 64 + (b2 - 0x80)
+                    end
+                end
+            elseif byte >= 0xE0 and byte <= 0xEF then
+                bytes = 3
+                if pos + 2 <= str_len then
+                    local b2, b3 = str:byte(pos + 1), str:byte(pos + 2)
+                    if b2 and b3 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
+                        codepoint = (byte - 0xE0) * 4096 + (b2 - 0x80) * 64 + (b3 - 0x80)
+                    end
+                end
+            elseif byte >= 0xF0 and byte <= 0xF7 then
+                bytes = 4
+                if pos + 3 <= str_len then
+                    local b2, b3, b4 = str:byte(pos + 1), str:byte(pos + 2), str:byte(pos + 3)
+                    if b2 and b3 and b4 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF and b4 >= 0x80 and b4 <= 0xBF then
+                        codepoint = (byte - 0xF0) * 262144 + (b2 - 0x80) * 4096 + (b3 - 0x80) * 64 + (b4 - 0x80)
+                    end
+                end
+            end
+
+            local start_pos = reverse and (pos - bytes + 1) or pos
+            if start_pos >= 1 and start_pos + bytes - 1 <= str_len then
+                local char = str:sub(start_pos, start_pos + bytes - 1)
+                local ret_pos = start_pos
+                pos = reverse and (start_pos - 1) or (start_pos + bytes - 1)
+                return ret_pos, codepoint, char
+            end
+        end
     end
+end
+
+local function utf8_chars(str, reverse)
+    if not libutf8proc_available then
+        return native_utf8_chars(str, reverse)
+    end
+
     local str_len = #str
     local pos = reverse and (str_len + 1) or 0
     local str_p = ffi.cast("const utf8proc_uint8_t*", str)
@@ -58,20 +128,17 @@ utf8proc_ssize_t utf8proc_iterate(const utf8proc_uint8_t *, utf8proc_ssize_t, ut
             end
 
             local remaining = reverse and pos or (str_len - pos + 1)
-            -- 指针偏移调整为 str_p + pos - 1
             local bytes = libutf8proc.utf8proc_iterate(str_p + pos - 1, remaining, codepoint)
 
             if bytes > 0 then
-                -- 计算起始指针，转换为Lua字符串
                 local char = ffi.string(str_p + pos - 1, bytes)
                 local ret_pos = tonumber(pos)
-                -- 修正了反向遍历成功时的指针更新逻辑
-                -- 它应该回退到当前字符之前的位置，以便下一次循环可以正确地处理前一个字节
                 pos = reverse and (pos - bytes + 1) or (pos + bytes - 1)
                 return ret_pos, tonumber(codepoint[0]), char
             elseif bytes < 0 then
-                -- 解码失败时（bytes < 0），不做任何操作
-                -- 循环会自动将指针移动到前一个/后一个字节继续尝试，避免跳字节
+                if reverse then
+                    pos = pos - 1
+                end
             end
         end
     end
