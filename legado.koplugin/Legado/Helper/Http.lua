@@ -84,7 +84,7 @@ local function pGetUrlContent(options, is_create)
 
     local url = options.url
     local timeout = options.timeout or 10
-    local maxtime = options.maxtime or options.timeout + 20
+    local maxtime = options.maxtime or (timeout + 20)
     local file_fp = options.file
     local is_pic = options.is_pic
 
