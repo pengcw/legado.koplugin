@@ -1,12 +1,7 @@
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Dispatcher = require("dispatcher")
-local DocumentRegistry = require("document/documentregistry")
 local UIManager = require("ui/uimanager")
-local Event = require("ui/event")
-local util = require("util")
-local logger = require("logger")
 local _ = require("gettext")
-local H = require("Legado/Helper")
 local Backend = require("Legado/Backend")
 local LibraryView = require("Legado/LibraryView")
 local Patcher = require("Legado.patches")
@@ -14,6 +9,7 @@ local DocumentRegistry = require("document/documentregistry")
 local CreDocument = require("Legado/Document")
 local EventHandlers = require("Legado.EventHandlers")
 local PlgState = require("Legado/PlgState")
+local Env = require("Legado.Helper.Env")
 
 local Legado = WidgetContainer:extend({
     name = "开源阅读插件",
@@ -120,12 +116,12 @@ end
 
 function Legado:isCachePath(file_path, instance)
     if not (file_path and instance) then instance = self.ui end
-    return Patcher.is_legado_path(file_path, instance)
+    return Env.is_legado_path(file_path, instance)
 end
 
 function Legado:isBrowserBook(file_path, instance)
     if not (file_path and instance) then instance = self.ui end
-    return Patcher.is_legado_browser_book(file_path, instance)
+    return Env.is_legado_browser_book(file_path, instance)
 end
 
 return Legado

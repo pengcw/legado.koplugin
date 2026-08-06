@@ -100,8 +100,8 @@ function CbzExporter:package()
     local main_temp_dir
     
     local use_archiver = true
-    local ok, Archiver = pcall(require, "ffi/archiver")
-    if ok and Archiver then
+    local Archiver_ok, Archiver = pcall(require, "ffi/archiver")
+    if Archiver_ok and Archiver then
         cbz_lib = "archiver"
         cbz = Archiver.Writer:new{}
         if not cbz:open(cbz_path_tmp, "epub") then
@@ -567,7 +567,8 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
     end
     local cache_msg = TaskProg.showBar("正在缓存章节...", {
         title = title_text,
-        max = uncached_count
+        max = uncached_count,
+        dismissable = true,
     })
 
     if not retry_count then retry_count = 0 end
@@ -655,25 +656,26 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
                 })
     end
 
+    local cache_progress_callback
     local handleCacheError = function(err_msg)
-        if cache_msg and cache_msg.close then
-            cache_msg:close()
-        end
-        cache_complete = true
-
-        -- 首次出错自动重试一次
+        -- 首次出错：静默重试，不关闭进度条，不弹新窗口
         if retry_count == 0 then
+            retry_count = 1
             UIManager:scheduleIn(1, function()
-                self:startCacheChapters(bookinfo, uncached_chapters, chapter_count, 1, completion_callback, skip_cache_integrity_check)
+                Backend:preLoadingChapters(uncached_chapters, nil, cache_progress_callback, self.temp_disable_multithread)
             end)
             return
         end
 
-        -- 重试后仍失败，显示重试对话框
+        -- 重试后仍失败，关闭进度条并显示重试对话框
+        if cache_msg and cache_msg.close then
+            cache_msg:close()
+        end
+        cache_complete = true
         showRetryDialog(err_msg)
     end
 
-    local cache_progress_callback = function(progress, err_msg)
+    cache_progress_callback = function(progress, err_msg)
         if progress == false or progress == true then
             if progress == true then
                 handleCacheSuccess()
@@ -844,7 +846,7 @@ function M:_processCbzExport(bookinfo, chapters, only_cached)
 
     local cache_msg = TaskProg.showBar("缓存进度", {
         title = "导出进度",
-        max = #chapters
+        max = #chapters,
     })
 
     local exporter = CbzExporter:new({
@@ -868,7 +870,7 @@ function M:_processCbzExport(bookinfo, chapters, only_cached)
             self:showReaderUI(path)
         end)
     else
-        self:showExportErrorDialog(H.is_tbl(result) and tosring(result.error) or tostring(result), function()
+        self:showExportErrorDialog(H.is_tbl(result) and tostring(result.error) or tostring(result), function()
             self:_generateBookFile(bookinfo, only_cached, true)
         end)
     end

@@ -13,6 +13,7 @@ local FS = require("Legado.Helper.FS")
 local TaskProg = require("Legado.task.Progress")
 local Patcher = require("Legado.patches")
 local PlgState = require("Legado/PlgState")
+local Env = require("Legado.Helper.Env")
 
 local Handlers = {}
 
@@ -142,10 +143,10 @@ function Handlers:register(parent_ref)
 
     function parent_ref:openFile(file)
         if not H.is_str(file) then return end
-        local function open_regular_file(file)
+        local function open_regular_file(file_path)
             local ReaderUI = require("apps/reader/readerui")
             UIManager:broadcastEvent(Event:new("SetupShowReader"))
-            ReaderUI:showReader(file, nil, true)
+            ReaderUI:showReader(file_path, nil, true)
         end
         if not parent_ref:isBrowserBook(file) then
             open_regular_file(file)
@@ -457,6 +458,49 @@ function Handlers:register(parent_ref)
             if not (document and menu_items and parent_ref:isCachePath(document.file)) then 
                 return 
             end
+            -- menu override — replaces patching
+            menu_items.book_status = nil  
+            menu_items.book_info = nil
+            menu_items.filemanager.callback = function()
+                if not (self.ui and self.ui.menu and self.ui.document) then return end
+                self.ui.menu:onTapCloseMenu()
+                local file = self.ui.document.file
+                local target_file = file
+                local home_dir = Env.getHomeDir()
+                if home_dir then
+                    local dir, filename = util.splitFilePathName(file)
+                    target_file = FS.joinPath(home_dir, filename)
+                    local links_dir = Env.getLinksDir()
+                    if util.directoryExists(links_dir) then
+                        local bookinfo = nil
+                        if self.ui.doc_settings and self.ui.doc_settings.doc_props then
+                            bookinfo = self.ui.doc_settings.doc_props
+                        end
+                        if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.title)) then
+                            local shared_data = Backend:sharedChapterMetadata(dir)
+                            if H.is_tbl(shared_data) and H.is_tbl(shared_data.data) and H.is_tbl(shared_data.data.bookinfo) then
+                                bookinfo = shared_data.data.bookinfo
+                            end
+                        end
+                        if H.is_tbl(bookinfo) and H.is_str(bookinfo.title) then
+                            local book_name = bookinfo.title
+                            local book_lnk_name = Env.getLinkName(book_name, bookinfo.authors)
+                            if H.is_str(book_lnk_name) then
+                                target_file = FS.joinPath(links_dir, book_lnk_name)
+                            end
+                        end
+                    end
+                end
+                self.ui:onClose()
+                self.ui:showFileManager(target_file)
+            end
+            menu_items.table_of_contents.callback = function()
+                if self.ui and self.ui.handleEvent then
+                    self.ui:handleEvent(Event:new("ShowLegadoToc"))
+                    -- self.ui.toc:onShowToc()
+                end
+            end  
+
             local settings = Backend:getSettings()
 
             menu_items.Legado_reader_ui_menu = {
@@ -681,9 +725,9 @@ function Handlers:register(parent_ref)
                     if chapter_direction == "next" then return end
                 end
 
-                local calculate_goto_page = function(chapter_direction, page_count)
-                    if chapter_direction == "next" then return 1
-                    elseif page_count and chapter_direction == "prev" then return page_count end
+                local calculate_goto_page = function(chapterDirection, page_count)
+                    if chapterDirection == "next" then return 1
+                    elseif page_count and chapterDirection == "prev" then return page_count end
                 end
 
                 local make_pages_continuous = function(chapter_event)

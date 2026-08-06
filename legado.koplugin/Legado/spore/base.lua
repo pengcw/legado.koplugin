@@ -12,7 +12,7 @@ local load_script = require("Legado.Helper.Loader").load_script
 local errHandler = require("Legado.Helper.Error")
 
 local M = {
-    name = "legado_app",
+    name = "base",
     client = nil,
     settings = nil,
     _need_login = false,
@@ -67,7 +67,7 @@ function M:new(o)
 end
 
 function M:init()
-    local spec_name = (self.name == "legado_app" or self.name == "base") and "base_spec" or (self.name .. "_spec")
+    local spec_name = tostring(self.name) .. "_spec"
     local _spec, err_msg = load_script("Legado.spore." .. spec_name)
     if not _spec then
         logger.err("LegadoSpec loading failed", err_msg)
@@ -75,9 +75,9 @@ function M:init()
     end
     local is_debug = false
     if is_debug then
-        Spore.debug = {  
-            write = function(self, ...)  
-                logger.info(table.concat({...}))  
+        Spore.debug = {
+            write = function(def, ...)
+                logger.info(table.concat({...}))
             end  
         }
     end
@@ -103,7 +103,7 @@ function M:isNeedLogin(response)
 end
 
 function M:reader3Login()
-    return nil, "login 函数未定义"
+    return nil, "reader3Login 函数未重写"
 end
 
 function M:ensureLogin()
@@ -146,7 +146,6 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
     socketutil:reset_timeout()
   
     if not (status and H.is_tbl(res) and H.is_tbl(res.body)) then
-  
         logger.err(logName, "requestFunc err:", tostring(res))
         local err_msg = errHandler.map_message(res)
         return nil, string.format("Web 服务: %s", err_msg)
@@ -162,7 +161,6 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
     end
 
     if res.body.isSuccess == true then
-          -- fix qread isSuccess == true 但是没有 data 或 data 为 字符的情况, 如 saveBookProgress
           if not res.body.data then res.body.data = {} end
           if H.is_func(callback)  then
               return callback(res.body) 
@@ -173,359 +171,84 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
     end
 end
 
+function M:unimplementedMethod(methodName)
+    return nil, (methodName or "该方法") .. " 未在子类中实现"
+end
+
 function M:getBookshelf(callback)
-  return self:handleResponse(function()
-      -- data=bookinfos
-      return self.client:getBookshelf({
-          refresh = 0,
-          v = os.time()
-      })
-  end, callback, {
-    timeouts = {8, 12}
-  }, 'getBookshelf')
+    return self:unimplementedMethod("getBookshelf")
 end
 
 function M:saveBook(bookinfo, callback)
-  if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl) and
-      H.is_str(bookinfo.originName)) then
-      return nil, "输入参数错误"
-  end
-
-  return self:handleResponse(function()
-      -- data=bookinfo
-      return self.client:saveBook({
-          v = os.time(),
-          name = bookinfo.name,
-          author = bookinfo.author,
-          bookUrl = bookinfo.bookUrl,
-          origin = bookinfo.origin,
-          originName = bookinfo.originName,
-          originOrder = bookinfo.originOrder or 0,
-          durChapterIndex = bookinfo.durChapterIndex or 0,
-          durChapterPos = bookinfo.durChapterPos or 0,
-          durChapterTime = bookinfo.durChapterTime or 0,
-          durChapterTitle = bookinfo.durChapterTitle or '',
-          wordCount = bookinfo.wordCount or '',
-          intro = bookinfo.intro or '',
-          totalChapterNum = bookinfo.totalChapterNum or 0,
-          kind = bookinfo.kind or '',
-          type = bookinfo.type or 0
-      })
-  end, nil, {
-      timeouts = {10, 12}
-  }, 'saveBook')
-
+    return self:unimplementedMethod("saveBook")
 end
 
 function M:deleteBook(bookinfo)
-  if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl)) then
-      return nil, "输入参数错误"
-  end
-
-  return self:handleResponse(function()
-      -- {"isSuccess":true,"errorMsg":"","data":"删除书籍成功"}
-      return self.client:deleteBook({
-
-          v = os.time(),
-          name = bookinfo.name,
-          author = bookinfo.author,
-          bookUrl = bookinfo.bookUrl,
-          origin = bookinfo.origin,
-          originName = bookinfo.originName,
-          originOrder = bookinfo.originOrder or 0,
-          durChapterIndex = bookinfo.durChapterIndex or 0,
-          durChapterPos = bookinfo.durChapterPos or 0,
-          durChapterTime = bookinfo.durChapterTime or 0,
-          durChapterTitle = bookinfo.durChapterTitle or '',
-          wordCount = bookinfo.wordCount or '',
-          intro = bookinfo.intro or '',
-          totalChapterNum = bookinfo.totalChapterNum or 0,
-          kind = bookinfo.kind or '',
-          type = bookinfo.type or 0
-      })
-  end, nil, {
-      timeouts = {6, 8}
-  }, 'deleteBook')
+    return self:unimplementedMethod("deleteBook")
 end
 
 function M:getChapterList(bookinfo, callback)
-  if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then 
-    return nil, "参数错误"
-  end
-
-  local bookUrl = bookinfo.bookUrl
-  return self:handleResponse(function()
-        return self.client:getChapterList({
-            url = bookUrl,
-            v = os.time()
-        })
-  end, callback, {
-    timeouts = {10, 18}
-}, 'getChapterList')
+    return self:unimplementedMethod("getChapterList")
 end
 
 function M:getBookContent(chapter, callback)
-  local bookUrl = chapter.bookUrl
-  local chapters_index = chapter.chapters_index
-  local down_chapters_index = chapter.chapters_index
-
-  if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
-      return nil, 'getBookContent参数错误'
-  end
-
-  return self:handleResponse(function()
-      -- data=string
-      return self.client:getBookContent({
-          url = bookUrl,
-          index = down_chapters_index,
-          v = os.time()
-      })
-  end, callback, {
-      timeouts = {18, 25}
-  }, 'getBookContent')
+    return self:unimplementedMethod("getBookContent")
 end
 
 function M:refreshBookContent(chapter, callback)
-  local bookUrl = chapter.bookUrl
-  local chapters_index = chapter.chapters_index
-  local down_chapters_index = chapter.chapters_index
-
-  if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
-      return nil, '刷新章节出错'
-  end
-  
-  return self:handleResponse(function()
-          return self.client:refreshToc({
-              url = bookUrl,
-              v = os.time()
-          })
-      end, callback, {
-          timeouts = {10, 20}
-      }, 'refreshBookContent')
+    return self:unimplementedMethod("refreshBookContent")
 end
 
 function M:saveBookProgress(chapter, callback)
-  if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
-      return nil, '参数错误'
-  end
-  local chapters_index = chapter.chapters_index
-
-  return self:handleResponse(function()
-      local timestamp = os.time()
-      return self.client:saveBookProgress({
-          name = chapter.name,
-          author = chapter.author or '',
-          durChapterPos = 0,
-          durChapterIndex = chapters_index,
-          durChapterTime = timestamp * 1000,
-          durChapterTitle = chapter.title or '',
-          index = chapters_index,
-          url = chapter.bookUrl,
-          v = timestamp,
-      })
-  end, callback, {
-      timeouts = {5, 8}
-  }, 'saveBookProgress')
+    return self:unimplementedMethod("saveBookProgress")
 end
 
 function M:getProxyCoverUrl(coverUrl)
-    if not H.is_str(coverUrl) then return coverUrl end
-    local server_address = self.settings.server_address
-    return table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
+    return coverUrl
 end
-function M:getProxyImageUrl(bookUrl, img_src)
-    local res_img_src = img_src
-    local width = Screen:getWidth() or 800
-    local server_address = self.settings.server_address
-    
-    local res_img_src = table.concat({server_address, '/image?url=', util.urlEncode(bookUrl), '&path=',
-    util.urlEncode(img_src), '&width=', width})
 
-    return res_img_src
+function M:getProxyImageUrl(bookUrl, img_src)
+    return img_src
 end
+
 function M:getProxyEpubUrl(bookUrl, htmlUrl)
     return htmlUrl
 end
 
 function M:getAvailableBookSource(options, callback)
-    if not (H.is_tbl(options) and H.is_str(options.book_url) and 
-        options.name) then
-        return nil, '获取可用书源参数错误'
-    end
-
-    local bookUrl = options.book_url
-    local name = options.name
-    local author = options.author
-
-    local ret, err_msg = self:_searchBookSocket(name, {
-        name = name,
-        author = author
-    })
-    if ret == nil then
-        return ret, err_msg or "未知错误"
-    else
-        return {list = ret}
-    end
+    return self:unimplementedMethod("getAvailableBookSource")
 end
 
 function M:changeBookSource(new_book_source, callback)
-    return self:saveBook(new_book_source, callback)
+    return self:unimplementedMethod("changeBookSource")
 end
 
--- { errorMsg = "", list = err, lastIndex = 1}
 function M:searchBookMulti(options, callback)
-    local search_text = options.search_text
-    local ret, err_msg = self:_searchBookSocket(search_text)
-    if ret == nil then
-        return ret, err_msg or "未知错误"
-    else
-        return {list = ret}
-    end
-end
-
-function M:_searchBookSocket(search_text, filter, timeout)
-  if not (H.is_str(search_text) and search_text ~= '') then
-      return nil, "输入参数错误"
-  end
-
-  timeout = timeout or 60
-
-  local is_exact_search = false
-  if string.sub(search_text, 1, 1) == '=' then
-      search_text = string.sub(search_text, 2)
-      is_exact_search = true
-  end
-
-  local JSON = require("json")
-  local websocket = require('Legado/websocket')
-
-  local key_json = JSON.encode({
-      key = search_text
-  })
-
-  local client = websocket.client.sync({
-      timeout = 3
-  })
-
-  local parsed = socket_url.parse(self.settings.server_address)
-  local ws_scheme
-  if parsed.scheme == 'http' then
-      ws_scheme = 'ws'
-      if not parsed.port then
-          parsed.port = 80
-      end
-  else
-      ws_scheme = 'wss'
-      if not parsed.port then
-          parsed.port = 443
-      end
-  end
-
-  parsed.port = parsed.port + 1
-
-  local ws_server_address = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/searchBook")
-
-  local ok, err = client:connect(ws_server_address)
-  if not ok then
-      logger.err('ws连接出错', err)
-      err = errHandler.map_message(err)
-      return nil, "请求失败：" .. tostring(err)
-  end
-
-    local function filter_even(book)
-        if not H.is_tbl(book) then return false end
-
-        local has_name_filter = H.is_str(filter and filter.name) and filter.name   ~= ""
-        local has_author_filter = H.is_str(filter and filter.author) and filter.author ~= ""
-        local has_origin_filter = H.is_str(filter and filter.origin) and filter.origin ~= ""
-
-        if has_name_filter or has_author_filter or has_origin_filter then
-            local match_name = has_name_filter and H.is_str(book.name) and book.name == filter.name
-            local match_author = has_author_filter and H.is_str(book.author) and book.author == filter.author
-            local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == filter.origin
-
-            if has_name_filter and not match_name then return false end
-            if has_author_filter and not match_author then return false end
-            if has_origin_filter and not match_origin then return false end
-
-            return true
-        end
-
-        -- 否则走精确匹配逻辑
-        if is_exact_search then
-            return (H.is_str(book.name) and book.name == search_text)
-                or (H.is_str(book.author) and book.author == search_text)
-        end
-
-        -- 默认保留
-        return true
-    end
-
-  client:send(key_json)
-  local result
-  ok, result = errHandler.pcall(function()
-      local response = {}
-      local start_time = time.now()
-      local deduplication = {}
-
-      while true do
-          local response_body = client:receive()
-          if not response_body then break end
-
-          if time.since(start_time) > time.s(timeout) then
-              logger.err("ws receive 超时")
-              break
-          end
-
-          local ok_decode, parsed_body = pcall(JSON.decode, response_body)
-          if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
-              for i, v in ipairs(parsed_body) do
-                if H.is_tbl(v) and H.is_str(v.name) and v.name ~= "" and H.is_str(v.bookUrl) and v.bookUrl ~= "" then
-                    local deduplication_key = table.concat({v.name, v.author or "", tostring(v.originOrder or 1)})
-                    if not deduplication[deduplication_key] and filter_even(v) then
-                        table.insert(response, v)
-                        deduplication[deduplication_key] = true
-                    end
-                 end
-              end
-          end
-      end
-      deduplication = nil
-      return response
-  end)
-
-  pcall(function()
-      client:close()
-  end)
-
-  if not ok then
-      logger.err('ws返回数据出错：', result)
-      return nil, 'ws返回数据出错：' .. tostring(result)
-  end
-
-  return result
-end
-
-function M:unsupportedMethod()
-    return nil, "后端暂不支持此功能"
+    return self:unimplementedMethod("searchBookMulti")
 end
 
 function M:searchBookSingle(options, callback)
-    return self:unsupportedMethod()
+    return self:unimplementedMethod("searchBookSingle")
 end
-function M:autoChangeBookSource(bookinfo, callbak)
-    return self:unsupportedMethod()
+
+function M:autoChangeBookSource(bookinfo, callback)
+    return self:unimplementedMethod("autoChangeBookSource")
 end
+
 function M:getChaptersList(bookinfo)
-    return self:unsupportedMethod()
+    return self:unimplementedMethod("getChaptersList")
 end
+
 function M:getBookSourcesList(callback)
-    return self:unsupportedMethod()
+    return self:unimplementedMethod("getBookSourcesList")
 end
+
 function M:exploreBook(options, callback)
-    return self:unsupportedMethod()
+    return self:unimplementedMethod("exploreBook")
 end
+
 function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
-    return self:unsupportedMethod()
+    return self:unimplementedMethod("getBookSourcesExploreUrl")
 end
+
 return M
