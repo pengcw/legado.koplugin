@@ -11,6 +11,17 @@ local ffi = require("ffi")
 
 local M = {}
 
+local PATTERNS = {
+    IMG_TAG            = "<[iI][mM][gG][^>]*>",
+    IMG_SRC            = "(<[iI][mM][gG].-[sS][rR][cC]%s*=%s*)(['\"])(.-)%2([^>]*>)",
+    IMAGE_XLINK        = '(<image.-href%s*=%s*)(["\'])(.-)%2([^>]*>)',
+    LINK_TAG           = '(<link.-href%s*=%s*)(["\'])(.-)%2([^>]*>)',
+    SCRIPT_TAG_1       = "<script[^>]*>(.-\n?)</script>",
+    SCRIPT_TAG_2       = "<script[^>]*>[\x00-\xFF]-</script>",
+    CSS_URL            = "url%s*%((%s*['\"]?)(.-)(['\"]?%s*)%)",
+    FULLWIDTH_SPACE    = "\u{3000}",
+}
+
 local libutf8proc
 local function utf8_chars(str, reverse)
     if libutf8proc == nil then
@@ -66,19 +77,19 @@ utf8proc_ssize_t utf8proc_iterate(const utf8proc_uint8_t *, utf8proc_ssize_t, ut
     end
 end
 
+local UTF8_WHITESPACE_CODEPOINTS = {
+    [0x00A0]=true, [0x1680]=true, [0x2000]=true, [0x2001]=true, [0x2002]=true, [0x2003]=true,
+    [0x2004]=true, [0x2005]=true, [0x2006]=true, [0x2007]=true, [0x2008]=true, [0x2009]=true,
+    [0x200A]=true, [0x200B]=true, [0x202F]=true, [0x205F]=true, [0x3000]=true, [0x0009]=true,
+    [0x000A]=true, [0x000B]=true, [0x000C]=true, [0x000D]=true, [0x0020]=true
+}
+
 function M.utf8_trim(str)
     if type(str) ~= "string" or str == "" then return "" end
 
-    local utf8_whitespace_codepoints = {
-        [0x00A0]=true, [0x1680]=true, [0x2000]=true, [0x2001]=true, [0x2002]=true, [0x2003]=true,
-        [0x2004]=true, [0x2005]=true, [0x2006]=true, [0x2007]=true, [0x2008]=true, [0x2009]=true,
-        [0x200A]=true, [0x200B]=true, [0x202F]=true, [0x205F]=true, [0x3000]=true, [0x0009]=true,
-        [0x000A]=true, [0x000B]=true, [0x000C]=true, [0x000D]=true, [0x0020]=true
-    }
-
     local start
     for pos, cp, _ in utf8_chars(str) do
-        if not utf8_whitespace_codepoints[cp] then
+        if not UTF8_WHITESPACE_CODEPOINTS[cp] then
             start = pos
             break
         end
@@ -87,7 +98,7 @@ function M.utf8_trim(str)
 
     local finish
     for pos, cp, char in utf8_chars(str, true) do
-        if not utf8_whitespace_codepoints[cp] then
+        if not UTF8_WHITESPACE_CODEPOINTS[cp] then
             finish = pos + #char - 1
             break
         end
@@ -112,7 +123,7 @@ end
 ---去除多余换行、统一段落缩进、根据部分排版规则将不合理的换行合并成一个
 ---仅假设源文本格式混入了错误或多余换行和不标准的段落缩进
 function M.splitParagraphsPreserveBlank(text)
-    if not text or text == "" then return {} end
+    if type(text) ~= "string" or text == "" then return {} end
 
     text = text:gsub("\r\n?", "\n"):gsub("\n+", function(s)
         return (#s >= 2) and "\n\n" or s
@@ -122,14 +133,17 @@ function M.splitParagraphsPreserveBlank(text)
     local indentChinese = "\u{0020}\u{0020}\u{3000}"
     local indentEnglish = "\u{0020}\u{0020}"
     local paragraphs = {}
+    local p_count = 0
     local allow_split = true
     local buffer = ""
     local prefix = nil
     local lines = {}
+    local l_count = 0
 
     -- 保留空行，清理前后空白
     for line in util.gsplit(text, "\n", false, true) do
-        table.insert(lines, M.utf8_trim(line))
+        l_count = l_count + 1
+        lines[l_count] = M.utf8_trim(line)
     end
 
     -- 常见标点符号判断
@@ -154,7 +168,8 @@ function M.splitParagraphsPreserveBlank(text)
         end
 
         if line == "" then
-            table.insert(paragraphs, line)
+            p_count = p_count + 1
+            paragraphs[p_count] = line
         else
             if not prefix then
                 prefix = util.hasCJKChar(line:sub(1, 9)) and indentChinese or indentEnglish
@@ -179,34 +194,55 @@ function M.splitParagraphsPreserveBlank(text)
                 end
                 buffer = buffer .. line
             else
-                table.insert(paragraphs, prefix .. line)
+                p_count = p_count + 1
+                paragraphs[p_count] = prefix .. line
             end
         end
     end
     return paragraphs
 end
 
+function M.classify_content(text)
+    if type(text) ~= "string" or text == "" then
+        return false, false
+    end
+
+    local has_img = false
+    local has_other = false
+
+    -- 移除所有 <img> 标签后，检查是否仍有非空白字符
+    local clean_text = text:gsub(PATTERNS.IMG_TAG, "")
+    if clean_text:gsub(PATTERNS.FULLWIDTH_SPACE, ""):find("%S") then
+        has_other = true
+    end
+
+    if text:find(PATTERNS.IMG_TAG) then
+        has_img = true
+    end
+
+    return has_img, has_other
+end
+
 function M.has_img_tag(text)
-    if type(text) ~= "string" then return false end
-    return text:find("<[iI][mM][gG][^>]*>") ~= nil
+    local has_img, _ = M.classify_content(text)
+    return has_img
 end
 
 function M.has_other_content(text)
-    if type(text) ~= "string" then return false end
-    local without_img = text:gsub("<[iI][mM][gG][^>]+>", ""):gsub("\u{3000}", "")
-    return without_img:find("%S") ~= nil
+    local _, has_other = M.classify_content(text)
+    return has_other
 end
 
 function M.getChapterContentType(txt, first_line)
-    if type(txt) ~= "string" then return 1 end
+    if type(txt) ~= "string" or txt == "" then return 1 end
     
     first_line = not first_line and (string.match(txt, "([^\n]*)\n?") or txt):lower() or first_line:lower()
 
     -- 优先检查 XHTML 特征
     if string.match(first_line, "%.x?html$") then return 4 end
 
-    local is_other = M.has_other_content(txt)
-    if string.find(first_line, "<img", 1, true) or M.has_img_tag(txt) then
+    local has_img, is_other = M.classify_content(txt)
+    if string.find(first_line, "<img", 1, true) or has_img then
         return is_other and 3 or 2
     end
     
@@ -215,7 +251,7 @@ end
 
 function M.replace_css_urls(css_text, replace_fn)
     css_text = tostring(css_text or "")
-    return (css_text:gsub("url%s*%((%s*['\"]?)(.-)(['\"]?%s*)%)", function(prefix, old_path, suffix)
+    return (css_text:gsub(PATTERNS.CSS_URL, function(prefix, old_path, suffix)
         if type(old_path) ~= "string" or old_path == "" or old_path:lower():find("^data:") then return end
         local ok, new_path = pcall(replace_fn, old_path)
         if not ok or type(new_path) ~= "string" or new_path == "" then
@@ -313,6 +349,7 @@ end
 function M.txt2html(book_cache_id, content, title)
     local dropcaps = false
     local lines = {}
+    local n = 0
     content = content or ""
     title = title or ""
 
@@ -320,7 +357,8 @@ function M.txt2html(book_cache_id, content, title)
         line = M.utf8_trim(line)
         local el_tags
 
-        if not dropcaps and line ~= "" and not string.find(line, "<img", 1, true) then
+        local lower_line = line:lower()
+        if not dropcaps and line ~= "" and not lower_line:find("<img", 1, true) then
             -- 尝试清理重复标题 >9 避免单字误判
             if #title > 9 and string.find(line, title, 1, true) == 1 then
                 line = M.utf8_trim(M.plain_text_replace(line, title, "", 1))
@@ -344,7 +382,8 @@ function M.txt2html(book_cache_id, content, title)
         else
             el_tags = (line ~= "") and string.format('<p>%s</p>', line) or "<br>"
         end
-        table.insert(lines, el_tags)
+        n = n + 1
+        lines[n] = el_tags
         ::continue::
     end
 
@@ -440,7 +479,7 @@ function M.processChapter(chapter, content, filePath, context)
             for _, el in ipairs(body:select("svg")) do
                 local el_text = el and el:gettext()
                 if el_text then
-                    for open, r2, path, close in el_text:gmatch('(<image.-href%s*=%s*)(["\'])(.-)%2([^>]*>)') do
+                    for open, r2, path, close in el_text:gmatch(PATTERNS.IMAGE_XLINK) do
                         if open and open ~= "" then
                             open = open .. (r2 or "")
                             local relpath = M.processLink(book_cache_id, path, html_url, nil, context)
@@ -453,25 +492,21 @@ function M.processChapter(chapter, content, filePath, context)
                 end
             end
             
-            local img_pattern = "(<[Ii][Mm][Gg].-[Ss][Rr][Cc]%s*=%s*)(['\"])(.-)%2([^>]*>)"
-            local image_xlink_pattern = '(<image.-href%s*=%s*)(["\'])(.-)%2([^>]*>)'
-            local link_pattern = '(<link.-href%s*=%s*)(["\'])(.-)%2([^>]*>)'
-            
-            content = content:gsub("<script[^>]*>(.-\n?)</script>", ""):gsub("<script[^>]*>[\x00-\xFF]-</script>", "")
-            :gsub(link_pattern, function(r1, r2, r3, r4)
+            content = content:gsub(PATTERNS.SCRIPT_TAG_1, ""):gsub(PATTERNS.SCRIPT_TAG_2, "")
+            :gsub(PATTERNS.LINK_TAG, function(r1, r2, r3, r4)
                 local open, path, close = r1, r3, r4
                 if not (open and open ~= "" and path and path ~= "" and not path:find("^resources/")) then return end
                 local relpath = M.processLink(book_cache_id, path, html_url, nil, context)
                 if relpath then return table.concat({open .. (r2 or ""), relpath, (r2 or "") .. (close or "")}) end
             end)
-            :gsub(image_xlink_pattern, function(r1, r2, r3, r4)
+            :gsub(PATTERNS.IMAGE_XLINK, function(r1, r2, r3, r4)
                 local open, path, close = r1, r3, r4
                 if open and open ~= "" and path and not path:find("^resources/") then
                     local relpath = M.processLink(book_cache_id, path, html_url, nil, context)
                     if relpath then return table.concat({open .. (r2 or ""), relpath, (r2 or "") .. (close or "")}) end
                 end
             end)
-            :gsub(img_pattern, function(r1, r2, r3, r4)
+            :gsub(PATTERNS.IMG_SRC, function(r1, r2, r3, r4)
                 if r1 == "" or not r3 or r3:find("^resources/") then return end
                 local relpath = M.processLink(book_cache_id, r3, html_url, nil, context)
                 if relpath then return table.concat({r1, r2, relpath, r2, r4}) end
@@ -482,7 +517,7 @@ function M.processChapter(chapter, content, filePath, context)
     elseif page_type == 3 then -- MIXED
         filePath = filePath .. '.html'
         if M.has_img_tag(content) then
-            content = content:gsub("(<[Ii][Mm][Gg].-[Ss][Rr][Cc]%s*=%s*)(['\"])(.-)%2([^>]*>)", function(r1, r2, r3, r4)
+            content = content:gsub(PATTERNS.IMG_SRC, function(r1, r2, r3, r4)
                 if not (r1 and r1 ~= "" and r3 and r3 ~= "") then return end
                 local relpath = M.processLink(book_cache_id, r3, bookUrl, true, context)
                 if relpath then
