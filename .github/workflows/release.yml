@@ -81,7 +81,11 @@ jobs:
       - name: Publish or Update GitHub Release (with Retries)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: v${{ steps.get_version.outputs.VERSION }}
+          # 仓库 release 历史约定的 tag 名不带 v 前缀（如 1.1.5），
+          # 若用 v1.1.5 会导致 gh release view 找不到已有 release，
+          # 每次运行都新建 release/tag 而非更新原有 release。
+          TAG_NAME: ${{ steps.get_version.outputs.VERSION }}
+          RELEASE_TITLE: v${{ steps.get_version.outputs.VERSION }}
         run: |
           MAX_RETRIES=3
           RETRY_DELAY=5
@@ -97,7 +101,7 @@ jobs:
               fi
             else
               echo "正在创建新 Release $TAG_NAME..."
-              if gh release create "$TAG_NAME" legado_plugin_update.zip --title "$TAG_NAME" --generate-notes; then
+              if gh release create "$TAG_NAME" legado_plugin_update.zip --title "$RELEASE_TITLE" --generate-notes; then
                 SUCCESS=1
                 break
               fi
