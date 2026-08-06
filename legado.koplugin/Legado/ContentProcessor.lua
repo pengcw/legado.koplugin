@@ -7,12 +7,12 @@ local dbg = require("dbg")
 local ffiUtil = require("ffi/util")
 local ImageUtil = require("Legado.Helper.ImageUtil")
 local socket_url = require("socket.url")
-local ffi = require("ffi")
+local utf8proc = require("Legado.Helper.utf8proc")
 
 local M = {
     config = {
-        enable_dropcaps = true,      -- 控制是否启用首字下沉排版
-        preserve_blank = true,       -- 控制是否保留空行
+        enable_dropcaps = true,
+        preserve_blank = true,
     }
 }
 
@@ -26,158 +26,6 @@ local PATTERNS = {
     CSS_URL            = "url%s*%((%s*['\"]?)(.-)(['\"]?%s*)%)",
     FULLWIDTH_SPACE    = "\u{3000}",
 }
-
-local libutf8proc
-local libutf8proc_available = false
-
--- 在模块加载阶段预初始化 utf8proc，避免首次打开书籍延迟/卡顿
-do
-    pcall(function()
-        if ffi.loadlib then
-            libutf8proc = ffi.loadlib("utf8proc", "3")
-        else
-            if ffi.os == "Windows" then
-                libutf8proc = ffi.load("libs/libutf8proc.dll")
-            elseif ffi.os == "OSX" then
-                libutf8proc = ffi.load("libs/libutf8proc.dylib")
-            else
-                libutf8proc = ffi.load("libs/libutf8proc.so.2")
-            end
-        end
-
-        if libutf8proc then
-            ffi.cdef [[
-typedef int32_t utf8proc_int32_t;
-typedef uint8_t utf8proc_uint8_t;
-typedef ssize_t utf8proc_ssize_t;
-utf8proc_ssize_t utf8proc_iterate(const utf8proc_uint8_t *, utf8proc_ssize_t, utf8proc_int32_t *);
-]]
-            libutf8proc_available = true
-        end
-    end)
-end
-
--- 纯 Lua UTF-8 解码迭代器（无 C 库或加载失败时的后备方案）
-local function native_utf8_chars(str, reverse)
-    local str_len = #str
-    local pos = reverse and (str_len + 1) or 0
-
-    return function()
-        while true do
-            pos = reverse and (pos - 1) or (pos + 1)
-            if (reverse and pos < 1) or (not reverse and pos > str_len) then
-                return nil
-            end
-
-            local byte = str:byte(pos)
-            if not byte then return nil end
-
-            local bytes = 1
-            local codepoint = byte
-
-            if byte < 0x80 then
-                bytes = 1
-                codepoint = byte
-            elseif byte >= 0xC0 and byte <= 0xDF then
-                bytes = 2
-                if pos + 1 <= str_len then
-                    local b2 = str:byte(pos + 1)
-                    if b2 and b2 >= 0x80 and b2 <= 0xBF then
-                        codepoint = (byte - 0xC0) * 64 + (b2 - 0x80)
-                    end
-                end
-            elseif byte >= 0xE0 and byte <= 0xEF then
-                bytes = 3
-                if pos + 2 <= str_len then
-                    local b2, b3 = str:byte(pos + 1), str:byte(pos + 2)
-                    if b2 and b3 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
-                        codepoint = (byte - 0xE0) * 4096 + (b2 - 0x80) * 64 + (b3 - 0x80)
-                    end
-                end
-            elseif byte >= 0xF0 and byte <= 0xF7 then
-                bytes = 4
-                if pos + 3 <= str_len then
-                    local b2, b3, b4 = str:byte(pos + 1), str:byte(pos + 2), str:byte(pos + 3)
-                    if b2 and b3 and b4 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF and b4 >= 0x80 and b4 <= 0xBF then
-                        codepoint = (byte - 0xF0) * 262144 + (b2 - 0x80) * 4096 + (b3 - 0x80) * 64 + (b4 - 0x80)
-                    end
-                end
-            end
-
-            local start_pos = reverse and (pos - bytes + 1) or pos
-            if start_pos >= 1 and start_pos + bytes - 1 <= str_len then
-                local char = str:sub(start_pos, start_pos + bytes - 1)
-                local ret_pos = start_pos
-                pos = reverse and (start_pos - 1) or (start_pos + bytes - 1)
-                return ret_pos, codepoint, char
-            end
-        end
-    end
-end
-
-local function utf8_chars(str, reverse)
-    if not libutf8proc_available then
-        return native_utf8_chars(str, reverse)
-    end
-
-    local str_len = #str
-    local pos = reverse and (str_len + 1) or 0
-    local str_p = ffi.cast("const utf8proc_uint8_t*", str)
-    local codepoint = ffi.new("utf8proc_int32_t[1]")
-
-    return function()
-        while true do
-            pos = reverse and (pos - 1) or (pos + 1)
-            if (reverse and pos < 1) or (not reverse and pos > str_len) then
-                return nil
-            end
-
-            local remaining = reverse and pos or (str_len - pos + 1)
-            local bytes = libutf8proc.utf8proc_iterate(str_p + pos - 1, remaining, codepoint)
-
-            if bytes > 0 then
-                local char = ffi.string(str_p + pos - 1, bytes)
-                local ret_pos = tonumber(pos)
-                pos = reverse and (pos - bytes + 1) or (pos + bytes - 1)
-                return ret_pos, tonumber(codepoint[0]), char
-            elseif bytes < 0 then
-                if reverse then
-                    pos = pos - 1
-                end
-            end
-        end
-    end
-end
-
-local UTF8_WHITESPACE_CODEPOINTS = {
-    [0x00A0]=true, [0x1680]=true, [0x2000]=true, [0x2001]=true, [0x2002]=true, [0x2003]=true,
-    [0x2004]=true, [0x2005]=true, [0x2006]=true, [0x2007]=true, [0x2008]=true, [0x2009]=true,
-    [0x200A]=true, [0x200B]=true, [0x202F]=true, [0x205F]=true, [0x3000]=true, [0x0009]=true,
-    [0x000A]=true, [0x000B]=true, [0x000C]=true, [0x000D]=true, [0x0020]=true
-}
-
-function M.utf8_trim(str)
-    if type(str) ~= "string" or str == "" then return "" end
-
-    local start
-    for pos, cp, _ in utf8_chars(str) do
-        if not UTF8_WHITESPACE_CODEPOINTS[cp] then
-            start = pos
-            break
-        end
-    end
-    if not start then return "" end
-
-    local finish
-    for pos, cp, char in utf8_chars(str, true) do
-        if not UTF8_WHITESPACE_CODEPOINTS[cp] then
-            finish = pos + #char - 1
-            break
-        end
-    end
-
-    return (start and finish and start <= finish) and str:sub(start, finish) or ""
-end
 
 function M.plain_text_replace(text, pattern, replacement, count)
     text = tostring(text or "")
@@ -194,7 +42,7 @@ end
 
 ---去除多余换行、统一段落缩进、根据部分排版规则将不合理的换行合并成一个
 ---仅假设源文本格式混入了错误或多余换行和不标准的段落缩进
-function M.splitParagraphsPreserveBlank(text)
+function M.split_paragraphs(text)
     if type(text) ~= "string" or text == "" then return {} end
 
     text = text:gsub("\r\n?", "\n"):gsub("\n+", function(s)
@@ -213,9 +61,9 @@ function M.splitParagraphsPreserveBlank(text)
     local l_count = 0
 
     -- 保留空行，清理前后空白
-    for line in util.gsplit(text, "\n", false, true) do
+    for raw_line in util.gsplit(text, "\n", false, true) do
         l_count = l_count + 1
-        lines[l_count] = M.utf8_trim(line)
+        lines[l_count] = utf8proc.utf8_trim(raw_line)
     end
 
     -- 常见标点符号判断
@@ -247,13 +95,12 @@ function M.splitParagraphsPreserveBlank(text)
                 prefix = util.hasCJKChar(line:sub(1, 9)) and indentChinese or indentEnglish
             end
 
-            local line_len = #line
             local word_end = line:match(util.UTF8_CHAR_PATTERN .. "$")
             local next_word_start = (lines[i + 1] or ""):match(util.UTF8_CHAR_PATTERN)
             local word_end_isPunctuation = isPunctuation(word_end)
 
             -- 中文段末没有标点不允许换行, 避免触发koreader的章节标题渲染规则
-            if prefix == indentChinese and (not word_end_isPunctuation or line_len < 7) then
+            if prefix == indentChinese and (not word_end_isPunctuation or utf8proc.count(line) < 3) then
                 allow_split = false
             else
                 allow_split = util.isSplittable and util.isSplittable(word_end, next_word_start, word_end) or true
@@ -305,7 +152,7 @@ function M.has_other_content(text)
     return has_other
 end
 
-function M.getChapterContentType(txt, first_line)
+function M.get_content_type(txt, first_line)
     if type(txt) ~= "string" or txt == "" then return 1 end
     
     first_line = not first_line and (string.match(txt, "([^\n]*)\n?") or txt):lower() or first_line:lower()
@@ -351,7 +198,7 @@ local function book_chapter_resources(book_cache_id, filename, res_data, overwri
     return relpath, filepath, catalogue
 end
 
-function M.processLink(book_cache_id, resources_src, base_url, is_proxy, context, callback)
+function M.process_link(book_cache_id, resources_src, base_url, is_proxy, context, callback)
     if not (H.is_str(book_cache_id) and H.is_str(resources_src)) then return nil end
 
     local processed_src = util.trim(resources_src)
@@ -406,11 +253,11 @@ function M.processLink(book_cache_id, resources_src, base_url, is_proxy, context
         resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
 
         -- 尝试处理css里面的级联
-        if ext == "css_disable" and not callback then
+        if ext == "css" and not callback then
             err["data"] = M.replace_css_urls(err["data"], function(url)
                 -- 防止循环引用
                 if url == resources_src then return url end
-                return M.processLink(book_cache_id, url, processed_src, nil, context, true)
+                return M.process_link(book_cache_id, url, processed_src, nil, context, true)
             end)
         end
 
@@ -456,15 +303,15 @@ local function get_dropcaps_info(line)
     return nil, nil, nil
 end
 
-function M.txt2html(book_cache_id, content, title)
+function M.text_to_html(book_cache_id, content, title)
     local dropcaps = false
     local lines = {}
     local n = 0
     content = content or ""
     title = title or ""
 
-    for line in util.gsplit(content, "\n", false, true) do
-        line = M.utf8_trim(line)
+    for raw_line in util.gsplit(content, "\n", false, true) do
+        local line = utf8proc.utf8_trim(raw_line)
         local el_tags
 
         local lower_line = line:lower()
@@ -472,9 +319,9 @@ function M.txt2html(book_cache_id, content, title)
         local is_title_line = false
 
         if allow_dropcaps and not dropcaps and line ~= "" and not lower_line:find("<img", 1, true) then
-            -- 尝试清理重复标题 >9 避免单字误判
-            if #title > 9 and string.find(line, title, 1, true) == 1 then
-                line = M.utf8_trim(M.plain_text_replace(line, title, "", 1))
+            -- 尝试清理重复标题 >3 个字，避免单字误判
+            if utf8proc.count(title) > 3 and string.find(line, title, 1, true) == 1 then
+                line = utf8proc.utf8_trim(M.plain_text_replace(line, title, "", 1))
                 if line == "" then
                     -- 抛弃仅重复标题行
                     is_title_line = true
@@ -510,14 +357,14 @@ function M.txt2html(book_cache_id, content, title)
 end
 
 local htmlparser
-function M.processChapter(chapter, content, filePath, context)
+function M.chapter(chapter, content, filePath, context)
     local bookUrl = chapter.bookUrl
     local book_cache_id = chapter.book_cache_id
     local chapter_title = chapter.title or ''
     content = H.is_str(content) and content or tostring(content)
 
     local first_line = string.match(content, "([^\n]*)\n?") or content
-    local page_type = M.getChapterContentType(content, first_line)
+    local page_type = M.get_content_type(content, first_line)
 
     if page_type == 2 then -- IMAGE
         local img_sources = context.getPorxyPicUrls(bookUrl, content)
@@ -574,7 +421,7 @@ function M.processChapter(chapter, content, filePath, context)
             -- 转换 link 与 img
             for _, el in ipairs(root("head > link[href]")) do
                 if el and el.attributes and el.attributes["href"] then
-                    local relpath = M.processLink(book_cache_id, el.attributes["href"], html_url, nil, context)
+                    local relpath = M.process_link(book_cache_id, el.attributes["href"], html_url, nil, context)
                     local el_text = el:gettext()
                     if relpath and el_text then 
                         local replace_text = M.plain_text_replace(el_text, el.attributes["href"], relpath)
@@ -584,7 +431,7 @@ function M.processChapter(chapter, content, filePath, context)
             end
             for _, el in ipairs(body:select("img[src]")) do
                 if el and el.attributes and el.attributes["src"] then
-                    local relpath = M.processLink(book_cache_id, el.attributes["src"], html_url, nil, context)
+                    local relpath = M.process_link(book_cache_id, el.attributes["src"], html_url, nil, context)
                     local el_text = el:gettext()
                     if relpath and el_text then 
                         local replace_text = M.plain_text_replace(el_text, el.attributes["src"], relpath)
@@ -599,7 +446,7 @@ function M.processChapter(chapter, content, filePath, context)
                     for open, r2, path, close in el_text:gmatch(PATTERNS.IMAGE_XLINK) do
                         if open and open ~= "" then
                             open = open .. (r2 or "")
-                            local relpath = M.processLink(book_cache_id, path, html_url, nil, context)
+                            local relpath = M.process_link(book_cache_id, path, html_url, nil, context)
                             if relpath then 
                                 local replace_text = M.plain_text_replace(el_text, open .. path, open .. relpath)
                                 content = M.plain_text_replace(content, el_text, replace_text) 
@@ -613,19 +460,19 @@ function M.processChapter(chapter, content, filePath, context)
             :gsub(PATTERNS.LINK_TAG, function(r1, r2, r3, r4)
                 local open, path, close = r1, r3, r4
                 if not (open and open ~= "" and path and path ~= "" and not path:find("^resources/")) then return end
-                local relpath = M.processLink(book_cache_id, path, html_url, nil, context)
+                local relpath = M.process_link(book_cache_id, path, html_url, nil, context)
                 if relpath then return table.concat({open .. (r2 or ""), relpath, (r2 or "") .. (close or "")}) end
             end)
             :gsub(PATTERNS.IMAGE_XLINK, function(r1, r2, r3, r4)
                 local open, path, close = r1, r3, r4
                 if open and open ~= "" and path and not path:find("^resources/") then
-                    local relpath = M.processLink(book_cache_id, path, html_url, nil, context)
+                    local relpath = M.process_link(book_cache_id, path, html_url, nil, context)
                     if relpath then return table.concat({open .. (r2 or ""), relpath, (r2 or "") .. (close or "")}) end
                 end
             end)
             :gsub(PATTERNS.IMG_SRC, function(r1, r2, r3, r4)
                 if r1 == "" or not r3 or r3:find("^resources/") then return end
-                local relpath = M.processLink(book_cache_id, r3, html_url, nil, context)
+                local relpath = M.process_link(book_cache_id, r3, html_url, nil, context)
                 if relpath then return table.concat({r1, r2, relpath, r2, r4}) end
             end)
         end
@@ -636,19 +483,19 @@ function M.processChapter(chapter, content, filePath, context)
         if M.has_img_tag(content) then
             content = content:gsub(PATTERNS.IMG_SRC, function(r1, r2, r3, r4)
                 if not (r1 and r1 ~= "" and r3 and r3 ~= "") then return end
-                local relpath = M.processLink(book_cache_id, r3, bookUrl, true, context)
+                local relpath = M.process_link(book_cache_id, r3, bookUrl, true, context)
                 if relpath then
                     -- 随文图
                     return string.format('<div class="duokan-image-single">%s</div>', table.concat({r1, r2, relpath, r2, ' class="picture-80" alt="" ', r4}))
                 end
             end)
         end
-        return context.chapter_writeToFile(chapter, filePath, M.txt2html(book_cache_id, content, chapter_title))
+        return context.chapter_writeToFile(chapter, filePath, M.text_to_html(book_cache_id, content, chapter_title))
         
-    else -- TEXT (1)
+    else -- TEXT
         if context.is_txt then
             filePath = filePath .. '.txt'
-            local paragraphs = M.splitParagraphsPreserveBlank(content)
+            local paragraphs = M.split_paragraphs(content)
             if #paragraphs == 0 then chapter.content_is_nil = true end
             
             content = table.concat(paragraphs, "\n")
@@ -657,10 +504,17 @@ function M.processChapter(chapter, content, filePath, context)
             end
         else
             filePath = filePath .. '.html'
-            content = M.txt2html(book_cache_id, content, chapter_title)
+            content = M.text_to_html(book_cache_id, content, chapter_title)
         end
         return context.chapter_writeToFile(chapter, filePath, content)
     end
 end
+
+-- 兼容别名 (Aliases)
+M.processChapter = M.chapter
+M.splitParagraphsPreserveBlank = M.split_paragraphs
+M.getChapterContentType = M.get_content_type
+M.processLink = M.process_link
+M.txt2html = M.text_to_html
 
 return M

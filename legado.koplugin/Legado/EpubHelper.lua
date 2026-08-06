@@ -532,7 +532,7 @@ function EpubExporter:packageEpub()
         cache_file_path = chapter.cache_path
         chapter_content = ""
 
-        -- TODO use txt2html
+        -- TODO use text_to_html
         if cache_ext == "txt" then
             chapter_content = util.readFromFile(cache_file_path, "r") or ""
             -- 将文本段落转换为HTML段落

@@ -43,10 +43,6 @@ local function wrap_response(data, err_message)
     return response
 end
 
-local function get_url_extension(url)
-    return ImageUtil.get_url_extension(url)
-end
-
 local function pGetUrlContent(options)
     if not M.httpReq then 
         M.httpReq = require("Legado.Helper.Http")
@@ -353,7 +349,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
         isTaskRunning = function(chap) return self:isTaskRunning(chap) end,
         is_txt = self.settings_data.data.istxt == true,
     }
-    return ContentProcessor.processChapter(chapter, content, filePath, context)
+    return ContentProcessor.chapter(chapter, content, filePath, context)
 end
 
 function M:_pDownloadChapter(chapter, is_recursive)
