@@ -63,7 +63,7 @@ end
 M.getBookCachePath = function(book_cache_id)
     assert(type(book_cache_id) == "string", "Error: The variable is not a string.")
     local plg_cache_path = M.getTempDirectory()
-    local book_cache_path = FS.joinPath(plg_cache_path, book_cache_id .. '.sdr')
+    local book_cache_path = FS.joinPath(plg_cache_path, book_cache_id)
     FS.checkAndCreateFolder(book_cache_path)
     FS.checkAndCreateFolder(FS.joinPath(book_cache_path, "resources"))
     return book_cache_path

@@ -5,6 +5,7 @@ local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local socket_url = require("socket.url")
 local LuaSettings = require("luasettings")
+local lfs = require("libs/libkoreader-lfs")
 
 return function()
     local settings_data = LuaSettings:open(Env.getUserSettingsPath())
@@ -110,6 +111,40 @@ return function()
         local Backend = require("Legado/Backend")
         if Backend and Backend.dbManager then
             Backend.dbManager:execute("DROP TABLE IF EXISTS task_pid;")
+        end
+    end)
+
+    -- > 1.1.6: Migrate legacy book cache dirs (strip the '.sdr' suffix)
+    pcall(function()
+        local tmp_dir = Env.getTempDirectory()
+        local ok, iter, dir_obj = pcall(lfs.dir, tmp_dir)
+        if not ok then return end
+        local migrated_any = false
+        for entry in iter, dir_obj do
+            -- only top-level dirs; skip hidden dirs (e.g. '.tmp.sdr' used by export)
+            if entry ~= "." and entry ~= ".."
+                    and entry:sub(1, 1) ~= "."
+                    and entry:sub(-4) == ".sdr"
+                    and lfs.attributes(FS.joinPath(tmp_dir, entry), "mode") == "directory" then
+                local old_path = FS.joinPath(tmp_dir, entry)
+                local new_path = FS.joinPath(tmp_dir, entry:sub(1, -5))
+                if util.directoryExists(new_path) then
+                    util.removePath(old_path)
+                else
+                    FS.moveFile(old_path, new_path)
+                end
+                migrated_any = true
+                logger.info(string.format("Migrated book cache dir '%s' -> '%s'", old_path, new_path))
+            end
+        end
+        if migrated_any then
+            -- sync cacheFilePath in bookinfo.db with the new ('.sdr'-free) dir names
+            local Backend = require("Legado/Backend")
+            if Backend and Backend.dbManager then
+                Backend.dbManager:execute(
+                    "UPDATE chapters SET cacheFilePath = REPLACE(cacheFilePath, '.sdr/', '/') WHERE cacheFilePath LIKE '%.sdr/%';")
+                logger.info("Synced legacy cacheFilePath entries in bookinfo.db")
+            end
         end
     end)
 
