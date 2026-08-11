@@ -8,6 +8,7 @@ local ffiUtil = require("ffi/util")
 local ImageUtil = require("Legado.Helper.ImageUtil")
 local socket_url = require("socket.url")
 local utf8proc = require("Legado.Helper.utf8proc")
+local httpReq = require("Legado.Helper.Http")
 
 local M = {
     config = {
@@ -198,7 +199,7 @@ local function book_chapter_resources(book_cache_id, filename, res_data, overwri
     return relpath, filepath, catalogue
 end
 
-function M.process_link(book_cache_id, resources_src, base_url, is_proxy, context, callback)
+function M.process_link(book_cache_id, resources_src, base_url, is_proxy, opts, callback)
     if not (H.is_str(book_cache_id) and H.is_str(resources_src)) then return nil end
 
     local processed_src = util.trim(resources_src)
@@ -216,8 +217,8 @@ function M.process_link(book_cache_id, resources_src, base_url, is_proxy, contex
             return (baseUrl:match("^(https?:)") or "https:") .. src
         elseif src:sub(1, 1) == "/" or src:sub(1, 2) == "./" or src:sub(1, 3) == "../" then
             return socket_url.absolute(baseUrl, src)
-        elseif isProxy == true and context and context.getProxyImageUrl then
-            return context.getProxyImageUrl(baseUrl, src)
+        elseif isProxy == true and opts and opts.getProxyImageUrl then
+            return opts.getProxyImageUrl(baseUrl, src)
         elseif not src:find("^%a+://") then
             -- not a complete URL, converted to an absolute path
             return socket_url.absolute(baseUrl, src)
@@ -245,9 +246,8 @@ function M.process_link(book_cache_id, resources_src, base_url, is_proxy, contex
         return resources_relpath
     end
 
-    if not (context and context.pGetUrlContent) then return nil end
 
-    local status, err = context.pGetUrlContent({ url = processed_src, timeout = 15, maxtime = 60 })
+    local status, err = httpReq({ url = processed_src, timeout = 15, maxtime = 60 }, true)
     if status and H.is_tbl(err) and err["data"] then
         ext = (not ext or ext == "") and err["ext"] or ext
         resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
@@ -257,7 +257,7 @@ function M.process_link(book_cache_id, resources_src, base_url, is_proxy, contex
             err["data"] = M.replace_css_urls(err["data"], function(url)
                 -- 防止循环引用
                 if url == resources_src then return url end
-                return M.process_link(book_cache_id, url, processed_src, nil, context, true)
+                return M.process_link(book_cache_id, url, processed_src, nil, opts, true)
             end)
         end
 
@@ -357,7 +357,7 @@ function M.text_to_html(book_cache_id, content, title)
 end
 
 local htmlparser
-function M.chapter(chapter, content, filePath, context)
+function M.analyzing(chapter, content, filePath, opts)
     local bookUrl = chapter.bookUrl
     local book_cache_id = chapter.book_cache_id
     local chapter_title = chapter.title or ''
@@ -367,35 +367,30 @@ function M.chapter(chapter, content, filePath, context)
     local page_type = M.get_content_type(content, first_line)
 
     if page_type == 2 then -- IMAGE
-        local img_sources = context.getPorxyPicUrls(bookUrl, content)
+        local img_sources = opts.getPorxyPicUrls(bookUrl, content)
         if H.is_tbl(img_sources) and #img_sources > 0 then
             -- 一张图片就不打包cbz了
             if #img_sources == 1 then
                 local res_url = img_sources[1]
-                local status, err = context.pGetUrlContent({ url = res_url, timeout = 15, maxtime = 60, is_pic = true })
+                local status, err = httpReq({ url = res_url, timeout = 15, maxtime = 60, is_pic = true }, true)
                 if not status or not (H.is_tbl(err) and err["data"]) then error('单图下载失败') end
 
                 local ext = ImageUtil.get_url_extension(res_url)
                 if not ext or ext == "" then ext = err.ext or "png" end
-                return context.chapter_writeToFile(chapter, string.format("%s.%s", filePath, ext), err['data'])
+                return { kind = "file", chapter = chapter, filePath = string.format("%s.%s", filePath, ext), data = err['data'] }
             else
                 filePath = filePath .. '.cbz'
-                local check_running = function() return context.isTaskRunning(chapter) end
-                local status, err = pcall(ImageUtil.create_cbz_from_urls, filePath, img_sources, check_running)
-                if not status then error('CreateCBZ err: ' .. tostring(err)) end
-                if chapter.is_pre_loading then dbg.v('Cache task completed chapter.title:', chapter_title) end
-                chapter.cacheFilePath = filePath
-                return chapter
+                return { kind = "cbz", chapter = chapter, filePath = filePath, img_sources = img_sources }
             end
         else
             error('生成图片列表失败')
         end
 
     elseif page_type == 4 then -- XHTML
-        local html_url = context.getProxyEpubUrl(bookUrl, first_line)
+        local html_url = opts.getProxyEpubUrl(bookUrl, first_line)
         if not html_url or html_url == '' then error('转换失败') end
         
-        local status, err = context.pGetUrlContent({ url = html_url, timeout = 15, maxtime = 60 })
+        local status, err = httpReq({ url = html_url, timeout = 15, maxtime = 60 }, true)
         if not status or not (H.is_tbl(err) and err["data"]) then error('XHTML 请求错误/数据为空') end
 
         local ext, original_name = ImageUtil.get_url_extension(first_line)
@@ -421,7 +416,7 @@ function M.chapter(chapter, content, filePath, context)
             -- 转换 link 与 img
             for _, el in ipairs(root("head > link[href]")) do
                 if el and el.attributes and el.attributes["href"] then
-                    local relpath = M.process_link(book_cache_id, el.attributes["href"], html_url, nil, context)
+                    local relpath = M.process_link(book_cache_id, el.attributes["href"], html_url, nil, opts)
                     local el_text = el:gettext()
                     if relpath and el_text then 
                         local replace_text = M.plain_text_replace(el_text, el.attributes["href"], relpath)
@@ -431,7 +426,7 @@ function M.chapter(chapter, content, filePath, context)
             end
             for _, el in ipairs(body:select("img[src]")) do
                 if el and el.attributes and el.attributes["src"] then
-                    local relpath = M.process_link(book_cache_id, el.attributes["src"], html_url, nil, context)
+                    local relpath = M.process_link(book_cache_id, el.attributes["src"], html_url, nil, opts)
                     local el_text = el:gettext()
                     if relpath and el_text then 
                         local replace_text = M.plain_text_replace(el_text, el.attributes["src"], relpath)
@@ -446,7 +441,7 @@ function M.chapter(chapter, content, filePath, context)
                     for open, r2, path, close in el_text:gmatch(PATTERNS.IMAGE_XLINK) do
                         if open and open ~= "" then
                             open = open .. (r2 or "")
-                            local relpath = M.process_link(book_cache_id, path, html_url, nil, context)
+                            local relpath = M.process_link(book_cache_id, path, html_url, nil, opts)
                             if relpath then 
                                 local replace_text = M.plain_text_replace(el_text, open .. path, open .. relpath)
                                 content = M.plain_text_replace(content, el_text, replace_text) 
@@ -460,40 +455,40 @@ function M.chapter(chapter, content, filePath, context)
             :gsub(PATTERNS.LINK_TAG, function(r1, r2, r3, r4)
                 local open, path, close = r1, r3, r4
                 if not (open and open ~= "" and path and path ~= "" and not path:find("^resources/")) then return end
-                local relpath = M.process_link(book_cache_id, path, html_url, nil, context)
+                local relpath = M.process_link(book_cache_id, path, html_url, nil, opts)
                 if relpath then return table.concat({open .. (r2 or ""), relpath, (r2 or "") .. (close or "")}) end
             end)
             :gsub(PATTERNS.IMAGE_XLINK, function(r1, r2, r3, r4)
                 local open, path, close = r1, r3, r4
                 if open and open ~= "" and path and not path:find("^resources/") then
-                    local relpath = M.process_link(book_cache_id, path, html_url, nil, context)
+                    local relpath = M.process_link(book_cache_id, path, html_url, nil, opts)
                     if relpath then return table.concat({open .. (r2 or ""), relpath, (r2 or "") .. (close or "")}) end
                 end
             end)
             :gsub(PATTERNS.IMG_SRC, function(r1, r2, r3, r4)
                 if r1 == "" or not r3 or r3:find("^resources/") then return end
-                local relpath = M.process_link(book_cache_id, r3, html_url, nil, context)
+                local relpath = M.process_link(book_cache_id, r3, html_url, nil, opts)
                 if relpath then return table.concat({r1, r2, relpath, r2, r4}) end
             end)
         end
-        return context.chapter_writeToFile(chapter, filePath, content)
+        return { kind = "file", chapter = chapter, filePath = filePath, data = content }
 
     elseif page_type == 3 then -- MIXED
         filePath = filePath .. '.html'
         if M.has_img_tag(content) then
             content = content:gsub(PATTERNS.IMG_SRC, function(r1, r2, r3, r4)
                 if not (r1 and r1 ~= "" and r3 and r3 ~= "") then return end
-                local relpath = M.process_link(book_cache_id, r3, bookUrl, true, context)
+                local relpath = M.process_link(book_cache_id, r3, bookUrl, true, opts)
                 if relpath then
                     -- 随文图
                     return string.format('<div class="duokan-image-single">%s</div>', table.concat({r1, r2, relpath, r2, ' class="picture-80" alt="" ', r4}))
                 end
             end)
         end
-        return context.chapter_writeToFile(chapter, filePath, M.text_to_html(book_cache_id, content, chapter_title))
+        return { kind = "file", chapter = chapter, filePath = filePath, data = M.text_to_html(book_cache_id, content, chapter_title) }
         
     else -- TEXT
-        if context.is_txt then
+        if opts.is_txt then
             filePath = filePath .. '.txt'
             local paragraphs = M.split_paragraphs(content)
             if #paragraphs == 0 then chapter.content_is_nil = true end
@@ -506,15 +501,8 @@ function M.chapter(chapter, content, filePath, context)
             filePath = filePath .. '.html'
             content = M.text_to_html(book_cache_id, content, chapter_title)
         end
-        return context.chapter_writeToFile(chapter, filePath, content)
+        return { kind = "file", chapter = chapter, filePath = filePath, data = content }
     end
 end
-
--- 兼容别名 (Aliases)
-M.processChapter = M.chapter
-M.splitParagraphsPreserveBlank = M.split_paragraphs
-M.getChapterContentType = M.get_content_type
-M.processLink = M.process_link
-M.txt2html = M.text_to_html
 
 return M

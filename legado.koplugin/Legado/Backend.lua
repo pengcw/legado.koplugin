@@ -29,7 +29,6 @@ local M = {
     settings_data = nil,
     task_pid_file = nil,
     apiClient = nil,
-    httpReq = nil,
 }
 
 local function wrap_response(data, err_message)
@@ -42,13 +41,6 @@ local function wrap_response(data, err_message)
         response.message = H.is_str(err_message) and err_message or "Unknown error"
     end
     return response
-end
-
-local function pGetUrlContent(options)
-    if not M.httpReq then 
-        M.httpReq = require("Legado.Helper.Http")
-    end
-    return M.httpReq(options, true)
 end
 
 function M:HandleResponse(response, on_success, on_error)
@@ -346,24 +338,7 @@ local chapter_writeToFile = function(chapter, filePath, resources)
     end
 end
 
-function M:_AnalyzingChapters(chapter, content, filePath)
-    local book_cache_id = chapter.book_cache_id
-    local chapters_index = chapter.chapters_index
-    filePath = filePath or Env.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
-    local context = {
-        pGetUrlContent = pGetUrlContent,
-        chapter_writeToFile = chapter_writeToFile,
-        getPorxyPicUrls = function(url, txt) return self:getPorxyPicUrls(url, txt) end,
-        getProxyEpubUrl = function(url, line) return self:getProxyEpubUrl(url, line) end,
-        getProxyImageUrl = function(url, src) return self:getProxyImageUrl(url, src) end,
-        isTaskRunning = function(chap) return self:isTaskRunning(chap) end,
-        is_txt = self.settings_data.data.istxt == true,
-    }
-    return ContentParser.chapter(chapter, content, filePath, context)
-end
-
 function M:_pDownloadChapter(chapter, is_recursive)
-
     local bookUrl = chapter.bookUrl
     local book_cache_id = chapter.book_cache_id
     local chapters_index = chapter.chapters_index
@@ -393,7 +368,23 @@ function M:_pDownloadChapter(chapter, is_recursive)
         error((response and response.message) or '章节下载失败')
     end
 
-    return self:_AnalyzingChapters(chapter, response.body)
+    local filePath = Env.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
+    local opts = {
+        getPorxyPicUrls = function(url, txt) return self:getPorxyPicUrls(url, txt) end,
+        getProxyEpubUrl = function(url, line) return self:getProxyEpubUrl(url, line) end,
+        getProxyImageUrl = function(url, src) return self:getProxyImageUrl(url, src) end,
+        is_txt = self.settings_data.data.istxt == true,
+    }
+    local result = ContentParser.analyzing(chapter, response.body, filePath, opts)
+    if result.kind == "cbz" then
+        -- 图片章节, 不写缓存, 由调用方异步打包
+        return result
+    end
+    if result.kind ~= "file" then
+        -- 避免静默写空文件
+        error(string.format("未知章节解析类型: %s", tostring(result.kind)))
+    end
+    return chapter_writeToFile(result.chapter, result.filePath, result.data)
 end
 
 -- write_to_db, run in subprocess, no DB writes allowed
@@ -503,20 +494,6 @@ function M:getPorxyPicUrls(bookUrl, content)
     return ImageUtil.extract_urls_from_html(content, function(src)
         return self:getProxyImageUrl(bookUrl, src)
     end)
-end
-
-function M:pDownload_Image(img_src, timeout)
-    local status, err = pGetUrlContent({
-                    url = img_src,
-                    timeout = timeout or 15,
-                    maxtime = 60,
-                    is_pic = true,
-                })
-    if status and H.is_tbl(err) and err['data'] then
-        return wrap_response(err)
-    else
-        return wrap_response(nil, tostring(err))
-    end
 end
 
 function M:getChapterImgList(chapter)
@@ -686,7 +663,41 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                 function(success, downloaded_chapter)
                     local current_chapter = dlChapter
                     current_chapter.is_pre_loading = nil
-                    
+                    -- 图片章节, 子进程已解析出 URL 列表，打包由主进程异步执行
+                    -- （不传 check_running：打包期间章节锁仍持有，isTaskRunning == true 会误中止）
+                    if success and H.is_tbl(downloaded_chapter) and downloaded_chapter.kind == "cbz" then
+                        local pending = downloaded_chapter
+                        local cbz_writer = require("Legado.task.QueueCbz"):new()
+                        local started, start_err = cbz_writer:from_urls_async({
+                            output = pending.filePath,
+                            images = pending.img_sources,
+                            opts = { comic_info = { name = current_chapter.title or "" } },
+                            on_finish = function(aborted, result)
+                                if not (result and result.success) then
+                                    pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
+                                    logger.err("Failed to package cbz:", tostring(pending.filePath))
+                                    return check_completion(false, string.format("章节[%s]图片打包失败: %s", tostring(current_chapter.title), tostring(result and result.output or pending.filePath)))
+                                end
+                                current_chapter.cacheFilePath = pending.filePath
+                                logger.dbg('Download chapter successfully (cbz):', current_chapter.book_cache_id, current_chapter.chapters_index, pending.filePath)
+
+                                local ok, err = pcall(db_update_success, current_chapter, pending.filePath)
+                                if not ok then logger.err('Error saving download to database:', tostring(err)) end
+
+                                pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
+
+                                completed_count = completed_count + 1
+                                check_completion(completed_count)
+                            end,
+                        })
+                        if not started then
+                            pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
+                            logger.err("Failed to start cbz packaging:", tostring(start_err))
+                            return check_completion(false, string.format("章节[%s]图片打包启动失败: %s", tostring(current_chapter.title), tostring(start_err)))
+                        end
+                        return
+                    end
+
                     if not (success and H.is_tbl(downloaded_chapter) and downloaded_chapter.cacheFilePath) then
                         pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                         logger.err("Failed to download chapter:", tostring(downloaded_chapter))
@@ -960,7 +971,6 @@ function M:ChangeChapterCache(chapter)
             return wrap_response(nil, '下载任务添加失败：' .. tostring(err))
         end
     else
-
         if util.fileExists(cacheFilePath) then
             pcall(function()
                 require("docsettings"):open(cacheFilePath):purge()
@@ -996,62 +1006,45 @@ function M:saveBookProgressAsync(chapter)
 end
 
 function M:runTaskWithRetry(taskFunc, timeoutMs, intervalMs)
-
     if not H.is_func(taskFunc) then
         dbg.log("taskFunc must be a function")
         return
     end
-
     if not H.is_num(timeoutMs) or timeoutMs <= 10 then
         dbg.log("timeoutMs must be > 10")
         return
     end
-
     if not H.is_num(intervalMs) or intervalMs <= 10 then
         dbg.log("intervalMs must be > 0")
         return
     end
-
     local startTime = os.time()
-
     local isTaskCompleted = false
-
     dbg.v("Task started at: %d", startTime)
-
     local function checkTask()
-
         local currentTime = os.time()
         if currentTime - startTime >= timeoutMs / 1000 then
             dbg.log("Task timed out!")
             return
         end
-
         if isTaskCompleted then
             dbg.v("Task completed!")
             return
         end
-
         local status, result = pcall(taskFunc)
         if not status then
-
             dbg.log("Task function error:", result)
             isTaskCompleted = false
         else
-
             isTaskCompleted = result
         end
-
         if isTaskCompleted then
-
             dbg.v("Task completed!")
         else
-
             dbg.v("Retrying in %d ms...", currentTime)
-
             UIManager:scheduleIn(intervalMs / 1000, checkTask)
         end
     end
-
     checkTask()
 end
 
@@ -1093,27 +1086,21 @@ function M:isTaskRunning(target)
 end
 
 function M:after_reader_chapter_show(chapter)
-
     local chapters_index = chapter.chapters_index
     local cache_file_path = chapter.cacheFilePath
     local book_cache_id = chapter.book_cache_id
-
     local status, err = pcall(function()
-
         local update_state = {}
-
         if chapter.isDownLoaded ~= true then
             update_state.content = 'downloaded'
             update_state.cacheFilePath = cache_file_path
         end
-
         if chapter.isRead ~= true then
             update_state.isRead = true
         end
         update_state.lastUpdated = {
             _set = "= strftime('%s', 'now')"
         }
-
         local bookShelfId = self:getCurrentBookShelfId()
         self.dbManager:transaction(function()
             self.dbManager:dynamicUpdateChapters(chapter, update_state)
@@ -1127,19 +1114,15 @@ function M:after_reader_chapter_show(chapter)
             })
         end)()
     end)
-
     if not status then
         dbg.log('updating the read download flag err:', tostring(err))
     end
 
     if cache_file_path ~= nil then
-
         local cache_name = select(2, util.splitFilePathName(cache_file_path)) or ''
         local _, extension = util.splitFileNameSuffix(cache_name)
-
         if extension and chapter.cacheExt ~= extension then
             local p_status, p_err = pcall(function()
-
                 local bookShelfId = self:getCurrentBookShelfId()
                 self.dbManager:transaction(function()
                     return self.dbManager:dynamicUpdateBooks({
@@ -1150,7 +1133,6 @@ function M:after_reader_chapter_show(chapter)
                     })
                 end)()
             end)
-
             if not p_status then
                 dbg.log('updating cache ext err:', tostring(p_err))
             end
@@ -1161,7 +1143,6 @@ function M:after_reader_chapter_show(chapter)
             G_reader_settings:saveSetting("lastfile", cache_file_path)
          end
     end
-
     if NetworkMgr:isConnected() then
         local settings = self:getSettings()
         if settings.sync_reading == true then
@@ -1193,21 +1174,17 @@ function M:after_reader_chapter_show(chapter)
             end
         end
     end
-
     chapter.isRead = true
     chapter.isDownLoaded = true
 end
 
 function M:downloadChapter(chapter)
-
     local bookCacheId = chapter.book_cache_id
     local chapterIndex = chapter.chapters_index
     local chapterName = chapter.name
-
     if self:isTaskRunning(chapter) then
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
-
     local status, err = safe_call(function()
         return self:_pDownloadChapter(chapter)
     end)
@@ -1216,7 +1193,6 @@ function M:downloadChapter(chapter)
         return wrap_response(nil, "下载章节失败：" .. tostring(err))
     end
     return wrap_response(err)
-
 end
 
 function M:getCurrentBookShelfId()
