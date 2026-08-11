@@ -16,7 +16,8 @@ local safe_call = require("Legado.Helper.Error").pcall
 local load_script = require("Legado.Helper.Loader").load_script
 local TaskLock = require("Legado.task.Lock")
 local ImageUtil = require("Legado.Helper.ImageUtil")
-local ContentProcessor = require("Legado.ContentProcessor")
+local ContentParser = require("Legado.ContentParser")
+local ConfigValidator = require("Legado.ConfigValidator")
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -294,6 +295,15 @@ function M:searchBookMultiAsync(...)
     end
     return nil
 end
+
+function M:getReplaceRules(callback)
+    if type(self.apiClient.getReplaceRules) == "function" then
+        return wrap_response(self.apiClient:getReplaceRules(callback))
+    end
+    if callback then callback({type="SUCCESS", body={}}) end
+    return {type="SUCCESS", body={}}
+end
+
 function M:changeBookSource(newBookSource)
     return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
         if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
@@ -349,7 +359,7 @@ function M:_AnalyzingChapters(chapter, content, filePath)
         isTaskRunning = function(chap) return self:isTaskRunning(chap) end,
         is_txt = self.settings_data.data.istxt == true,
     }
-    return ContentProcessor.chapter(chapter, content, filePath, context)
+    return ContentParser.chapter(chapter, content, filePath, context)
 end
 
 function M:_pDownloadChapter(chapter, is_recursive)
@@ -867,7 +877,9 @@ function M:getBookChapterPlusCache(bookCacheId)
 end
 
 function M:closeDbManager()
-    self.dbManager:closeDB()
+    if self.dbManager and type(self.dbManager.closeDB) == "function" then
+        self.dbManager:closeDB()
+    end
 end
 
 function M:cleanBookCache(book_cache_id)
@@ -1216,55 +1228,6 @@ function M:getCurrentBookShelfId()
     return tostring(H.md5(current_conf_name))
 end
 
-local function check_web_conf(url, server_type, user, pwd)
-    if not (H.is_num(server_type) and (server_type == 1  or server_type == 2 or server_type == 3)) then
-        return nil, '服务器类型必须是1、2或3'
-    end
-    if server_type == 3 then
-        if not (H.is_str(user) and user ~= '') then
-            return nil, '轻阅读必须认证凭证'
-        end
-        if not (H.is_str(pwd) or pwd ~= '') then
-            return nil, '轻阅读必须认证凭证'
-        end
-    elseif server_type == 2 then
-        if H.is_str(user) and user ~= "" and (pwd == "" or not H.is_str(pwd)) then
-            return nil, "请清空用户名或补全用户凭证"
-        end
-    end
-
-    if not (H.is_str(url) and url ~= '') then
-        return nil, '地址为空，保存失败'
-    end
-
-    local parsed = socket_url.parse(url)
-    if not parsed then
-        return nil, '地址不合规则，请检查'
-    end
-    if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
-        return nil, '不支持的协议，请检查'
-    end
-    if not parsed.host or parsed.host == "" then
-        return nil, "没有主机名"
-    end
-    if parsed.port then
-        local port_num = tonumber(parsed.port)
-        if not port_num or port_num < 1 or port_num > 65535 then
-            return nil, "端口号不正确"
-        end
-    end
-
-    local clean_url = socket_url.build(parsed)
-    -- 根据服务器类型调整URL
-    if  server_type == 2 and not string.find(string.lower(parsed.path or ""), "/reader3$") then
-        clean_url = socket_url.absolute(clean_url, "/reader3")
-    elseif server_type == 3 and not string.find(string.lower(parsed.path or ""), "/api/5$") then
-        clean_url = socket_url.absolute(clean_url, "/api/5")
-    end
-
-    return { url = clean_url, type = server_type, user = user, pwd = pwd }
-end
-
 function M:switchWebConfig(conf_name, is_active_item_changed)
     if not (H.is_str(conf_name) and conf_name ~= "") then
         return wrap_response(nil, "参数错误")
@@ -1279,7 +1242,7 @@ function M:switchWebConfig(conf_name, is_active_item_changed)
     end
 
     local config = web_configs[conf_name]
-    local ok, err_msg = check_web_conf(config.url, config.type, config.user, config.pwd)
+    local ok, err_msg = ConfigValidator.check(config.url, config.type, config.user, config.pwd)
     if not ok then
         return wrap_response(nil, tostring(err_msg))
     end
@@ -1351,7 +1314,7 @@ function M:saveWebConfig(conf_name, web_config)
     local pwd = web_config.pwd
     local desc = web_config.desc
 
-    local ok, err_msg = check_web_conf(url, server_type, user, pwd)
+    local ok, err_msg = ConfigValidator.check(url, server_type, user, pwd)
     if ok then
         if H.is_tbl(ok) and ok.url then
             web_config.url = ok.url
@@ -1398,20 +1361,7 @@ function M:saveSettings(settings)
         return wrap_response(true)
     end
     
-    local validate_config = function(conf)
-        if not H.is_tbl(conf) then return false end
-        local current_conf_name = conf.current_conf_name
-        if not (H.is_str(current_conf_name) and current_conf_name ~= "")then
-            return false
-        end
-        if not (H.is_str(conf.server_address) and conf.server_address ~= "") then
-            return false
-        end
-        if not H.is_num(conf.server_type) then return false end
-        return true
-    end
-
-    if not validate_config(settings) then
+    if not ConfigValidator.settings(settings) then
         return wrap_response(nil, '参数校检错误，保存失败')
     end
 

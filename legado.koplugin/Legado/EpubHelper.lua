@@ -3,7 +3,6 @@ local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local logger = require("logger")
-local ffiUtil = require("ffi/util")
 
 --[[
     EpubHelper - EPUB 工具集
@@ -63,14 +62,23 @@ local function split_title_advanced(title)
         ["、"] = true,
         ["："] = true,
         ["》"] = true,
-        ["——"] = true
+        ["—"] = true
     }
     local need_clean = {
         ["、"] = true,
         ["："] = true,
         ["》"] = true,
-        ["——"] = true
+        ["—"] = true
     }
+    -- 全空白标题 (仅含空格/分隔符): 无有效序号, 整体作 subpart
+    local all_blank = true
+    for _, w in ipairs(words) do
+        if not segmentation[w] then
+            all_blank = false
+            break
+        end
+    end
+    if all_blank then return "", title end
     local is_need_clean
     for i, v in ipairs(words) do
         if i > 1 and segmentation[v] == true then
@@ -86,9 +94,11 @@ local function split_title_advanced(title)
     if count > 0 and count < words_len then
         local part_end = count
         local subpart_start = count + 1
-        -- 跳过字符
+        -- 跳过连续的 clean 分隔符 (如 —— 的两个破折号)
         if is_need_clean == true then
-            subpart_start = subpart_start + 1
+            while subpart_start <= words_len and need_clean[words[subpart_start]] do
+                subpart_start = subpart_start + 1
+            end
         end
 
         if subpart_start > words_len then

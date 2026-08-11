@@ -172,7 +172,7 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
 end
 
 function M:unimplementedMethod(methodName)
-    return nil, (methodName or "该方法") .. " 未在子类中实现"
+    return nil, (methodName or "该功能") .. " 暂不支持"
 end
 
 function M:getBookshelf(callback)
