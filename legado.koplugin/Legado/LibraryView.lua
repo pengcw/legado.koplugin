@@ -311,6 +311,28 @@ function LibraryView:loadAndRenderChapter(chapter)
         end, function(state, response)
             if state == true then
                 Backend:HandleResponse(response, function(data)
+                    -- 同步下载, 图片章节打包 kind=="cbz"
+                    if H.is_tbl(data) and data.kind == "cbz" then
+                        local pending = data
+                        local cbz_writer = require("Legado.task.QueueCbz"):new()
+                        local started, start_err = cbz_writer:from_urls_async({
+                            output = pending.filePath,
+                            images = pending.img_sources,
+                            opts = { comic_info = { name = pending.chapter.title or "" } },
+                            on_finish = function(aborted, result)
+                                if result and result.success then
+                                    pending.chapter.cacheFilePath = pending.filePath
+                                    self:showReaderUI(pending.chapter)
+                                else
+                                    MessageBox:error('章节打包失败')
+                                end
+                            end,
+                        })
+                        if not started then
+                            MessageBox:error('章节打包启动失败: ' .. tostring(start_err))
+                        end
+                        return
+                    end
                     if not H.is_tbl(data) or not H.is_str(data.cacheFilePath) then
                         MessageBox:error('下载失败')
                         return

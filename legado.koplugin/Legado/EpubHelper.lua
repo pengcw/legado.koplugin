@@ -3,6 +3,7 @@ local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local logger = require("logger")
+local ZipWrite = require("Legado.Helper.ZipUtil").Writer
 
 --[[
     EpubHelper - EPUB 工具集
@@ -460,60 +461,36 @@ function EpubExporter:packageEpub()
     end
 
     local epub_path_tmp = epub_path .. ".tmp"
+    local new_ok, writer = pcall(ZipWrite.new, ZipWrite)
+    if not new_ok or not writer then
+        logger.warn("无法加载任何压缩库")
+        return {
+            success = false,
+            error = "无法创建 EPUB 文件：压缩库不可用"
+        }
+    end
+    if not writer:open(epub_path_tmp) then
+        logger.warn("无法创建 EPUB 文件:", epub_path_tmp)
+        return {
+            success = false,
+            error = "无法创建 EPUB 文件"
+        }
+    end
 
-    local epub_lib
-    local epub
-    local mtime
-    local no_compression
-
-    local ok, Archiver = pcall(require, "ffi/archiver")
-    if ok and Archiver then
-        epub_lib = "archiver"
-        mtime = os.time()
-
-        epub = Archiver.Writer:new{}
-        if not epub:open(epub_path_tmp, "epub") then
-            logger.warn("无法创建 EPUB 文件 (archiver):", epub_path_tmp)
-            return {
-                success = false,
-                error = "无法创建 EPUB 文件"
-            }
-        end
-
-        -- mimetype 必须不压缩存储
-        epub:setZipCompression("store")
-        epub:addFileFromMemory("mimetype", self:createMimetype(), mtime)
-        epub:setZipCompression("deflate")
-    else
-        
-        local ok_zip, ZipWriter = pcall(require, "ffi/zipwriter")
-        if ok_zip and ZipWriter then
-            epub_lib = "zipwriter"
-            no_compression = true
-
-            epub = ZipWriter:new{}
-            if not epub:open(epub_path_tmp) then
-                logger.warn("无法创建 EPUB 文件 (zipwriter):", epub_path_tmp)
-                return {
-                    success = false,
-                    error = "无法创建 EPUB 文件"
-                }
-            end
-            epub:add("mimetype", "application/epub+zip", true)
-        else
-            logger.warn("无法加载任何压缩库")
-            return {
-                success = false,
-                error = "无法创建 EPUB 文件：压缩库不可用"
-            }
-        end
+    local mimetype_ok, mimetype_err = writer:add("mimetype", self:createMimetype(), true)
+    if not mimetype_ok then
+        writer:close()
+        logger.warn("无法写入 mimetype:", mimetype_err)
+        return {
+            success = false,
+            error = "无法创建 EPUB 文件：mimetype 写入失败"
+        }
     end
 
     local function addFile(filename, content, no_compress)
-        if epub_lib == "zipwriter" then
-            epub:add(filename, content, no_compress or no_compression)
-        else
-            epub:addFileFromMemory(filename, content, mtime)
+        local add_ok, add_err = writer:add(filename, content, no_compress)
+        if not add_ok then
+            logger.warn("添加 EPUB 文件失败:", filename, tostring(add_err))
         end
     end
 
@@ -522,12 +499,9 @@ function EpubExporter:packageEpub()
     if H.is_str(self.cover_path) and util.fileExists(self.cover_path) then
         local cover_data = util.readFromFile(self.cover_path, "rb")
         local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
-        -- 图片不需要压缩
         addFile("OEBPS/Images/" .. cover_filename, cover_data, true)
     end
-
     addFile("OEBPS/Text/cover.xhtml", self:createCoverPage())
-
     addFile("OEBPS/Text/nav.xhtml", self:createNavPage())
 
     -- chapters
@@ -608,8 +582,8 @@ function EpubExporter:packageEpub()
         addFile("OEBPS/Text/resources/legado.css", css_content)
     end
 
-    if epub and epub.close then
-        epub:close()
+    if writer and writer.close then
+        writer:close()
     end
 
     local success = os.rename(epub_path_tmp, epub_path)

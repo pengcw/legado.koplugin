@@ -6,6 +6,7 @@ local makeRequest = require("Legado.Helper.Http")
 local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
+local ZipUtil = require("Legado.Helper.ZipUtil")
 local load_script = require("Legado.Helper.Loader").load_script
 local MessageBox = require("Legado/MessageBox")
 local TaskProg = require("Legado.task.Progress")
@@ -256,91 +257,14 @@ end
 
 -- zip plugin/legado.koplugin/
 local function _unZip(archive_path, dest_path, exclude_patterns)
-    local archiver_ok, Archiver = pcall(require, "ffi/archiver")
-    local has_archiver = archiver_ok and type(Archiver) == "table" and type(Archiver.Reader) == "table"
-
-    local patterns = {}
-    if type(exclude_patterns) == "string" then
-        patterns = { exclude_patterns }
-    elseif type(exclude_patterns) == "table" then
-        patterns = exclude_patterns
+    local reader = ZipUtil.Reader:new()
+    if reader and reader:open(archive_path) then
+        local extract_ok, extract_err = reader:extractAll(dest_path, exclude_patterns)
+        reader:close()
+        return extract_ok, extract_err
     end
-
-    if not util.directoryExists(dest_path) then
-        local ok, err = util.makePath(dest_path)
-        if not ok then return false, "无法创建目标目录: " .. tostring(err) end
-    end
-
-    local extract_ok, extract_err = false, nil
-    local extracted = 0
-    if has_archiver then
-        local reader = Archiver.Reader:new()
-        if reader:open(archive_path) then
-            local iterate_ok, err = pcall(function()
-                extract_ok = true
-                for entry in reader:iterate() do
-                    local skip = false
-                    for _, pattern in ipairs(patterns) do
-                        if entry.path:find(pattern, 1, true) then skip = true; break end
-                    end
-                    if not skip then
-                        local target_full_path = dest_path .. "/" .. entry.path
-                        local parent_dir
-                        if entry.mode == "directory" then
-                            parent_dir = target_full_path
-                        else
-                            parent_dir = util.splitFilePathName(target_full_path)
-                        end
-                        if parent_dir and not util.directoryExists(parent_dir) then
-                            util.makePath(parent_dir)
-                        end
-                        if entry.mode ~= "directory" then
-                            if entry.mode ~= "file" then
-                                error("unsupported entry type: " .. tostring(entry.mode))
-                            end
-                            if not reader:extractToPath(entry.path, target_full_path) then
-                                error(reader.err or ("failed to extract " .. entry.path))
-                            end
-                        end
-                    end
-                    extracted = extracted + 1
-                end
-            end)
-            reader:close()
-            if not iterate_ok then
-                extract_ok = false
-                extract_err = err
-            end
-        else
-            extract_err = reader.err or "archive open failed"
-        end
-    end
-
-    if extract_ok and extracted == 0 then
-        extract_ok, extract_err = false, "压缩包为空，没有提取到任何文件"
-    end
-
-    if not has_archiver or (not extract_ok and extract_err) then
-        if logger and logger.info then
-            local reason = not has_archiver and "Archiver missing" or ("Archiver failed: " .. tostring(extract_err))
-            logger.info(string.format("Switching to CLI unzip. Reason: %s", reason))
-        end
-
-        local exclude_args = ""
-        if #patterns > 0 then
-            exclude_args = string.format(" -x '%s'", table.concat(patterns, "' '"))
-        end
-        local cmd = string.format("unzip -qo '%s' -d '%s'%s", archive_path, dest_path, exclude_args)
-
-        local result = os.execute(cmd)
-        if result == 0 or result == true then
-            extract_ok, extract_err = true, nil
-        else
-            extract_ok, extract_err = false, "unzip command failed"
-        end
-    end
-    
-    return extract_ok, extract_err
+    local reason = reader and "archive open failed" or "no zip reader available"
+    return false, "无法解压更新包: " .. tostring(reason)
 end
 
 local function validatePlgTree(root_dir)

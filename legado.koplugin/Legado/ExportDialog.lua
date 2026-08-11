@@ -12,6 +12,7 @@ local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
+local ZipUtil = require("Legado.Helper.ZipUtil")
 
 local CbzExporter = {
     bookinfo = nil,
@@ -30,33 +31,7 @@ function CbzExporter:createMimetype()
     return "application/vnd.comicbook+zip"
 end
 function CbzExporter:createComicInfo(total_pages)
-    local function escape_xml(str)
-                if not str then return "" end
-                return str:gsub("&", "&amp;")
-                        :gsub("<", "&lt;")
-                        :gsub(">", "&gt;")
-                        :gsub("\"", "&quot;")
-                        :gsub("'", "&apos;")
-            end
-        return string.format([[<?xml version="1.0" encoding="utf-8"?>
-<ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
-  <Title>%s</Title>
-  <Series>%s</Series>
-  <Writer>%s</Writer>
-  <Publisher>Legado</Publisher>
-  <Genre>%s</Genre>
-  <PageCount>%d</PageCount>
-  <Summary>%s</Summary>
-  <LanguageISO>zh</LanguageISO>
-  <Manga>Yes</Manga>
-</ComicInfo>]],
-                escape_xml(self.bookinfo.name),
-                escape_xml(self.bookinfo.name),
-                escape_xml(self.bookinfo.author),
-                escape_xml(self.bookinfo.kind or "漫画"),
-                total_pages,
-                escape_xml(self.bookinfo.intro or "")
-            )
+    return ZipUtil.createComicInfo(self.bookinfo, total_pages)
 end
 function CbzExporter:package()
     if not H.is_tbl(self.bookinfo) then
@@ -95,56 +70,31 @@ function CbzExporter:package()
     end
 
     local cbz
-    local cbz_lib
-    local tmp_base
-    local main_temp_dir
-    
-    local use_archiver = true
-    local Archiver_ok, Archiver = pcall(require, "ffi/archiver")
-    if Archiver_ok and Archiver then
-        cbz_lib = "archiver"
-        cbz = Archiver.Writer:new{}
-        if not cbz:open(cbz_path_tmp, "epub") then
-            local err_msg = string.format("无法创建 CBZ 文件: %s", tostring(cbz.err))
-            return {
-                success = false,
-                error = err_msg
-            }
-        end
-            cbz:setZipCompression("store")
-            cbz:addFileFromMemory("mimetype", self:createMimetype(), os.time())
-            cbz:setZipCompression("deflate")
-    else
-        use_archiver = false
+    local new_ok, writer = pcall(ZipUtil.Writer.new, ZipUtil.Writer)
+    if not new_ok or not writer then
+        local err_msg = "无法加载任何压缩库"
+        return {
+            success = false,
+            error = err_msg
+        }
+    end
+    cbz = writer
+    local open_ok, open_err = cbz:open(cbz_path_tmp)
+    if not open_ok then
+        local err_msg = string.format("无法创建 CBZ 文件: %s", tostring(open_err))
+        return {
+            success = false,
+            error = err_msg
+        }
     end
 
-    if not use_archiver then
-        local ok, ZipWriter = pcall(require, "ffi/zipwriter")
-        if ok and ZipWriter then
-            cbz_lib = "zipwriter"
-            cbz = ZipWriter:new{}
-            if not cbz:open(cbz_path_tmp) then
-                local err_msg = string.format("无法创建 CBZ 文件: %s", tostring(cbz.err))
-                return {
-                    success = false,
-                    error = err_msg
-                }
-            end
-
-            tmp_base = FS.joinPath(Env.getTempDirectory(), ".tmp.sdr")
-            FS.checkAndCreateFolder(tmp_base)
-            local run_stamp = tostring(os.time()) .. "_" .. tostring(math.floor(math.random() * 100000))
-            main_temp_dir = FS.joinPath(tmp_base, "cbz_temp_" .. run_stamp)
-            FS.checkAndCreateFolder(main_temp_dir)
-
-            cbz:add("mimetype",  self:createMimetype(), true)
-        else
-            local err_msg = "无法加载任何压缩库"
-            return {
-                success = false,
-                error = err_msg
-            }
-        end
+    local mime_ok, mime_err = cbz:add("mimetype", self:createMimetype(), true)
+    if not mime_ok then
+        cbz:close()
+        return {
+            success = false,
+            error = "无法写入 mimetype: " .. tostring(mime_err)
+        }
     end
 
     -- 合并所有章节的图片到一个 CBZ
@@ -157,97 +107,28 @@ function CbzExporter:package()
         if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
             -- 如果是 CBZ 文件，需要解压并提取图片
             if cache_chapter.cacheFilePath:match("%.cbz$") then
-            -- 根据已有库选择使用处理方式
-                if cbz_lib == "archiver" then
-                            local chapter_cbz
-                            chapter_cbz = Archiver.Reader:new()
-                            chapter_cbz:open(cache_chapter.cacheFilePath) 
-                                
-                            for entry in chapter_cbz:iterate() do
-                                    
-                                local ext = get_image_ext(entry.path)
-                                if entry.mode == "file" and ext then
-                                    
-                                    local img_data = chapter_cbz:extractToMemory(entry.path)
-                                    if img_data then
-                                        local new_name = string.format("%04d.%s", image_index, ext)
-                                        
-                                        cbz:addFileFromMemory(new_name, img_data, os.time())
-                                        
-                                        image_index = image_index + 1
-                                        total_pages = total_pages + 1
-                                    end
-                                end
-                            end
-                        
-                            chapter_cbz:close()
-                        else
-                            -- 兼容旧版本处理压缩文件
-                            -- 为每个章节创建独立的临时目录
-                            local chapter_temp_dir = FS.joinPath(main_temp_dir, "chapter_" .. current_progress)
-                            -- logger.info(chapter_temp_dir)
-                            FS.checkAndCreateFolder(chapter_temp_dir)
-                            
-                            -- 解压 CBZ 到临时目录
-                            local cache_path_escaped = cache_chapter.cacheFilePath:gsub("'", "'\\''")
-                            local target_escaped = chapter_temp_dir:gsub("'", "'\\''")
-                            local unzip_cmd = string.format("unzip -qqo '%s' -d '%s'", 
-                                cache_path_escaped, target_escaped)
-                            local result = os.execute(unzip_cmd)
-                            
-                            if result == 0 then
-                                
-                                local image_files = {}
-                                
-                                -- 先收集所有图片文件
-                                util.findFiles(chapter_temp_dir, function(path, fname, attr)
-                                    if get_image_ext(fname) then
-                                        table.insert(image_files, {
-                                            path = path,
-                                            name = fname
-                                        })
-                                    end
-                                end, false)
-                                
-                                -- 按文件名排序
-                                table.sort(image_files, function(a, b)
-                                    local num_a = tonumber(a.name:match("^(%d+)")) or 0
-                                    local num_b = tonumber(b.name:match("^(%d+)")) or 0
-                                    return num_a < num_b
-                                end)
-                                
-                                -- 将图片添加到 CBZ
-                                for _, file in ipairs(image_files) do
-                                    local file_path = FS.joinPath(chapter_temp_dir, file.path)
-                                    
-                                    local img_data = util.readFromFile(file_path, "rb")
-                                    if img_data then
-                                            local ext = get_image_ext(file.name) or "jpg"
-                                            local new_name = string.format("%04d.%s", image_index, ext:lower())
-                                            
-                                            -- 使用 zipwriter 添加图片（启用压缩）
-                                            cbz:add(new_name, img_data, false) -- false = 使用压缩
+                local chapter_reader = ZipUtil.Reader:new()
+                if chapter_reader and chapter_reader:open(cache_chapter.cacheFilePath) then
+                    chapter_reader:iterate(function(entry)
+                        local ext = get_image_ext(entry.path)
+                        if entry.mode == "file" and ext then
+                            local img_data = chapter_reader:extractToMemory(entry.path)
+                            if img_data then
+                                local new_name = string.format("%04d.%s", image_index, ext)
 
-                                            --logger.info("添加图片:", new_name, "来自:", file)
-                                            image_index = image_index + 1
-                                            total_pages = total_pages + 1
-                                    end
-                                end
-                                
-                                if util.directoryExists(chapter_temp_dir) then
-                                    ffiUtil.purgeDir(chapter_temp_dir)
-                                    util.removePath(chapter_temp_dir)
-                                end
-                        else
-                                logger.warn("解压失败:", cache_path_escaped)
-                                if util.directoryExists(chapter_temp_dir) then
-                                    ffiUtil.purgeDir(chapter_temp_dir)
-                                    util.removePath(chapter_temp_dir)
-                                end
+                                cbz:add(new_name, img_data)
+
+                                image_index = image_index + 1
+                                total_pages = total_pages + 1
                             end
                         end
+                        return true
+                    end)
+                    chapter_reader:close()
+                else
+                    logger.warn("无法解压章节 CBZ（无可用解压库）:", cache_chapter.cacheFilePath)
                 end
-            
+            end
             -- 章节也可能是单图片
             else
                 local img_ext = get_image_ext(cache_chapter.cacheFilePath)
@@ -255,11 +136,7 @@ function CbzExporter:package()
                     local img_data = util.readFromFile(cache_chapter.cacheFilePath, "rb")
                     if img_data then
                         local new_name = string.format("%04d.%s", image_index, img_ext:lower())
-                        if cbz_lib == "archiver" then
-                            cbz:addFileFromMemory(new_name, img_data, os.time())
-                        else
-                            cbz:add(new_name, img_data, false)
-                        end
+                        cbz:add(new_name, img_data)
                         image_index = image_index + 1
                         total_pages = total_pages + 1
                     end
@@ -273,11 +150,7 @@ function CbzExporter:package()
     end
 
     local comic_info = self:createComicInfo(total_pages)
-    if cbz_lib == "zipwriter" then
-        cbz:add("ComicInfo.xml", comic_info, true)
-    else
-        cbz:addFileFromMemory("ComicInfo.xml", comic_info, os.time())
-    end
+    cbz:add("ComicInfo.xml", comic_info, true)
 
     if cbz and cbz.close then
         cbz:close()
@@ -287,11 +160,6 @@ function CbzExporter:package()
         util.removeFile(output_path)
     end
 
-    if cbz_lib == "zipwriter" and util.directoryExists(tmp_base) then
-        ffiUtil.purgeDir(tmp_base)
-        util.removePath(tmp_base)
-    end
-    
     if util.fileExists(cbz_path_tmp) then
         os.rename(cbz_path_tmp, output_path)
     end

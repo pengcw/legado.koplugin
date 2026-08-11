@@ -10,6 +10,7 @@ local MessageBox = require("Legado/MessageBox")
 local TaskProg = require("Legado.task.Progress")
 local Backend = require("Legado/Backend")
 local H = require("Legado/Helper")
+local ImageUtil = require("Legado.Helper.ImageUtil")
 
 local M = ImageViewer:extend{
     bookinfo = nil,
@@ -73,17 +74,10 @@ function M:onShowPrevImage()
 end
 
 local function downloadImage(img_src)
-    return Backend:HandleResponse(Backend:pDownload_Image(img_src), function(data)
-        if H.is_tbl(data) and data.data then
-            return data.data
-        else
-            logger.warn("图片下载失败：", img_src)
-            return
-        end
-    end, function(err_msg)
-        logger.warn("图片下载失败，错误信息：", err_msg)
-        return
-    end)
+    local data, err = ImageUtil.download_image(img_src)
+    if data then return data end
+    logger.warn("图片下载失败：", img_src, tostring(err))
+    return
 end
 
 function M:get_image_bb(imgData)
