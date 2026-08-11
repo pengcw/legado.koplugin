@@ -289,4 +289,8 @@ function M.showBar(message, options)
     return progressbar_dialog or show_progress_info(sub_title, {progress_max = max, parent = show_parent, dismissable = dismissable})
 end
 
+-- Non-blocking spinner loading (InfoMessage + rotating icon).
+-- Returns { close(), unschedule(), reportProgress(progress) }.
+M.showSpinner = show_progress_info
+
 return M

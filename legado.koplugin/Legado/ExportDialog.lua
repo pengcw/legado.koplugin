@@ -110,6 +110,7 @@ function CbzExporter:package()
                 local chapter_reader = ZipUtil.Reader:new()
                 if chapter_reader and chapter_reader:open(cache_chapter.cacheFilePath) then
                     chapter_reader:iterate(function(entry)
+                        if entry.path:find("ComicInfo%.xml$") then return true end
                         local ext = get_image_ext(entry.path)
                         if entry.mode == "file" and ext then
                             local img_data = chapter_reader:extractToMemory(entry.path)
