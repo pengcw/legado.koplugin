@@ -16,6 +16,19 @@ return {
             required_params = {"v", "refresh"},
             expected_status = {200}
         },
+        getBookSources = {
+            path = "/getBookSources",
+            method = "GET",
+            optional_params = {"v"},
+            expected_status = {200}
+        },
+        getBookSource = {
+            path = "/getBookSource",
+            method = "GET",
+            required_params = {"url"},
+            optional_params = {"v"},
+            expected_status = {200}
+        },
         getBookContent = {
             path = "/getBookContent",
             method = "GET",

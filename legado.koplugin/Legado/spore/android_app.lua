@@ -3,6 +3,7 @@ local logger = require("logger")
 local Screen = require("device").screen
 local util = require("util")
 local socket_url = require("socket.url")
+  local JSON = require("json")
 local H = require("Legado/Helper")
 local BaseSpec = require("Legado.spore.base")
 
@@ -212,6 +213,60 @@ function M:changeBookSource(new_book_source, callback)
     return self:saveBook(new_book_source, callback)
 end
 
+function M:getBookSourcesList(callback)
+    return self:handleResponse(function()
+        return self.client:getBookSources({
+            v = os.time()
+        })
+    end, callback, {
+        timeouts = {20, 30},
+    }, 'getBookSourcesList')
+end
+
+function M:getReplaceRules(callback)
+    return self:handleResponse(function()
+        return self.client:getReplaceRules({
+            v = os.time()
+        })
+    end, function(response)
+        if response and response.isSuccess == true and type(response.data) == "string" then
+            local JSON = require("json")
+            local parsed, err = pcall(JSON.decode, response.data)
+            if parsed and type(err) == "table" then
+                if callback then callback({type="SUCCESS", body=err}) end
+                return err
+            else
+                if callback then callback({type="ERROR", message="Invalid JSON in getReplaceRules"}) end
+                return nil, "Invalid JSON in getReplaceRules"
+            end
+        end
+        if callback then callback(response) end
+        return response
+    end, {
+        timeouts = {20, 30},
+    }, 'getReplaceRules')
+end
+
+function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
+    return self:handleResponse(function()
+        return self.client:getBookSource({
+            url = bookSourceUrl,
+            v = os.time()
+        })
+    end, function(response)
+        if response and response.isSuccess == true and type(response.data) == "table" then
+            local exploreUrl = response.data.exploreUrl
+            local result = { exploreUrl = exploreUrl, bookSourceUrl = bookSourceUrl }
+            if callback then callback({type = "SUCCESS", body = result}) end
+            return result
+        end
+        if callback then callback(response) end
+        return response
+    end, {
+        timeouts = {10, 15},
+    }, 'getBookSourcesExploreUrl')
+end
+
 function M:searchBookMulti(options, callback)
     local search_text = options.search_text
     local ret, err_msg = self:_searchBookSocket(search_text)
@@ -350,7 +405,6 @@ function M:_searchBookSocket(search_text, filter, timeout)
       is_exact_search = true
   end
 
-  local JSON = require("json")
   local websocket = require('Legado/websocket')
   local errHandler = require("Legado.Helper.Error")
 

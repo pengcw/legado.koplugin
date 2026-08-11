@@ -440,6 +440,48 @@ function M:saveBookProgress(chapter, callback)
     }, 'saveBookProgress')
   end
 
+function M:getReplaceRules(callback)
+    return self:handleResponse(function()
+        return self.client:getReplaceRulesPage({ v = os.time() })
+    end, function(page_response)
+        if not (type(page_response) == "table" and page_response.isSuccess == true
+            and type(page_response.data) == "table") then
+            if callback then callback({ type = "ERROR", message = "获取替换规则分页信息失败" }) end
+            return nil, "获取替换规则分页信息失败"
+        end
+        local meta = page_response.data
+        if not (type(meta.page) == "number" and type(meta.md5) == "string") then
+            if callback then callback({ type = "ERROR", message = "替换规则分页数据格式异常" }) end
+            return nil, "替换规则分页数据格式异常"
+        end
+
+        local all_rules = {}
+        local errors = {}
+        for p = 1, meta.page do
+            local rules_data, rules_err = self:handleResponse(function()
+                return self.client:getReplaceRulesNew({ md5 = meta.md5, page = tostring(p), v = os.time() })
+            end)
+            if rules_data and type(rules_data) == "table" then
+                for _, rule in ipairs(rules_data) do
+                    rule.order = rule.ruleorder or rule.order or 0
+                    rule.group = rule.groupname or rule.group or ""
+                    table.insert(all_rules, rule)
+                end
+            else
+                table.insert(errors, tostring(rules_err))
+            end
+        end
+
+        if #errors > 0 and #all_rules == 0 then
+            if callback then callback({ type = "ERROR", message = "拉取替换规则失败: " .. table.concat(errors, "; ") }) end
+            return nil, table.concat(errors, "; ")
+        end
+
+        if callback then callback({ type = "SUCCESS", body = all_rules }) end
+        return all_rules
+    end, { timeouts = {30, 60} }, 'getReplaceRules')
+end
+
 function M:getProxyCoverUrl(coverUrl)
     if not H.is_str(coverUrl) then return coverUrl end
     local res_cover_src

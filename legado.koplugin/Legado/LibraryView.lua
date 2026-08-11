@@ -529,9 +529,9 @@ function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible)
     return self.book_toc
 end
 
-function LibraryView:showBookTocDialog(bookinfo)
+function LibraryView:showBookTocDialog(bookinfo, onReturnCallBack)
     PlgState:chapterDirection("nil")
-    return self:refreshBookTocWidget(bookinfo, nil, true)
+    return self:refreshBookTocWidget(bookinfo, onReturnCallBack, true)
 end
 
 function LibraryView:getReadingBookId()

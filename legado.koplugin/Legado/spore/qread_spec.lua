@@ -210,5 +210,17 @@ return {
             optional_params = {"v", "need"},
             expected_status = {200}
         },
+        getReplaceRulesPage = {
+            path = "/getReplaceRulesPage",
+            method = "GET",
+            required_params = {"v"},
+            expected_status = {200}
+        },
+        getReplaceRulesNew = {
+            path = "/getReplaceRulesNew",
+            method = "GET",
+            required_params = {"md5", "page", "v"},
+            expected_status = {200}
+        },
     }
 }

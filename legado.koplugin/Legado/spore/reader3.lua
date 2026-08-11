@@ -300,6 +300,26 @@ function M:getBookSourcesList(callback)
     }, 'getBookSourcesList')
 end
 
+function M:getReplaceRules(callback)
+    return self:handleResponse(function()
+        return self.client:getReplaceRules({
+            v = os.time()
+        })
+    end, callback, {
+        timeouts = {20, 30},
+    }, 'getReplaceRules')
+end
+
+function M:getTxtTocRules(callback)
+    return self:handleResponse(function()
+        return self.client:getTxtTocRules({
+            v = os.time()
+        })
+    end, callback, {
+        timeouts = {20, 30},
+    }, 'getTxtTocRules')
+end
+
 function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
     local ret, err_msg = self:_getBookSource({
         bookSourceUrl = bookSourceUrl,
