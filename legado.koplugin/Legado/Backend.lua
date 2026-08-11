@@ -598,6 +598,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     local has_error = false
     
     local is_finalizing = false
+    local pending_cbz_count = 0 -- 进行中的异步 CBZ 打包数(from_urls_async 不在 ch 任务队列中)
     local check_completion = function(progress, err_msg)
         if progress == false then
             if not is_read_ahead and not has_error then
@@ -626,7 +627,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
 
         if is_finalizing then return end
         UIManager:nextTick(function()
-            if ch and not ch:hasTasks() then
+            if ch and not ch:hasTasks() and pending_cbz_count <= 0 then
                 -- 并发锁
                 if is_finalizing then return end
                 is_finalizing = true
@@ -683,12 +684,18 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     -- （不传 check_running：打包期间章节锁仍持有，isTaskRunning == true 会误中止）
                     if success and H.is_tbl(downloaded_chapter) and downloaded_chapter.kind == "cbz" then
                         local pending = downloaded_chapter
+                        pending_cbz_count = pending_cbz_count + 1
                         local cbz_writer = require("Legado.task.QueueCbz"):new()
                         local started, start_err = cbz_writer:from_urls_async({
                             output = pending.filePath,
                             images = pending.img_sources,
-                            opts = { comic_info = { name = current_chapter.title or "" } },
+                            opts = {
+                                comic_info = { name = current_chapter.title or "" },
+                                -- 图片下载并发跟随"同时下载数", 与章节级并发解耦
+                                max_workers = max_threads,
+                            },
                             on_finish = function(aborted, result)
+                                pending_cbz_count = pending_cbz_count - 1
                                 if not (result and result.success) then
                                     pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                                     logger.err("Failed to package cbz:", tostring(pending.filePath))
@@ -707,6 +714,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                             end,
                         })
                         if not started then
+                            pending_cbz_count = pending_cbz_count - 1
                             pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                             logger.err("Failed to start cbz packaging:", tostring(start_err))
                             return check_completion(false, string.format("章节[%s]图片打包启动失败: %s", tostring(current_chapter.title), tostring(start_err)))

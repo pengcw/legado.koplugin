@@ -317,6 +317,14 @@ function Handlers:register(parent_ref)
                                     info_text = "建议根据机器配置选择 1–4 进程\n（如下载异常，可尝试调为 1）",
                                     default_value = 2,
                                     default_text = "2",
+                                    callback = function(spin)
+                                        settings.download_threads = spin.value
+                                        Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                            MessageBox:notice(string.format("同时下载数已设置为: %d", spin.value))
+                                        end, function(err_msg)
+                                            MessageBox:error("设置失败：", tostring(err_msg))
+                                        end)
+                                    end,
                                 }
                                 UIManager:show(thread_spin)
                             end,

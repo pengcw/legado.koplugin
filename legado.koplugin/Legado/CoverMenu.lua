@@ -173,6 +173,8 @@ function M:_updateCoverItems()
             task_func = downloadCover,
             max_retries = 2,
             get_task_args = function(req)
+                -- cache_id 非字符串时下载必然失败, 返回 nil 直接 abort, 避免白重试
+                if type(req.item.cache_id) ~= "string" then return nil end
                 return { req.item.cover_url, req.item.cache_id }
             end,
             on_item_end = function(_, req, success)

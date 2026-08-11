@@ -315,20 +315,40 @@ function LibraryView:loadAndRenderChapter(chapter)
                     if H.is_tbl(data) and data.kind == "cbz" then
                         local pending = data
                         local cbz_writer = require("Legado.task.QueueCbz"):new()
+                        local total_imgs = #pending.img_sources
+                        local progress_bar
+                        if total_imgs > 2 then
+                            progress_bar = TaskProg.showBar("正在下载章节图片...", {
+                                title = "漫画章节下载",
+                                max = total_imgs,
+                            })
+                        else
+                            progress_bar = TaskProg.showSpinner("正在下载章节图片")
+                        end
                         local started, start_err = cbz_writer:from_urls_async({
                             output = pending.filePath,
                             images = pending.img_sources,
                             opts = { comic_info = { name = pending.chapter.title or "" } },
+                            on_progress = function(completed)
+                                if progress_bar and progress_bar.reportProgress then
+                                    progress_bar:reportProgress(completed)
+                                end
+                            end,
                             on_finish = function(aborted, result)
                                 if result and result.success then
                                     pending.chapter.cacheFilePath = pending.filePath
-                                    self:showReaderUI(pending.chapter)
+                                    if progress_bar then progress_bar:close() end
+                                    UIManager:nextTick(function()
+                                            self:showReaderUI(pending.chapter)
+                                    end)
                                 else
+                                    if progress_bar then progress_bar:close() end
                                     MessageBox:error('章节打包失败')
                                 end
                             end,
                         })
                         if not started then
+                            if progress_bar then progress_bar:close() end
                             MessageBox:error('章节打包启动失败: ' .. tostring(start_err))
                         end
                         return
