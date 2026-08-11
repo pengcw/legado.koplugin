@@ -169,7 +169,12 @@ end
 function M:getProxyCoverUrl(coverUrl)
     if not H.is_str(coverUrl) then return coverUrl end
     local server_address = self.settings.server_address
-    return table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
+    local proxy_cover = table.concat({server_address, '/cover?path=', util.urlEncode(coverUrl)})
+    local is_http = coverUrl:match("^%s*[hH][tT][tT][pP][sS]?://") ~= nil
+    if is_http then
+        return { coverUrl, proxy_cover }
+    end
+    return proxy_cover
 end
 
 function M:getProxyImageUrl(bookUrl, img_src)

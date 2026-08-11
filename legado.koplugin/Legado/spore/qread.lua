@@ -48,14 +48,22 @@ function M:reader3Login()
         return false, '获取 Token 失败:' .. tostring(res.body.errorMsg or "")
     end
 
-    self.tokenManager:set(res.body.data.accessToken)
+    if not self.tokenManager then
+        local AuthToken = self.AuthToken or require("Legado.spore.base").AuthToken
+        if AuthToken and AuthToken.new then
+            self.tokenManager = AuthToken:new(self.name)
+        end
+    end
+    if self.tokenManager then
+        self.tokenManager:set(res.body.data.accessToken)
+    end
     return true, res.body.data.accessToken
 end
 
 function M:_getBookshelfPage()
     return self:handleResponse(function()
         return self.client:getBookshelfPage({
-            oldmd5 = "2025-09-28 08:50:11.020Z"
+            oldmd5 = "e10adc3949ba59abbe56e057f20f883e"
         })
     end, nil, {
       timeouts = {6, 10}
@@ -68,17 +76,46 @@ function M:getBookshelfNew(callback)
         return nil, err_msg and tostring(err_msg) or "未知错误"
     end
     local md5 = ret.md5
-    local page = ret.page or 1
+    local total_pages = tonumber(ret.page) or 1
+    if total_pages < 1 then total_pages = 1 end
 
-    return self:handleResponse(function()
-        return self.client:getBookshelfNew({
-            md5 = md5,
-            page = page,
-        })
-    end, callback, {
-      timeouts = {8, 12}
-    }, 'getBookshelf')
+    local all_books = {}
+    local errors = {}
+
+    for p = 1, total_pages do
+        local page_data, page_err = self:handleResponse(function()
+            return self.client:getBookshelfNew({
+                md5 = md5,
+                page = tostring(p),
+            })
+        end, nil, {
+            timeouts = {8, 12}
+        }, 'getBookshelf')
+
+        if H.is_tbl(page_data) then
+            for _, book in ipairs(page_data) do
+                table.insert(all_books, book)
+            end
+        else
+            table.insert(errors, page_err and tostring(page_err) or string.format("获取第%d页书架失败", p))
+        end
+    end
+
+    if #errors > 0 and #all_books == 0 then
+        return nil, table.concat(errors, "; ")
+    end
+
+    local response = {
+        isSuccess = true,
+        data = all_books,
+    }
+
+    if H.is_func(callback) then
+        return callback(response)
+    end
+    return all_books
 end
+
 
 function M:getChapterListNew(bookinfo, callback)
     if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then 
@@ -87,7 +124,7 @@ function M:getChapterListNew(bookinfo, callback)
   
     local bookUrl = bookinfo.bookUrl
     local bookSourceUrl = bookinfo.origin
-    local bookname = bookinfo.name
+    local bookname = H.is_str(bookinfo.name) and bookinfo.name or (H.is_str(bookinfo.bookname) and bookinfo.bookname or "")
     return self:handleResponse(function()
           return self.client:getChapterListNew({
               bookSourceUrl = bookSourceUrl,
@@ -110,6 +147,7 @@ function M:getBookContentNew(chapter, callback)
   local chapters_index = chapter.chapters_index
   local down_chapters_index = chapter.chapters_index
   local bookSourceUrl = chapter.origin
+  local bookname = H.is_str(chapter.book_name) and chapter.book_name or ""
 
   local ret, err_msg = self:handleResponse(function()
       -- data={rules, text}
@@ -118,8 +156,8 @@ function M:getBookContentNew(chapter, callback)
           index = down_chapters_index,
           bookSourceUrl = bookSourceUrl,
           useReplaceRule = 1,
-          bookname = "",
-          type = 0,
+          bookname = bookname, -- 用于查找净化替换规则
+          type = 0, --1表示强制不走缓存
       })
   end, callback, {
       timeouts = {18, 25}
@@ -133,7 +171,7 @@ end
 function M:_getBookSourcesPage()
     return self:handleResponse(function()
         return self.client:getBookSourcesPage({
-            oldmd5 = "2025-09-28 08:50:11.020Z"
+            oldmd5 = "e10adc3949ba59abbe56e057f20f883e"
         })
     end, nil, {
       timeouts = {6, 10}
@@ -146,16 +184,44 @@ function M:getBookSourcesListNew(callback)
         return nil, err_msg and tostring(err_msg) or "未知错误"
     end
     local md5 = ret.md5
-    local page = ret.page or 1
+    local total_pages = tonumber(ret.page) or 1
+    if total_pages < 1 then total_pages = 1 end
 
-    return self:handleResponse(function()
-        return self.client:getBookSourcesNew({
-            md5 = md5,
-            page = page,
-        })
-    end, callback, {
-      timeouts = {8, 12}
-    }, 'getBookSourcesList')
+    local all_sources = {}
+    local errors = {}
+
+    for p = 1, total_pages do
+        local page_data, page_err = self:handleResponse(function()
+            return self.client:getBookSourcesNew({
+                md5 = md5,
+                page = tostring(p),
+            })
+        end, nil, {
+            timeouts = {8, 12}
+        }, 'getBookSourcesList')
+
+        if H.is_tbl(page_data) then
+            for _, source in ipairs(page_data) do
+                table.insert(all_sources, source)
+            end
+        else
+            table.insert(errors, page_err and tostring(page_err) or string.format("获取第%d页书源失败", p))
+        end
+    end
+
+    if #errors > 0 and #all_sources == 0 then
+        return nil, table.concat(errors, "; ")
+    end
+
+    local response = {
+        isSuccess = true,
+        data = all_sources,
+    }
+
+    if H.is_func(callback) then
+        return callback(response)
+    end
+    return all_sources
 end
 
 function M:refreshBook(chapter, callback)
@@ -173,54 +239,15 @@ function M:refreshBook(chapter, callback)
 end
 
 function M:getBookshelf(callback)
-    return self:handleResponse(function()
-        return self.client:getBookshelf({
-            version = '3.2.1'
-        })
-    end, callback, {
-      timeouts = {8, 12}
-    }, 'getBookshelf')
+    return self:getBookshelfNew(callback)
 end
 
 function M:getChapterList(bookinfo, callback)
-    if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then 
-      return nil, "参数错误"
-    end
-  
-    local bookUrl = bookinfo.bookUrl
-    local bookSourceUrl = bookinfo.origin
-    local bookname = bookinfo.name
-    return self:handleResponse(function()
-          return self.client:getChapterList({
-              bookSourceUrl = bookSourceUrl,
-              url = bookUrl,
-          })
-    end, callback, {
-      timeouts = {10, 18}
-  }, 'getChapterList')
+    return self:getChapterListNew(bookinfo, callback)
 end
 
 function M:getBookContent(chapter, callback)
-    if not (H.is_tbl(chapter) and H.is_str(chapter.bookUrl) and  H.is_str(chapter.origin) and H.is_num(chapter.chapters_index)) then
-        return nil, 'getBookContent参数错误'
-    end
-
-  local bookUrl = chapter.bookUrl
-  local chapters_index = chapter.chapters_index
-  local down_chapters_index = chapter.chapters_index
-  local bookSourceUrl = chapter.origin
-
-  return self:handleResponse(function()
-      -- data={rules, text}
-      return self.client:getBookContent({
-          url = bookUrl,
-          index = down_chapters_index,
-          bookSourceUrl = bookSourceUrl,
-          type = 0,
-      })
-  end, callback, {
-      timeouts = {18, 25}
-  }, 'getBookContent')
+    return self:getBookContentNew(chapter, callback)
 end
 
 function M:saveBook(bookinfo, callback)
@@ -283,13 +310,7 @@ function M:saveBook(bookinfo, callback)
   end
 
 function M:getBookSourcesList(callback)
-    return self:handleResponse(function()
-        return self.client:getBookSources({
-            isall = 0,
-        })
-    end, callback, {
-        timeouts = {20, 30},
-    }, 'getBookSourcesList')
+    return self:getBookSourcesListNew(callback)
 end
 
 function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
@@ -483,30 +504,38 @@ function M:getReplaceRules(callback)
 end
 
 function M:getProxyCoverUrl(coverUrl)
-    if not H.is_str(coverUrl) then return coverUrl end
-    local res_cover_src
-    local server_address = self.settings.server_address
-    if string.sub(coverUrl, 1, 8) == "baseurl/" then
-         -- coverUrl baseurl/proxypng?url=https%3A%2F%2Ft.test.cc%2F20255%2Fcover%2F59537.jpg
-         -- 139646s.webp
-        local url_path = string.sub(coverUrl, 8)
-        res_cover_src = table.concat({server_address, url_path})
-    else
-        res_cover_src = table.concat({server_address, '/proxypng?url=', util.urlEncode(coverUrl)})
+    if not H.is_str(coverUrl) or coverUrl == "" then return coverUrl end
+    local server_address = self.settings.server_address:gsub("/+$", "")
+    if string.sub(coverUrl, 1, 1) == "/" then
+        return socket_url.absolute(server_address, coverUrl)
     end
-    return res_cover_src
+    if string.sub(coverUrl, 1, 8) == "baseurl/" then
+        local url_path = string.sub(coverUrl, 8)
+        if string.sub(url_path, 1, 1) ~= "/" then url_path = "/" .. url_path end
+        return server_address .. url_path
+    end
+    return server_address .. '/proxypng?url=' .. util.urlEncode(coverUrl)
 end
+
 function M:getProxyImageUrl(bookUrl, img_src)
-    if not H.is_str(img_src) then return "" end
-    local res_img_src
-    local server_address = self.settings.server_address
+    if not H.is_str(img_src) or img_src == "" then return img_src end
+    if string.sub(img_src, 1, 11) == "data:image/" then
+        return img_src
+    end
+    -- 暂不支持段评
+    if string.sub(img_src, 1, 3) == "dp:"  then
+        return ""
+    end
+    local server_address = self.settings.server_address:gsub("/+$", "")
+    if string.sub(img_src, 1, 1) == "/" then
+        return socket_url.absolute(server_address, img_src)
+    end
     if string.sub(img_src, 1, 8) == "baseurl/" then
         local url_path = string.sub(img_src, 8)
-        res_img_src = table.concat({server_address, url_path})
-    else
-        res_img_src = table.concat({server_address, '/proxypng?url=', util.urlEncode(img_src)})
+        if string.sub(url_path, 1, 1) ~= "/" then url_path = "/" .. url_path end
+        return server_address .. url_path
     end
-    return res_img_src
+    return server_address .. '/proxypng?url=' .. util.urlEncode(img_src)
 end
 
 function M:searchBookMulti(options, callback)

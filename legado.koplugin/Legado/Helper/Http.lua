@@ -155,7 +155,8 @@ local function pGetUrlContent(options, is_create)
     local content
     if not file_fp then
       content = table.concat(sink)
-      if headers and headers["content-length"] then
+      -- HEAD 请求无响应体：content-length 表示 GET 时的长度，跳过长度校验
+      if headers and headers["content-length"] and options.method ~= "HEAD" then
         local content_length = tonumber(headers["content-length"])
         if #content ~= content_length then
             return false, "Incomplete content received"

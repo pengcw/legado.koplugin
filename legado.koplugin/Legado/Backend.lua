@@ -228,6 +228,8 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
     local book_cache_id = bookinfo.cache_id
     local bookUrl = bookinfo.bookUrl
 
+    self:_ensure_book_name(bookinfo)
+
     return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
         local status, err = safe_call(function()
             return self.dbManager:upsertChapters(book_cache_id, response.data)
@@ -239,7 +241,21 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
         return true
     end))
 end
+
+function M:_ensure_book_name(obj)
+    if H.is_tbl(obj) and not (H.is_str(obj.book_name) and obj.book_name ~= "") then
+        local cache_id = obj.cache_id or obj.book_cache_id
+        if H.is_str(cache_id) then
+            local cached_info = self:getBookInfoCache(cache_id)
+            if H.is_tbl(cached_info) and H.is_str(cached_info.name) and cached_info.name ~= "" then
+                obj.book_name = cached_info.name
+            end
+        end
+    end
+    return obj
+end
 function M:pGetChapterContent(chapter)
+    self:_ensure_book_name(chapter)
     return wrap_response(self.apiClient:getBookContent(chapter))
 end
 function M:refreshBookContent(chapter)
@@ -1072,9 +1088,56 @@ function M:get_default_cover_cache(book_cache_id)
     return ImageUtil.get_default_cover_cache(book_cache_id)
 end
 
+-- 网络层失败（连接/超时），区别于 HTTP 层拒绝（403/405 等，GET 仍可能成功）
+local function is_cover_network_failure(err)
+    if type(err) ~= "string" then return false end
+    return err:find("request interrupted", 1, true) ~= nil
+        or err:find("Network or remote server unavailable", 1, true) ~= nil
+end
+
 function M:download_cover_img(book_cache_id, cover_url, is_force)
-    local proxy_url = self:getProxyCoverUrl(cover_url)
-    return ImageUtil.download_cover(book_cache_id, proxy_url, is_force)
+    local candidates = {}
+    local function push_candidate(url)
+        if not (H.is_str(url) and url ~= "") then return end
+        for _, c in ipairs(candidates) do
+            if c == url then return end -- 去重
+        end
+        table.insert(candidates, url)
+    end
+
+    local proxy_result = self:getProxyCoverUrl(cover_url)
+    if type(proxy_result) == "table" then
+        for _, url in ipairs(proxy_result) do
+            push_candidate(url)
+        end
+    else
+        push_candidate(proxy_result)
+    end
+
+    local function try_download(url, timeout)
+        return ImageUtil.download_cover(book_cache_id, url, is_force, { timeout = timeout })
+    end
+
+    for i, url in ipairs(candidates) do
+        if (H.is_str(url) and url:match("^%s*[hH][tT][tT][pP][sS]?://")) then
+            local skip = false
+            if #candidates > 1 and i == 1 then
+                local httpReq = require("Legado.Helper.Http")
+                local probe_ok, probe_err = httpReq({ url = url, method = "HEAD", timeout = 3 }, true)
+                if not probe_ok and is_cover_network_failure(probe_err) then
+                    skip = true
+                end
+            end
+            if not skip then
+                local timeout = (i < #candidates) and 8 or 15 
+                local cover_path, cover_name = try_download(url, timeout)
+                if cover_path then
+                    return cover_path, cover_name
+                end
+            end
+        end
+    end
+    return nil, nil
 end
 
 function M:with_lock(target, fn, ttl, owner_id)

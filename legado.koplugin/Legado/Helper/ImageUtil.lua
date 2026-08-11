@@ -64,7 +64,7 @@ function M.get_default_cover_cache(book_cache_id)
 end
 
 -- Function called frequently; keep logs minimal
-function M.download_cover(book_cache_id, img_src, is_force)
+function M.download_cover(book_cache_id, img_src, is_force, opts)
     if not (H.is_str(book_cache_id) and book_cache_id ~= ""
             and H.is_str(img_src) and img_src ~= "") then
         logger.err("download_cover: invalid parameter", book_cache_id, img_src)
@@ -94,7 +94,7 @@ function M.download_cover(book_cache_id, img_src, is_force)
     local dir = util.splitFilePathName(cover_path_no_ext)
     FS.checkAndCreateFolder(dir)
     util.writeToFile("", lock_path)
-    local imgdata, ext_or_err = M.download_image(img_src)
+    local imgdata, ext_or_err = M.download_image(img_src, opts)
     if not imgdata then
         util.removeFile(lock_path)
         logger.dbg("download_cover: failed", img_src, ext_or_err)

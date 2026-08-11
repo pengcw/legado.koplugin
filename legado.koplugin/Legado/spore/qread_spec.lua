@@ -14,7 +14,6 @@ return {
         getBookshelfPage = {
             path = "/getBookshelfPage",
             method = "POST",
-            -- oldmd5 2025-09-28 08:50:11.020Z
             required_params = {"oldmd5"}, 
             payload = {"oldmd5"},
             form_payload = true,
@@ -55,7 +54,7 @@ return {
             expected_status = {200}
         },
         getBookSourcesPage = {
-            path = "/getBookshelfPage",
+            path = "/getBookSourcesPage",
             method = "POST",
             -- is md5
             required_params = {"oldmd5"}, 
