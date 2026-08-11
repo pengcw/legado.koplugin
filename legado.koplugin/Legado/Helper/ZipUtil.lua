@@ -168,6 +168,27 @@ local function shell_escape(s)
     return tostring(s or ""):gsub("'", "'\\''")
 end
 
+-- libarchive may shift zip perm bits (0644 -> 0o1204; &0777 -> 0204),
+-- leaving extracted files unreadable. chmod only when open fails;
+-- normal files are untouched (a failed open may just mean a missing file)
+local function ensure_file_readable(path)
+    local f = io.open(path, "rb")
+    if f then
+        f:close()
+        return -- readable, nothing to fix
+    end
+    os.execute(string.format("chmod 0644 '%s' 2>/dev/null", shell_escape(path)))
+end
+
+local function chmod_tree(root)
+    if not util.directoryExists(root) then return end
+    util.findFiles(root, function(path, fname, attr)
+        if not (attr and attr.mode == "directory") then
+            ensure_file_readable(path)
+        end
+    end, true)
+end
+
 local function unzip_available()
     local probe = os.execute("command -v unzip >/dev/null 2>&1")
     return probe == 0 or probe == true
@@ -263,11 +284,30 @@ end
 
 function Reader:extractToMemory(path)
     if self._mode == "archiver" then
-        return self._archive:extractToMemory(path)
+        -- archiver's seek relies on an entries cache (filled only by iterate);
+        -- iterate once first, otherwise entries are never found
+        if self._archive.entries and not next(self._archive.entries) then
+            for _ in self._archive:iterate() do end
+        end
+        local data = self._archive:extractToMemory(path)
+        if data == nil then
+            return nil, self._archive.err or ("no such entry: " .. tostring(path))
+        end
+        return data
     end
     local ok, err = ensure_extracted(self)
     if not ok then return nil, err end
-    return util.readFromFile(self._tmp_dir .. "/" .. path, "rb")
+    local target = self._tmp_dir .. "/" .. path
+    local data = util.readFromFile(target, "rb")
+    if not data then
+        -- maybe unreadable: chmod then retry once
+        ensure_file_readable(target)
+        data = util.readFromFile(target, "rb")
+        if not data then
+            return nil, "no such entry: " .. tostring(path)
+        end
+    end
+    return data
 end
 
 -- Full extract to dir, supports exclude_patterns (string or table, plain match)
@@ -313,6 +353,8 @@ function Reader:extractAll(dest_dir, exclude_patterns)
                         if not self._archive:extractToPath(entry.path, target_full_path) then
                             error(self._archive.err or ("failed to extract " .. entry.path))
                         end
+                        -- write_disk may restore unreadable perms; ensure readable after extract
+                        ensure_file_readable(target_full_path)
                     end
                 end
                 extracted = extracted + 1
@@ -344,6 +386,7 @@ function Reader:extractAll(dest_dir, exclude_patterns)
         local count = 0
         util.findFiles(dest_dir, function() count = count + 1 end, true)
         if count == 0 then return false, "压缩包为空，没有提取到任何文件" end
+        chmod_tree(dest_dir)
         return true, nil
     end
     return false, "unzip command failed"
@@ -362,8 +405,8 @@ end
 ZipUtil.Reader = Reader
 
 -- ==========================================
--- ComicInfo.xml 生成（CBZ 漫画元数据，供打包流程在 zip 末尾追加）
--- bookinfo 可选：{ name, author, kind, intro }，缺省字段留空
+-- ComicInfo.xml for CBZ (appended at the end of the zip)
+-- bookinfo optional: { name, author, kind, intro }; missing fields left empty
 -- ==========================================
 function ZipUtil.createComicInfo(bookinfo, total_pages)
     bookinfo = bookinfo or {}
