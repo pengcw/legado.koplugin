@@ -85,11 +85,24 @@ function M:init()
     self._need_login = H.is_func(self.client.login) and (self.settings.reader3_un or "") ~= ""
     
     if self._need_login then
-        self.tokenManager = AuthToken:new(self.name)
+        self.tokenManager = AuthToken:new(self:getTokenKey())
         package.loaded["Spore.Middleware.Legado3Auth"] = require("Legado.spore.Middleware.Legado3Auth")
     end
     package.loaded["Spore.Middleware.FixJSON"] = require("Legado.spore.Middleware.FixJSON")
     package.loaded["Spore.Middleware.Format.UrlEncoded"] = require("Legado.spore.Middleware.Format.UrlEncoded")
+end
+
+function M:getTokenKey()
+    local addr = H.is_str(self.settings.server_address) and self.settings.server_address or ""
+    local user = H.is_str(self.settings.reader3_un) and self.settings.reader3_un or ""
+    return string.format("%s_%s", self.name, H.md5(addr .. "|" .. user))
+end
+
+function M:ensureTokenManager()
+    if not self.tokenManager then
+        self.tokenManager = AuthToken:new(self:getTokenKey())
+    end
+    return self.tokenManager
 end
 
 function M:getLuaConfig(path)

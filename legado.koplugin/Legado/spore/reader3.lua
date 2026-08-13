@@ -51,7 +51,7 @@ function M:reader3Login()
         return false, '获取 Token 失败:' .. tostring(res.body.errorMsg or "")
     end
     
-    self.tokenManager:set(res.body.data.accessToken)
+    self:ensureTokenManager():set(res.body.data.accessToken)
     return true, res.body.data.accessToken
 end
 

@@ -354,7 +354,7 @@ local chapter_writeToFile = function(chapter, filePath, resources)
     end
 end
 
-function M:_pDownloadChapter(chapter, is_recursive)
+function M:_pDownloadChapter(chapter)
     local bookUrl = chapter.bookUrl
     local book_cache_id = chapter.book_cache_id
     local chapters_index = chapter.chapters_index
@@ -373,12 +373,6 @@ function M:_pDownloadChapter(chapter, is_recursive)
     end
 
     local response = self:pGetChapterContent(chapter)
-
-    if is_recursive ~= true and H.is_tbl(response) and response.type == 'ERROR' and 
-            self.apiClient:isNeedLogin({ data = response.message}) == true then
-        self.apiClient:reader3Token(nil)
-        return self:_pDownloadChapter(chapter,  true)
-    end
 
     if not H.is_tbl(response) or response.type ~= 'SUCCESS' then
         error((response and response.message) or '章节下载失败')
@@ -1292,6 +1286,9 @@ function M:switchWebConfig(conf_name, is_active_item_changed)
     local ok, err_msg = ConfigValidator.check(config.url, config.type, config.user, config.pwd)
     if not ok then
         return wrap_response(nil, tostring(err_msg))
+    end
+    if H.is_tbl(ok) and ok.url then
+        config.url = ok.url
     end
     pcall(function() self.dbManager:disableAllBookShelves() end)
 
