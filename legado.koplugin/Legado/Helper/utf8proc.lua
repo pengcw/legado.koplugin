@@ -54,6 +54,7 @@ local native_utf8_chars
 
 if not libutf8proc_available then
     native_utf8_chars = function(str, reverse)
+    if type(str) ~= "string" then str = tostring(str or "") end
     local str_len = #str
     local pos = reverse and (str_len + 1) or 0
 
@@ -80,7 +81,7 @@ if not libutf8proc_available then
 
             local bytes = 1
             local codepoint = byte
-
+            local valid = true
             if byte < 0x80 then
                 bytes = 1
                 codepoint = byte
@@ -90,7 +91,12 @@ if not libutf8proc_available then
                     local b2 = str:byte(pos + 1)
                     if b2 and b2 >= 0x80 and b2 <= 0xBF then
                         codepoint = (byte - 0xC0) * 64 + (b2 - 0x80)
+                        if codepoint < 0x80 then valid = false end
+                    else
+                        valid = false
                     end
+                else
+                    valid = false
                 end
             elseif byte >= 0xE0 and byte <= 0xEF then
                 bytes = 3
@@ -98,18 +104,36 @@ if not libutf8proc_available then
                     local b2, b3 = str:byte(pos + 1), str:byte(pos + 2)
                     if b2 and b3 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF then
                         codepoint = (byte - 0xE0) * 4096 + (b2 - 0x80) * 64 + (b3 - 0x80)
+                        if codepoint < 0x800 or (codepoint >= 0xD800 and codepoint <= 0xDFFF) then valid = false end
+                    else
+                        valid = false
                     end
+                else
+                    valid = false
                 end
-            elseif byte >= 0xF0 and byte <= 0xF7 then
+            elseif byte >= 0xF0 and byte <= 0xF4 then
+                -- 标准 UTF-8 4 字节起始最大到 F4，F5-F7 不再按 4 字节处理
                 bytes = 4
                 if pos + 3 <= str_len then
                     local b2, b3, b4 = str:byte(pos + 1), str:byte(pos + 2), str:byte(pos + 3)
                     if b2 and b3 and b4 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF and b4 >= 0x80 and b4 <= 0xBF then
                         codepoint = (byte - 0xF0) * 262144 + (b2 - 0x80) * 4096 + (b3 - 0x80) * 64 + (b4 - 0x80)
+                        -- 超过 U+10FFFF 非法
+                        if codepoint < 0x10000 or codepoint > 0x10FFFF then  valid = false end
+                    else
+                        valid = false
                     end
+                else
+                    valid = false
                 end
+            else
+                valid = false
+                bytes = 1
             end
-
+            if not valid then
+                bytes = 1
+                codepoint = byte
+            end
             local start_pos = pos
             if start_pos >= 1 and start_pos + bytes - 1 <= str_len then
                 local char = str:sub(start_pos, start_pos + bytes - 1)
@@ -117,12 +141,15 @@ if not libutf8proc_available then
                 pos = reverse and start_pos or (start_pos + bytes - 1)
                 return ret_pos, codepoint, char
             end
+            -- 正常路径不会进入（bytes >= 1 时 start_pos+bytes-1 <= str_len 成立）
+            pos = reverse and (start_pos - 1) or (start_pos + 1)
         end
     end
     end
 end
 
 function M.utf8_chars(str, reverse)
+    if type(str) ~= "string" then str = tostring(str or "") end
     if not libutf8proc_available then
         return native_utf8_chars(str, reverse)
     end
@@ -143,14 +170,19 @@ function M.utf8_chars(str, reverse)
             local bytes = tonumber(libutf8proc.utf8proc_iterate(str_p + pos - 1, remaining, codepoint))
 
             if bytes > 0 then
-                local char = ffi.string(str_p + pos - 1, bytes)
-                local ret_pos = tonumber(pos)
-                pos = reverse and (pos - bytes + 1) or (pos + bytes - 1)
-                return ret_pos, tonumber(codepoint[0]), char
-            elseif bytes < 0 then
-                if reverse then
-                    pos = pos - 1
+                local cp = tonumber(codepoint[0])
+                if cp >= 0 and cp <= 0x10FFFF then
+                    local char = ffi.string(str_p + pos - 1, bytes)
+                    local ret_pos = tonumber(pos)
+                    pos = reverse and (pos - bytes + 1) or (pos + bytes - 1)
+                    return ret_pos, cp, char
                 end
+               if reverse then pos = pos - 1 else pos = pos + 1 end
+            elseif bytes < 0 then
+               if reverse then pos = pos - 1 else pos = pos + 1 end
+            else
+                -- bytes == 0 扫描继续
+                if reverse then pos = pos - 1 else pos = pos + 1 end
             end
         end
     end
@@ -177,8 +209,10 @@ function M.count(str)
     local pos = 0
     local str_len = #str
     while pos < str_len do
-        local bytes = tonumber(libutf8proc.utf8proc_iterate(str_p + pos, -1, codepoint))
+        local bytes = tonumber(libutf8proc.utf8proc_iterate(str_p + pos, str_len - pos, codepoint))
         if bytes > 0 then
+            local cp = tonumber(codepoint[0])
+            if cp < 0 or cp > 0x10FFFF then return count, false end
             count = count + 1
             pos = pos + bytes
         else

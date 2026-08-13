@@ -158,8 +158,7 @@ end
 function M:_getFallbackVersionInfo()
     local ok, res = self:_requestWithProxies({
         url = META_RAW_URL,
-        timeout = 10,
-        maxtime = 20,
+        timeout = 20,
         method = "GET"
     })
     
@@ -191,8 +190,7 @@ end
 function M:_getLatestReleaseInfo()
     local ok, res = makeRequest({
         url = RELEASE_API,
-        timeout = 10,
-        maxtime = 20,
+        timeout = 20,
         headers = {
             ["Accept"] = "application/vnd.github.v3+json",
             ["User-Agent"] = "koreader-legado-plugin"
@@ -236,8 +234,7 @@ function M:_downloadUpdate(release_info)
         url = url,
         method = "GET",
         file_path = temp_zip_path,
-        timeout = 30,
-        maxtime = 300,
+        timeout = { 30, 300 }, 
         redirect = true,
     }
 

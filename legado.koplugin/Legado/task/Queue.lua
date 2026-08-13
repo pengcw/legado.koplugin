@@ -1,12 +1,12 @@
 -- =================================================================================
--- Async Task Lib by v0.11
+-- Async Task Lib by v0.11.1
 -- =================================================================================
 local UIManager = require("ui/uimanager")
 local coroutine = require("coroutine")
 local logger = require("logger")
 local ffiUtil = require("ffi/util")
 local buffer = require("string.buffer")
-local socket = require("socket") 
+local socket = require("socket")
 local Device = require("device")
 
 local M = { channels = {} }
@@ -26,7 +26,12 @@ Channel.__index = Channel
 function Channel:new(name, max_workers, on_finish, start_paused)
     local obj = setmetatable({}, self)
     obj.name = name
-    obj.max_workers = max_workers or 1
+
+    max_workers = tonumber(max_workers) or 1
+    max_workers = math.floor(max_workers)
+    if max_workers < 1 then max_workers = 1 end
+    obj.max_workers = max_workers
+
     obj.active_workers = 0
     obj.session = 0
     obj.queue = {}
@@ -99,7 +104,7 @@ function Channel:_processNext()
             local wait_time = self.cooldown_until - now
             UIManager:scheduleIn(wait_time, function()
                 self._cooldown_timer_scheduled = false
-                self:_processNext() 
+                self:_processNext()
             end)
         end
         return 
@@ -122,13 +127,20 @@ function Channel:_processNext()
         actual_args = (gen_ok and gen_args ~= nil) and gen_args or nil
         if not actual_args then
             logger.dbg("Channel: Args generation failed, aborting task", self.name)
+            self.running_tasks[task.id] = nil
+            self.active_workers = self.active_workers - 1
+            if self.active_workers < 0 then
+                logger.err("Channel: active_workers underflow:", self.name, self.active_workers)
+                self.active_workers = 0
+            end
+
             safe_call("callback", task.callback, false, "Arguments generation failed", task.current_retry)
             UIManager:nextTick(function() self:_processNext() end)
             return
         end
     end
 
-     actual_args = actual_args or {} 
+    actual_args = actual_args or {}
     local execute_func
     if actual_args and type(actual_args) == "table" then
         local unpack_func = table.unpack or unpack
@@ -138,37 +150,43 @@ function Channel:_processNext()
     end
 
     if task.max_retries == 0 or task.args_generator then
-        task.args = nil 
+        task.args = nil
     end
 
     if task.on_start then
         safe_call("on_start", task.on_start, task.current_retry)
-        task.on_start = nil 
+        task.on_start = nil
     end
     if self.active_workers == 1 then M.requestHighCPU() end
     logger.dbg("Channel:_processNext - START", self.name)
 
+    local finished = false
     local function finish_callback(ok, r1, r2)
+        if finished then
+            logger.warn("Channel: duplicate finish_callback ignored:", self.name, task.id)
+            return
+        end
+        finished = true
         logger.dbg("Channel:_processNext - END", self.name)
         self.running_tasks[task.id] = nil
         
         if task.delay and type(task.delay) == "number" and task.delay > 0 then
             self.cooldown_until = socket.gettime() + task.delay
         end
-        
+
         if task.session == self.session then
             local success = false
             local final_result = nil
             local final_error = nil
-            
+
             if not ok then
-                 success = false
+                success = false
                 final_error = tostring(r1)
             elseif r1 == false then
-               success = false
+                success = false
                 final_error = r2 or "Task soft-failed without error message"
             else
-                success = (actual_args ~= nil) 
+                success = (actual_args ~= nil)
                 final_result = r1
                 if not success then final_error = "Arguments generation failed" end
             end
@@ -177,9 +195,9 @@ function Channel:_processNext()
                 safe_call("callback", task.callback, true, final_result, task.current_retry)
             else
                 if task.current_retry < task.max_retries then
-                     task.current_retry = task.current_retry + 1
-                     task.status = "pending"
-                     task.pid = nil
+                    task.current_retry = task.current_retry + 1
+                    task.status = "pending"
+                    task.pid = nil
                     table.insert(self.queue, 1, task)
                     logger.dbg(string.format("Channel '%s': Task failed, retrying... (%d/%d)", self.name, task.current_retry, task.max_retries))
                 else
@@ -192,6 +210,11 @@ function Channel:_processNext()
         end
 
         self.active_workers = self.active_workers - 1
+        if self.active_workers < 0 then
+            logger.err("Channel: active_workers underflow:", self.name, self.active_workers)
+            self.active_workers = 0
+        end
+
         if #self.queue == 0 and self.active_workers == 0 then
             M.releaseHighCPU()
             if not self.did_abort_current_drain then
@@ -212,7 +235,7 @@ function Channel:_processNext()
         task.pid = "main"
         local job_ok, r1, r2 = safe_call("run_in_main", execute_func)
         UIManager:nextTick(function() finish_callback(job_ok, r1, r2) end)
-        return 
+        return
     end
 
     local timeout = task.timeout or 1200
@@ -224,12 +247,12 @@ function Channel:clearTasks()
     local had_tasks = (#self.queue > 0 or self.active_workers > 0)
     self.queue = {}
     self.session = self.session + 1
-    self.cooldown_until = 0 
-    
+    self.cooldown_until = 0
+
     local hooks = self.session_abort_hooks
-    self.session_abort_hooks = {} 
+    self.session_abort_hooks = {}
     for _, hook in pairs(hooks) do safe_call("session_abort_hook", hook) end
-    
+
     self.did_abort_current_drain = true
     if had_tasks and self.on_finish then
         logger.dbg("Channel: Forcefully aborted:", self.name)
@@ -262,10 +285,10 @@ function Channel:executeBatch(params)
     local on_batch_end = params.on_batch_end
     local aggregate = params.aggregate or false
 
-    
+
     if not task_func then return end
     self:clearTasks()
-    
+
     local total_count = #items
     if total_count == 0 then
         if on_batch_end then safe_call("end", on_batch_end, false, {}) end
@@ -277,7 +300,7 @@ function Channel:executeBatch(params)
     local results_map = (aggregate == true) and {} or nil 
     self.batch_counter = (self.batch_counter or 0) + 1
     local batch_id = "batch_" .. self.batch_counter 
-    
+
     self.session_abort_hooks[batch_id] = function()
         if not is_aborted then
             is_aborted = true
@@ -289,13 +312,13 @@ function Channel:executeBatch(params)
     for i, item in ipairs(items) do
         local wrap_start = on_start and function(retry) on_start(i, item, retry) end or nil
         local args_gen = get_task_args and function(retry) return get_task_args(item, retry) end or nil
-        
+
         local wrap_end = function(success, result, retries_used)
-            if is_aborted then return end 
+            if is_aborted then return end
 
             completed_count = completed_count + 1
             if results_map then results_map[i] = { success = success, result = result, retries_used = retries_used } end
-            
+
             local should_abort = false
             if on_item_end then
                 -- if on_item_end crashes, return nil here, convert to false without blocking subsequent tasks
@@ -308,22 +331,22 @@ function Channel:executeBatch(params)
             if should_abort or completed_count == total_count then
                 is_aborted = true
                 self.session_abort_hooks[batch_id] = nil
-                
+
                 if should_abort then self:clearTasks() end
                 if on_batch_end then safe_call("end", on_batch_end, should_abort, results_map) end
             end
         end
 
         self:pushTask(task_func, wrap_end, {
-            args = (not args_gen) and {item} or nil, 
-            args_generator = args_gen,
-            on_start = wrap_start,
-            max_retries = params.max_retries,
-            timeout = params.timeout,
-            returns_string = params.returns_string,
-            insert_at_head = params.insert_at_head,
-            delay = params.delay,
-            run_in_main = params.run_in_main
+                args = (not args_gen) and {item} or nil,
+                args_generator = args_gen,
+                on_start = wrap_start,
+                max_retries = params.max_retries,
+                timeout = params.timeout,
+                returns_string = params.returns_string,
+                insert_at_head = params.insert_at_head,
+                delay = params.delay,
+                run_in_main = params.run_in_main
         })
     end
 end
@@ -415,14 +438,14 @@ function Channel:executeTree(params)
 
         self:pushTask(task.func, wrap_end, {
             args = (not args_gen) and task.args or nil,
-            args_generator = args_gen,
-            on_start = task.on_start,
-            max_retries = task.max_retries,
-            timeout = task.timeout,
-            returns_string = task.returns_string,
-            insert_at_head = task.insert_at_head,
-            delay = task.delay,
-            run_in_main = task.run_in_main 
+                args_generator = args_gen,
+                on_start = task.on_start,
+                max_retries = task.max_retries,
+                timeout = task.timeout,
+                returns_string = task.returns_string,
+                insert_at_head = task.insert_at_head,
+                delay = task.delay,
+                run_in_main = task.run_in_main
         })
     end
 
@@ -440,9 +463,9 @@ function M:getChannel(name) return self.channels[name] or self:createChannel(nam
 
 function M:destroyChannel(name)
     local ch = self.channels[name]
-    if ch then 
+    if ch then
         ch:clearTasks()
-        self.channels[name] = nil 
+        self.channels[name] = nil
     end
 end
 
@@ -455,19 +478,19 @@ function Channel:getStatus()
     for _, t in ipairs(self.queue) do
         table.insert(pending, { id = t.id, trace_id = t.trace_id, retry = t.current_retry })
     end
-    
+
     local running = {}
     for id, t in pairs(self.running_tasks) do
         table.insert(running, {
-            id = id,
-            trace_id = t.trace_id,
-            pid = t.pid,
-            retry = t.current_retry,
+                id = id,
+                trace_id = t.trace_id,
+                pid = t.pid,
+                retry = t.current_retry,
             is_orphaned = (t.session ~= self.session),
             elapsed = socket.gettime() - (t.start_time or socket.gettime())
         })
     end
-    
+
     return {
         name = self.name,
         active_workers = self.active_workers,
@@ -508,12 +531,12 @@ function M.releaseHighCPU()
         M._cpu_downgrade_timer_cancel = nil
     end
     M._cpu_downgrade_timer_cancel = M.delay(3.0, function()
-        local is_busy = M:hasAnyTasks()
+            local is_busy = M:hasAnyTasks()
         if not is_busy and (M._active_processes or 0) <= 0 then
             pcall(function() Device:enableCPUCores(1) end)
-        end
-        M._cpu_downgrade_timer_cancel = nil
-    end)
+            end
+            M._cpu_downgrade_timer_cancel = nil
+        end)
 end
 
 function M.spawnProcess(job, callback, timeout, returns_simple_string)
@@ -524,13 +547,18 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
     local pid, parent_read_fd = nil, nil
     local poll_count = 0
     local check_interval_sec = 0.125
+    local delivered = false
 
     local function deliver_result(ok, r1, r2)
+        if delivered then logger.warn("spawnProcess - duplicate result ignored")
+            return
+        end
+        delivered = true
         if parent_read_fd then
             pcall(ffiUtil.readAllFromFD, parent_read_fd)
             parent_read_fd = nil
         end
-        
+
         M._active_processes = M._active_processes - 1
         if M._active_processes <= 0 then
             M._active_processes = 0
@@ -541,40 +569,40 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
             callback(ok, r1, r2)
         end
     end
-    
+
     pid, parent_read_fd = ffiUtil.runInSubProcess(function(_pid, child_write_fd)
         local job_ok, r1, r2 = pcall(job)
-        local output_str = nil
+                local output_str = nil
         local need_pack = not returns_simple_string
-        if returns_simple_string then
+                if returns_simple_string then
             if job_ok and type(r1) == "string" then
                 output_str = "\x01" .. r1
-                need_pack = false
-            else
-                need_pack = true 
-                if not job_ok then
+                        need_pack = false
+                    else
+                        need_pack = true
+                        if not job_ok then
                     logger.dbg("spawnProcess - execute_func crashed:", r1)
-                else
+                        else
                     logger.dbg("spawnProcess - returned value from task_func is not a string")
                     r1 = "returned value from task_func is not a string"
-                    job_ok = false
+                            job_ok = false
+                        end
+                    end
                 end
-            end
-        end
-        if need_pack then
+                if need_pack then
             local ret_tbl = { ok = job_ok, r1 = r1, r2 = r2 }
             local enc_ok, str = pcall(buffer.encode, ret_tbl)
-            if enc_ok and str then
-                output_str = str
-            else
+                    if enc_ok and str then
+                        output_str = str
+                    else
                 logger.dbg("spawnProcess - serialization failed:", str or "unknown error")
                 ret_tbl = { ok = false, r1 = "serialization_error", r2 = tostring(str) }
                 output_str = buffer.encode(ret_tbl) or ""
-            end
-            if returns_simple_string then
+                    end
+                    if returns_simple_string then
                 output_str = "\x02" .. output_str
-            end 
-        end
+                    end
+                end
         ffiUtil.writeToFD(child_write_fd, output_str or "", true)
     end, true)
 
@@ -586,7 +614,7 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
 
     local function poll()
         poll_count = poll_count + 1
-        
+
         local function safe_collect_and_clean(target_pid, fd_to_close, max_retries, retry_interval, debug_tag)
             local retry_count = 0
             local function cleaner_step()
@@ -601,12 +629,12 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
                         if ffiUtil.isSubProcessDone(target_pid) then
                             logger.warn("spawnProcess - cleaner_step max_retries, force killed and exited", target_pid)
                             if fd_to_close then pcall(ffiUtil.readAllFromFD, fd_to_close) end
-                        end
+                            end
                     end)
                 else
                     if fd_to_close and ffiUtil.getNonBlockingReadSize(fd_to_close) ~= 0 then
                         pcall(ffiUtil.readAllFromFD, fd_to_close)
-                        fd_to_close = nil 
+                        fd_to_close = nil
                     end
                     UIManager:scheduleIn(retry_interval, cleaner_step)
                 end
@@ -662,11 +690,11 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
                     ok, r1, r2 = false, "empty_pipe_error", nil
                 end
             end
-            
+
             if not subprocess_done then
                 safe_collect_and_clean(pid, parent_read_fd, 3, 1, "pre-read subprocess")
             end
-            
+
             deliver_result(ok, r1, r2)
         else
             if check_interval_sec < 1 and poll_count % 10 == 0 then
