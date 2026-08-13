@@ -63,7 +63,6 @@ function M:_finalize(is_aborted)
 
     local close_ok = true
     if self.writer then
-        -- 收尾条目（如 ComicInfo.xml）：在关闭 zip 前追加，PageCount 可用实际写入数
         if type(self.params.finalize_callback) == "function" then
             local entries_ok, entries = pcall(self.params.finalize_callback, {
                 aborted = self.aborted,
@@ -72,21 +71,35 @@ function M:_finalize(is_aborted)
                 succeeded = self.succeeded,
                 failed = self.failed,
             })
-            if entries_ok and type(entries) == "table" then
+            if not entries_ok then
+                close_ok = false
+                logger.err("CBZ finalize_callback failed:", tostring(entries))
+            elseif type(entries) == "table" then
                 for _, entry in ipairs(entries) do
                     if type(entry) == "table" and entry.name and type(entry.data) == "string" then
-                        local add_ok, add_err = pcall(self.writer.add, self.writer, entry.name, entry.data, entry.no_compression)
-                        if not add_ok or add_err == false then
+                        local call_ok, add_ok, add_err = pcall(self.writer.add, self.writer, entry.name, entry.data, entry.no_compression)
+                        if not call_ok then
                             close_ok = false
-                            logger.warn("finalize entry add failed:", entry.name, tostring(add_err))
+                            logger.warn("finalize entry add panic:", entry.name, tostring(add_ok))
+                            break
+                        end
+                        if add_ok ~= true then
+                            close_ok = false
+                            logger.warn("finalize entry add failed:", entry.name, tostring(add_err or add_ok))
                             break
                         end
                     end
                 end
             end
         end
-        local ok, ret = pcall(self.writer.close, self.writer)
-        close_ok = close_ok and (ok and ret ~= false)
+        local close_call_ok, close_ret, close_err = pcall(self.writer.close, self.writer)
+        if not close_call_ok then
+            close_ok = false
+            logger.err("CBZ writer close panic:", tostring(close_ret))
+        elseif close_ret == false then
+            close_ok = false
+            logger.err("CBZ writer close failed:", tostring(close_err or "unknown error"))
+        end
         self.writer = nil
     end
 
@@ -154,8 +167,10 @@ function M:start(params)
     if not new_ok or not writer then
         return nil, "failed to init zip backend: " .. tostring(writer)
     end
-    if not writer:open(self.output) then
-        return nil, "failed to open cbz: " .. self.output
+    local open_ok, open_err = writer:open(self.output)
+    if not open_ok then
+        pcall(writer.close, writer)
+        return nil, "failed to open cbz: " .. self.output .. (open_err and (": " .. tostring(open_err)) or "")
     end
     self.writer = writer
 
@@ -297,20 +312,25 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
     if not new_ok or not writer then
         error("CreateCBZ init zip backend err: " .. tostring(writer))
     end
-    if not writer:open(cbz_path_tmp) then
-        error("CreateCBZ cbz:open err: " .. cbz_path_tmp)
+    local open_ok, open_err = writer:open(cbz_path_tmp)
+    if not open_ok then
+        pcall(writer.close, writer)
+        if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        error("CreateCBZ cbz:open err: " .. cbz_path_tmp .. (open_err and (": " .. tostring(open_err)) or ""))
     end
 
     local mimetype_ok, mimetype_err = writer:add("mimetype", "application/vnd.comicbook+zip", true)
     if not mimetype_ok then
-        writer:close()
+        pcall(writer.close, writer)
+        if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
         error("CreateCBZ write mimetype err: " .. tostring(mimetype_err))
     end
 
     local succeeded = 0
     local strict = (opts.allow_failed == false)
     local function abort(msg)
-        writer:close()
+        pcall(writer.close, writer)
+        if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
         error(msg)
     end
 
@@ -332,7 +352,6 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
         end
         local imgdata, img_extension = ImageUtil.download_image(url, {
             timeout = opts.timeout,
-            maxtime = opts.maxtime,
             headers = opts.headers,
         })
         if not imgdata then
@@ -365,14 +384,17 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
     for i, img_src in ipairs(img_sources) do
         process_one(i, img_src)
     end
-    -- ComicInfo.xml（zip 末尾追加，PageCount = 实际成功图片数）
     if succeeded > 0 then
         local comic_ok, comic_err = writer:add("ComicInfo.xml", ZipUtil.createComicInfo(opts.comic_info, succeeded), true)
         if not comic_ok then
             logger.warn("CreateCBZ: ComicInfo.xml add failed:", tostring(comic_err))
         end
     end
-    writer:close()
+    local close_ok, close_err = writer:close()
+    if not close_ok then
+        if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        error("CreateCBZ cbz:close err: " .. tostring(close_err))
+    end
     if succeeded == 0 then
         if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
         error("CreateCBZ: no image downloaded")
@@ -383,6 +405,7 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
     end
     local ok_rename, rename_err = os.rename(cbz_path_tmp, filePath)
     if not ok_rename then
+        if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
         error(string.format("CreateCBZ rename err: %s", tostring(rename_err)))
     end
     return filePath
@@ -452,7 +475,6 @@ function M:from_urls_async(params)
         downimg = function(url, item)
             local data = ImageUtil.download_image(url, {
                 timeout = opts.timeout,
-                maxtime = opts.maxtime,
                 headers = opts.headers,
             })
             return data

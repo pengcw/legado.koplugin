@@ -175,7 +175,7 @@ function M.get_url_extension(url)
 end
 
 -- success: data, ext | fail: nil, err
--- opts: timeout(15), maxtime(60), headers
+-- opts: timeout(总超时, 默认 60), headers
 function M.download_image(url, opts)
     if type(url) ~= "string" or url == "" then
         return nil, "invalid image url"
@@ -184,8 +184,7 @@ function M.download_image(url, opts)
 
     local ok, resp = httpReq({
         url = url,
-        timeout = opts.timeout or 15,
-        maxtime = opts.maxtime or 60,
+        timeout = opts.timeout or 60,
         headers = opts.headers,
         is_pic = true,
     }, true)

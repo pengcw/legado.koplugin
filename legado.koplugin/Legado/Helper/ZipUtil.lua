@@ -97,7 +97,6 @@ function Writer:add(
     end
     if content == nil then return false, "content is nil" end
     if type(content) ~= "string" then return false, "content must be a string" end
-    if #content == 0 then return false, "content is empty" end
     local ok, result
     if self.backend_type == "archiver" then
         -- set compression before addFileFromMemory()
@@ -228,6 +227,9 @@ function Reader:open(path)
         return nil, "invalid zip file path"
     end
     if self._mode == "archiver" then
+        pcall(function() self._archive:close() end)
+        self._archive.size = 0
+        self._archive.entries = {}
         if not self._archive:open(path) then
             return nil, self._archive.err or "open failed"
         end
@@ -252,7 +254,10 @@ local function ensure_extracted(self)
         os.remove(f) -- tmpname path usually doesn't exist, remove just in case.
         self._tmp_dir = f
     end
-    util.makePath(self._tmp_dir)
+    local make_ok, make_err = util.makePath(self._tmp_dir)
+    if not make_ok and not util.directoryExists(self._tmp_dir) then
+        return nil, "cannot create temporary directory: " .. tostring(make_err)
+    end
     local cmd = string.format("unzip -qqo '%s' -d '%s'",
         shell_escape(self._path), shell_escape(self._tmp_dir))
     local ok = os.execute(cmd)
@@ -322,7 +327,9 @@ function Reader:extractAll(dest_dir, exclude_patterns)
 
     if not util.directoryExists(dest_dir) then
         local ok, err = util.makePath(dest_dir)
-        if not ok then return false, "无法创建目标目录: " .. tostring(err) end
+        if not ok and not util.directoryExists(dest_dir) then
+            return false, "无法创建目标目录: " .. tostring(err)
+        end
     end
 
     if self._mode == "archiver" then
@@ -344,7 +351,10 @@ function Reader:extractAll(dest_dir, exclude_patterns)
                         parent_dir = util.splitFilePathName(target_full_path)
                     end
                     if parent_dir and not util.directoryExists(parent_dir) then
-                        util.makePath(parent_dir)
+                        local make_ok, make_err = util.makePath(parent_dir)
+                        if not make_ok and not util.directoryExists(parent_dir) then
+                            error("failed to create directory: " .. tostring(make_err))
+                        end
                     end
                     if entry.mode ~= "directory" then
                         if entry.mode ~= "file" then
@@ -418,6 +428,7 @@ function ZipUtil.createComicInfo(bookinfo, total_pages)
             :gsub("\"", "&quot;")
             :gsub("'", "&apos;")
     end
+    local page_count = tonumber(total_pages) or 0
     return string.format([[<?xml version="1.0" encoding="utf-8"?>
 <ComicInfo xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
   <Title>%s</Title>
@@ -434,7 +445,7 @@ function ZipUtil.createComicInfo(bookinfo, total_pages)
         escape_xml(bookinfo.name),
         escape_xml(bookinfo.author),
         escape_xml(bookinfo.kind or "漫画"),
-        total_pages,
+        page_count,
         escape_xml(bookinfo.intro or "")
     )
 end

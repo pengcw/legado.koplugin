@@ -247,7 +247,7 @@ function M.process_link(book_cache_id, resources_src, base_url, is_proxy, opts, 
     end
 
 
-    local status, err = httpReq({ url = processed_src, timeout = 15, maxtime = 60 }, true)
+    local status, err = httpReq({ url = processed_src, timeout = 60 }, true)
     if status and H.is_tbl(err) and err["data"] then
         ext = (not ext or ext == "") and err["ext"] or ext
         resources_filename = ext ~= "" and string.format("%s.%s", resources_id, ext) or resources_id
@@ -372,7 +372,7 @@ function M.analyzing(chapter, content, filePath, opts)
             -- 一张图片就不打包cbz了
             if #img_sources == 1 then
                 local res_url = img_sources[1]
-                local status, err = httpReq({ url = res_url, timeout = 15, maxtime = 60, is_pic = true }, true)
+                local status, err = httpReq({ url = res_url, timeout = 60, is_pic = true }, true)
                 if not status or not (H.is_tbl(err) and err["data"]) then error('单图下载失败') end
 
                 local ext = ImageUtil.get_url_extension(res_url)
@@ -390,7 +390,7 @@ function M.analyzing(chapter, content, filePath, opts)
         local html_url = opts.getProxyEpubUrl(bookUrl, first_line)
         if not html_url or html_url == '' then error('转换失败') end
         
-        local status, err = httpReq({ url = html_url, timeout = 15, maxtime = 60 }, true)
+        local status, err = httpReq({ url = html_url, timeout = 60 }, true)
         if not status or not (H.is_tbl(err) and err["data"]) then error('XHTML 请求错误/数据为空') end
 
         local ext, original_name = ImageUtil.get_url_extension(first_line)
