@@ -48,15 +48,7 @@ function M:reader3Login()
         return false, '获取 Token 失败:' .. tostring(res.body.errorMsg or "")
     end
 
-    if not self.tokenManager then
-        local AuthToken = self.AuthToken or require("Legado.spore.base").AuthToken
-        if AuthToken and AuthToken.new then
-            self.tokenManager = AuthToken:new(self.name)
-        end
-    end
-    if self.tokenManager then
-        self.tokenManager:set(res.body.data.accessToken)
-    end
+    self:ensureTokenManager():set(res.body.data.accessToken)
     return true, res.body.data.accessToken
 end
 
