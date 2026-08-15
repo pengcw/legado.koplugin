@@ -93,9 +93,12 @@ function M:getChapterList(bookinfo, callback)
   end
 
   local bookUrl = bookinfo.bookUrl
+  -- refresh=true：仅清除缓存场景强制绕过服务器目录缓存
+  local refresh = bookinfo.refresh == true and 1 or 0
   return self:handleResponse(function()
         return self.client:getChapterList({
             url = bookUrl,
+            refresh = refresh,
             v = os.time()
         })
   end, callback, {
@@ -193,25 +196,54 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
     return htmlUrl
 end
 
-function M:getAvailableBookSource(options, callback)
+function M:getAvailableBookSource(options, on_finish, on_chunk)
     if not (H.is_tbl(options) and H.is_str(options.book_url) and 
         options.name) then
-        return nil, '获取可用书源参数错误'
+        if H.is_func(on_finish) then on_finish(false, '获取可用书源参数错误') end
+        return nil
     end
+    on_finish = H.is_func(on_finish) and on_finish or function() end
+    on_chunk = H.is_func(on_chunk) and on_chunk or function() end
 
-    local bookUrl = options.book_url
     local name = options.name
     local author = options.author
 
-    local ret, err_msg = self:_searchBookSocket(name, {
-        name = name,
-        author = author
-    })
-    if ret == nil then
-        return ret, err_msg or "未知错误"
-    else
-        return {list = ret}
+    -- 按 origin 去重（与 qread 一致，避免同源重复）
+    local finish_sent = false
+    local all_results = {}
+    local seen_origin = {}
+    local function send_finish(success, data, msg, last_index)
+        if finish_sent then return end
+        finish_sent = true
+        pcall(on_finish, success, data, msg, last_index)
     end
+
+    return self:searchBookMulti({
+        search_text = name,
+        name = name,
+        author = author,
+    }, function(chunk)
+        local new_chunk = {}
+        if H.is_tbl(chunk) then
+            for _, book in ipairs(chunk) do
+                local origin = book.origin
+                if H.is_str(origin) and not seen_origin[origin] then
+                    seen_origin[origin] = true
+                    table.insert(all_results, book)
+                    table.insert(new_chunk, book)
+                end
+            end
+        end
+        if #new_chunk > 0 then
+            pcall(on_chunk, new_chunk)
+        end
+    end, function(success, msg, server_last_index)
+        if success then
+            send_finish(true, { list = all_results }, nil, server_last_index)
+        else
+            send_finish(false, nil, msg or "搜索失败")
+        end
+    end)
 end
 
 function M:changeBookSource(new_book_source, callback)
@@ -272,23 +304,21 @@ function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
     }, 'getBookSourcesExploreUrl')
 end
 
-function M:searchBookMulti(options, callback)
-    local search_text = options.search_text
-    local ret, err_msg = self:_searchBookSocket(search_text)
-    if ret == nil then
-        return ret, err_msg or "未知错误"
-    else
-        return { list = ret, lastIndex = -1 }
+function M:searchBookMulti(options, on_chunk, on_finish)
+    if not (H.is_tbl(options) and H.is_str(options.search_text) and options.search_text ~= '') then
+        if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
+        return nil
     end
-end
-
-function M:searchBookMultiAsync(options, on_chunk, on_finish)
-    local search_text = options.search_text or ""
+    local search_text = options.search_text
     local timeout = 60
     local is_exact_search = false
     if string.sub(search_text, 1, 1) == '=' then
         search_text = string.sub(search_text, 2)
         is_exact_search = true
+    end
+    if search_text == '' then
+        if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
+        return nil
     end
 
     local JSON = require("json")
@@ -310,6 +340,19 @@ function M:searchBookMultiAsync(options, on_chunk, on_finish)
     
     local function filter_even(book)
         if not H.is_tbl(book) then return false end
+        -- 换源场景：options 带 name/author 时精确匹配（与 _searchBookSocket 一致）
+        local has_name_filter = H.is_str(options and options.name) and options.name ~= ""
+        local has_author_filter = H.is_str(options and options.author) and options.author ~= ""
+        local has_origin_filter = H.is_str(options and options.origin) and options.origin ~= ""
+        if has_name_filter or has_author_filter or has_origin_filter then
+            local match_name = has_name_filter and H.is_str(book.name) and book.name == options.name
+            local match_author = has_author_filter and H.is_str(book.author) and book.author == options.author
+            local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == options.origin
+            if has_name_filter and not match_name then return false end
+            if has_author_filter and not match_author then return false end
+            if has_origin_filter and not match_origin then return false end
+            return true
+        end
         if is_exact_search then
             return (book.name == search_text) or (book.author == search_text)
         end

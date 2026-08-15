@@ -1,4 +1,3 @@
-local logger = require("logger")
 local util = require("util")
 local socket_url = require("socket.url")
 local H = require("Legado/Helper")
@@ -11,13 +10,47 @@ local M = LegadoSpec:extend{
   settings = nil,
 }
 
+local function filter_search_book(book, search_text, is_exact_search, options)
+    if not H.is_tbl(book) then return false end
+    local has_name_filter = H.is_str(options and options.name) and options.name   ~= ""
+    local has_author_filter = H.is_str(options and options.author) and options.author ~= ""
+    local has_origin_filter = H.is_str(options and options.origin) and options.origin ~= ""
+    if has_name_filter or has_author_filter or has_origin_filter then
+        local match_name = has_name_filter and H.is_str(book.name) and book.name == options.name
+        local match_author = has_author_filter and H.is_str(book.author) and book.author == options.author
+        local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == options.origin
+
+        if has_name_filter and not match_name then return false end
+        if has_author_filter and not match_author then return false end
+        if has_origin_filter and not match_origin then return false end
+
+        return true
+    end
+    if is_exact_search then
+        return (H.is_str(book.name) and book.name == search_text)
+            or (H.is_str(book.author) and book.author == search_text)
+    end
+    return true
+end
+
+-- 打乱书源顺序，避免总是优先命中固定书源
+local function source_list_shuffle(t)
+    if type(t) ~= "table" or #t <= 1 then return t end
+    local n = #t
+    math.randomseed(os.time() + math.random(1000, 9999))
+    for i = n, 2, -1 do
+        local j = math.random(i)
+        t[i], t[j] = t[j], t[i]
+    end
+    return t
+end
+
 function M:init()
     LegadoSpec.init(self)
 end
 
 function M:reader3Login()
     local socketutil = require("socketutil")
-    local server_address = self.settings['server_address']
     local reader3_un = self.settings.reader3_un
     local reader3_pwd = self.settings.reader3_pwd
 
@@ -117,11 +150,13 @@ function M:getChapterListNew(bookinfo, callback)
     local bookUrl = bookinfo.bookUrl
     local bookSourceUrl = bookinfo.origin
     local bookname = H.is_str(bookinfo.name) and bookinfo.name or (H.is_str(bookinfo.bookname) and bookinfo.bookname or "")
+    -- refresh=true：仅清除缓存场景绕过 24h 目录缓存
+    local needRefresh = bookinfo.refresh == true and 1 or 0
     return self:handleResponse(function()
           return self.client:getChapterListNew({
               bookSourceUrl = bookSourceUrl,
               url = bookUrl,
-              needRefresh = 0,
+              needRefresh = needRefresh,
               useReplaceRule = 1,
               bookname = bookname,
           })
@@ -136,10 +171,10 @@ function M:getBookContentNew(chapter, callback)
     end
 
   local bookUrl = chapter.bookUrl
-  local chapters_index = chapter.chapters_index
   local down_chapters_index = chapter.chapters_index
   local bookSourceUrl = chapter.origin
-  local bookname = H.is_str(chapter.book_name) and chapter.book_name or ""
+  -- 书名统一用 name 字段（DB 源头补充；所有章节来源均带 name）
+  local bookname = H.is_str(chapter.name) and chapter.name or ""
 
   local ret, err_msg = self:handleResponse(function()
       -- data={rules, text}
@@ -327,7 +362,7 @@ function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
     return explore_url
 end
 
-function M:getAvailableBookSource2(options, callback)
+function M:getAvailableBookSource2(options, _)
     if not (H.is_tbl(options) and H.is_str(options.book_url)) then
         return nil, '获取可用书源参数错误'
     end
@@ -351,27 +386,57 @@ function M:getAvailableBookSource2(options, callback)
     end
 end
 
-function M:getAvailableBookSource(options, callback)
+function M:getAvailableBookSource(options, on_finish, on_chunk)
     if not (H.is_tbl(options) and H.is_str(options.book_url) and 
             H.is_str(options.name) and options.name~= "" ) then
-        return nil, '获取可用书源参数错误'
+        if H.is_func(on_finish) then on_finish(false, '获取可用书源参数错误') end
+        return nil
     end
-    local bookUrl = options.book_url
+    on_finish = H.is_func(on_finish) and on_finish or function() end
+    on_chunk = H.is_func(on_chunk) and on_chunk or function() end
+
     local book_name = options.name
     local book_author = options.author
-  
-    local ret, err_msg = self:searchBookMulti({
+
+    -- 按 origin 去重（服务器模糊搜索返回同源重复；同名异作者靠 UI 区分）
+    local cancel_func
+    local finish_sent = false
+    local all_results = {}
+    local seen_origin = {}
+    local function send_finish(success, data, msg, last_index)
+        if finish_sent then return end
+        finish_sent = true
+        pcall(on_finish, success, data, msg, last_index)
+    end
+
+    cancel_func = self:searchBookMulti({
         search_text = book_name,
         name = book_name,
         author = book_author,
-    })
-    if not (H.is_tbl(ret) and H.is_tbl(ret.list)) then
-        return nil, err_msg and tostring(err_msg) or "未知错误"
-    end
-    if H.is_func(callback) then
-        return callback(ret)
-    end
-    return ret
+    }, function(chunk)
+        local new_chunk = {}
+        if H.is_tbl(chunk) then
+            for _, book in ipairs(chunk) do
+                local origin = book.origin
+                if H.is_str(origin) and not seen_origin[origin] then
+                    seen_origin[origin] = true
+                    table.insert(all_results, book)
+                    table.insert(new_chunk, book)
+                end
+            end
+        end
+        if #new_chunk > 0 then
+            pcall(on_chunk, new_chunk)
+        end
+    end, function(success, msg, server_last_index)
+        if success then
+            send_finish(true, { list = all_results }, nil, server_last_index)
+        else
+            send_finish(false, nil, msg or "搜索失败")
+        end
+    end)
+
+    return cancel_func
 end
 
 function M:searchBookSingle(options, callback)
@@ -382,7 +447,6 @@ function M:searchBookSingle(options, callback)
 
     local search_text = options.search_text
     local bookSourceUrl = options.book_source_url
-    local concurrentCount = options.concurrent_count or 32
 
     return self:handleResponse(function()
         -- data = bookinfolist
@@ -509,7 +573,7 @@ function M:getProxyCoverUrl(coverUrl)
     return server_address .. '/proxypng?url=' .. util.urlEncode(coverUrl)
 end
 
-function M:getProxyImageUrl(bookUrl, img_src)
+function M:getProxyImageUrl(_, img_src)
     if not H.is_str(img_src) or img_src == "" then return img_src end
     if string.sub(img_src, 1, 11) == "data:image/" then
         return img_src
@@ -530,99 +594,111 @@ function M:getProxyImageUrl(bookUrl, img_src)
     return server_address .. '/proxypng?url=' .. util.urlEncode(img_src)
 end
 
-function M:searchBookMulti(options, callback)
+function M:searchBookMulti(options, on_chunk, on_finish)
     if not (H.is_tbl(options) and H.is_str(options.search_text) and options.search_text ~= '') then
-        return nil, "输入参数错误"
+        if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
+        return nil
     end
 
     local is_exact_search = false
     local search_text = util.trim(options.search_text)
-
     if string.sub(search_text, 1, 1) == "=" then
         is_exact_search = true
         search_text = util.trim(string.sub(search_text, 2))
     end
-
     if search_text == '' then
-        return nil, "输入参数错误"
+        if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
+        return nil
     end
 
     local book_sources, err_msg = self:getBookSourcesList()
     if not (H.is_tbl(book_sources) and H.is_tbl(book_sources[1])) then
-        return nil, err_msg or "获取书源列表失败"
+        if H.is_func(on_finish) then on_finish(false, err_msg or "获取书源列表失败") end
+        return nil
     end
 
-    local function filter_even(book)
-        if not H.is_tbl(book) then return false end
-        local has_name_filter = H.is_str(options and options.name) and options.name   ~= ""
-        local has_author_filter = H.is_str(options and options.author) and options.author ~= ""
-        local has_origin_filter = H.is_str(options and options.origin) and options.origin ~= ""
-        if has_name_filter or has_author_filter or has_origin_filter then
-            local match_name = has_name_filter and H.is_str(book.name) and book.name == options.name
-            local match_author = has_author_filter and H.is_str(book.author) and book.author == options.author
-            local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == options.origin
-            
-            if has_name_filter and not match_name then return false end
-            if has_author_filter and not match_author then return false end
-            if has_origin_filter and not match_origin then return false end
-
-            return true
-        end
-        if is_exact_search then
-            return (H.is_str(book.name) and book.name == search_text)
-                or (H.is_str(book.author) and book.author == search_text)
-        end
-        return true
-    end
-
-    local function source_list_shuffle(t)
-        if type(t) ~= "table" or #t <= 1 then return t end
-        local n = #t
-        math.randomseed(os.time() + math.random(1000, 9999))
-        for i = n, 2, -1 do
-            local j = math.random(i)
-            t[i], t[j] = t[j], t[i]
-        end
-        return t
-    end
-    
-    local all_results = {}
-    book_sources = source_list_shuffle(book_sources)
-
-    for i, source in ipairs(book_sources) do
-        -- 有的人有千多个源，最多搜索500 TODO 多进程搜索？
-        if i > 500 then break end
+    local active_sources = {}
+    for _, source in ipairs(book_sources) do
         if H.is_tbl(source) and source.enabled and H.is_str(source.bookSourceUrl) and
                 source.bookSourceUrl ~= "" then
-            logger.dbg("Searching in source:", source.bookSourceName)
-            local single_options = {
-                search_text = search_text,
-                book_source_url = source.bookSourceUrl,
-            }
-
-            local results, err = self:searchBookSingle(single_options)
-
-            if H.is_tbl(results) and H.is_tbl(results[1]) and H.is_str(results[1].bookUrl) and results[1].bookUrl ~= "" then
-                for _, book in ipairs(results) do
-                    if H.is_tbl(book) and filter_even(book) and H.is_str(book.name) and book.name ~= "" and
-                            H.is_str(book.bookUrl) and  book.bookUrl ~= "" then
-                        table.insert(all_results, book)
-                    end
-                end
-            else
-                -- logger.warn("Search failed for source:", tostring(err))
-            end
-        else
-            logger.warn("Search failed for source:", source and source.bookSourceName or "")
+            table.insert(active_sources, source)
         end
     end
-    if H.is_func(callback) then
-        return callback({list = all_results})
+    if #active_sources == 0 then
+        if H.is_func(on_finish) then on_finish(false, "没有启用的书源") end
+        return nil
     end
-    if #all_results == 0 then
-        return {list = {}}
-    else
-        return {list = all_results}
+    active_sources = source_list_shuffle(active_sources)
+
+    local MAX_SOURCES = 500
+    if #active_sources > MAX_SOURCES then
+        for i = #active_sources, MAX_SOURCES + 1, -1 do
+            active_sources[i] = nil
+        end
+    end
+
+    local TaskQueue = require("Legado.task.Queue")
+
+    local MAX_WORKERS = 4
+    local SOURCE_TIMEOUT = 30
+
+    local finish_sent = false
+    local function send_finish(success, msg)
+        if finish_sent then return end
+        finish_sent = true
+        if H.is_func(on_finish) then
+            pcall(on_finish, success, msg)
+        end
+    end
+
+    local channel_name = string.format("qread_search_%d_%d", os.time(), math.random(1000, 9999))
+    local ch = TaskQueue:createChannel(channel_name, MAX_WORKERS, function(aborted)
+        TaskQueue:destroyChannel(channel_name)
+        if aborted then
+            send_finish(false, "已取消")
+        else
+            send_finish(true, nil)
+        end
+    end)
+
+    for _, source in ipairs(active_sources) do
+        ch:pushTask(function(src)
+            local status, ret = pcall(function()
+                return self:handleResponse(function()
+                    return self.client:searchBook({
+                        key = search_text,
+                        bookSourceUrl = src.bookSourceUrl,
+                        page = 1,
+                    })
+                end, nil, {
+                    timeouts = {10, 15},
+                }, 'searchBookSingle')
+            end)
+            if not status or not H.is_tbl(ret) then return nil end
+
+            local chunk = {}
+            for _, book in ipairs(ret) do
+                if H.is_tbl(book) and filter_search_book(book, search_text, is_exact_search, options)
+                        and H.is_str(book.name) and book.name ~= ""
+                        and H.is_str(book.bookUrl) and book.bookUrl ~= "" then
+                    table.insert(chunk, book)
+                end
+            end
+            return chunk
+        end, function(ok, chunk)
+            if ok and H.is_tbl(chunk) and #chunk > 0 and H.is_func(on_chunk) then
+                pcall(on_chunk, chunk)
+            end
+        end, {
+            args = {source},
+            timeout = SOURCE_TIMEOUT,
+        })
+    end
+
+    return function()
+        -- 已 drain（全部完成）时 clearTasks 不触发 abort 回调，幂等补发"已取消"
+        ch:clearTasks()
+        send_finish(false, "已取消")
     end
 end
 

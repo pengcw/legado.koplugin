@@ -228,8 +228,6 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
     local book_cache_id = bookinfo.cache_id
     local bookUrl = bookinfo.bookUrl
 
-    self:_ensure_book_name(bookinfo)
-
     return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
         local status, err = safe_call(function()
             return self.dbManager:upsertChapters(book_cache_id, response.data)
@@ -242,20 +240,7 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
     end))
 end
 
-function M:_ensure_book_name(obj)
-    if H.is_tbl(obj) and not (H.is_str(obj.book_name) and obj.book_name ~= "") then
-        local cache_id = obj.cache_id or obj.book_cache_id
-        if H.is_str(cache_id) then
-            local cached_info = self:getBookInfoCache(cache_id)
-            if H.is_tbl(cached_info) and H.is_str(cached_info.name) and cached_info.name ~= "" then
-                obj.book_name = cached_info.name
-            end
-        end
-    end
-    return obj
-end
 function M:pGetChapterContent(chapter)
-    self:_ensure_book_name(chapter)
     return wrap_response(self.apiClient:getBookContent(chapter))
 end
 function M:refreshBookContent(chapter)
@@ -279,9 +264,11 @@ end
 function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
     return wrap_response(self.apiClient:getBookSourcesExploreUrl(bookSourceUrl, callback))
 end
---- return list lastIndex
-function M:getAvailableBookSource(options, callback)
-    return wrap_response(self.apiClient:getAvailableBookSource(options, callback))
+function M:getAvailableBookSource(...)
+    if type(self.apiClient.getAvailableBookSource) == "function" then
+        return self.apiClient:getAvailableBookSource(...)
+    end
+    return nil
 end
 function M:exploreBook(options, callback)
     return wrap_response(self.apiClient:exploreBook(options, callback))
@@ -292,14 +279,10 @@ end
 function M:searchBookSingle(options, callback)
     return wrap_response(self.apiClient:searchBookSingle(options, callback))
 end
---- return list lastIndex
-function M:searchBookMulti(options, callback)
-    return wrap_response(self.apiClient:searchBookMulti(options, callback))
-end
 
-function M:searchBookMultiAsync(...)
-    if self.apiClient.searchBookMultiAsync then
-        return self.apiClient:searchBookMultiAsync(...)
+function M:searchBookMulti(...)
+    if type(self.apiClient.searchBookMulti) == "function" then
+        return self.apiClient:searchBookMulti(...)
     end
     return nil
 end
@@ -911,7 +894,7 @@ function M:closeDbManager()
     end
 end
 
-function M:cleanBookCache(book_cache_id)
+function M:cleanBookCache(book_cache_id, bookinfo)
     if self:isTaskRunning() then
         return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
     end
@@ -923,6 +906,19 @@ function M:cleanBookCache(book_cache_id)
     if book_cache_path and util.pathExists(book_cache_path) then
 
         ffiUtil.purgeDir(book_cache_path)
+
+        -- 仅清除缓存场景：强制刷新服务器目录缓存（qread 24h / reader3 无 TTL），拿到最新目录
+        if H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl) then
+            local refresh_bookinfo = {
+                bookUrl = bookinfo.bookUrl,
+                origin = bookinfo.origin,
+                name = bookinfo.name or bookinfo.book_name,
+                refresh = true,
+            }
+            self:launchProcess(function()
+                self:getChaptersList(refresh_bookinfo)
+            end)
+        end
 
         return wrap_response(true)
     else

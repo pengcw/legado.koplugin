@@ -256,6 +256,8 @@ function ChapterListing:onMenuHold(item)
                 bookUrl = chapter.bookUrl,
                 title = chapter.title,
                 origin = chapter.origin,
+                -- 下载路径需 name（qread 替换规则匹配）
+                name = chapter.name,
             }), function(data)
                 self:refreshItems(true)
                 if isDownLoaded == true then
@@ -487,7 +489,7 @@ function ChapterListing:openMenu()
                                         if not result then return end
                                         Backend:closeDbManager()
                                         TaskProg.loading("清理中 ", function()
-                                            return Backend:cleanBookCache(self.bookinfo.cache_id)
+                                            return Backend:cleanBookCache(self.bookinfo.cache_id, self.bookinfo)
                                         end, function(state, response)
                                             if state == true then
                                                 Backend:HandleResponse(response, function(data)
