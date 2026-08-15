@@ -1,39 +1,96 @@
 local util = require("util")
 local logger = require("logger")
+local ffi = require("ffi")
 local H = require("Legado/Helper")
 local FS = require("Legado.Helper.FS")
 local Env = require("Legado.Helper.Env")
 local httpReq = require("Legado.Helper.Http")
+local IMG = require("Legado.Helper.image_meta")
 
 local M = {}
 
-local function save_processed(data, output_path, ext)
-    local RenderImage = require("ui/renderimage")
-    local bb = RenderImage:renderImageData(data, #data, false, nil, nil)
-    local final_success = false
 
-    if bb and bb.writeToFile then
-        local ok, write_ok = pcall(bb.writeToFile, bb, output_path, ext, nil, nil)
-        final_success = ok and write_ok and true or false
+if not pcall(ffi.typeof, "z_stream") then
+    ffi.cdef[[
+        typedef void *(*z_alloc_func)(void *opaque, unsigned int items, unsigned int size);
+        typedef void (*z_free_func)(void *opaque, void *address);
+        typedef struct z_stream_s {
+            const unsigned char *next_in;
+            unsigned int avail_in;
+            unsigned long total_in;
+            unsigned char *next_out;
+            unsigned int avail_out;
+            unsigned long total_out;
+            const char *msg;
+            void *state;
+            z_alloc_func zalloc;
+            z_free_func zfree;
+            void *opaque;
+            int data_type;
+            unsigned long adler;
+            unsigned long reserved;
+        } z_stream;
+        int inflateInit2_(z_stream *strm, int windowBits, const char *version, int stream_size);
+        int inflate(z_stream *strm, int flush);
+        int inflateEnd(z_stream *strm);
+    ]]
+end
+local libz
+if pcall(ffi.typeof, "z_stream") then
+    local ok, lib = pcall(ffi.load, "z")
+    libz = ok and lib or nil
+end
+
+function M.gunzip(data)
+    if type(data) ~= "string" or data:sub(1, 2) ~= "\x1f\x8b" then
+        return nil, "not gzip"
+    end
+    if not libz then return nil, "zlib unavailable" end
+    -- gzip 尾部 ISIZE（原始大小 mod 2^32）仅作初始缓冲大小提示。
+    -- qyd /proxypng 会在 gzip 流末尾追加额外字节（实测多 2B "{}"），
+    -- 导致尾部 ISIZE 读成巨大伪造值；此时不能直接拒绝（inflate 本身会忽略流外多余字节），
+    -- 回退到保守初始缓冲，由下方渐进扩容兜底。OOM 防护由 MAX_GUNZIP_OUT 封顶保证。
+    local MAX_GUNZIP_OUT = 64 * 1024 * 1024
+    local isize = 0
+    if #data >= 4 then
+        isize = string.byte(data, #data - 3)
+            + string.byte(data, #data - 2) * 256
+            + string.byte(data, #data - 1) * 65536
+            + string.byte(data, #data) * 16777216
+    end
+    local out_size
+    if isize > 0 and isize <= MAX_GUNZIP_OUT then
+        out_size = math.max(isize + 64, #data * 8 + 64)
     else
-        util.writeToFile(data, output_path, true)
-        local DocumentRegistry = require("document/documentregistry")
-        local temp_doc = DocumentRegistry:openDocument(output_path)
-        if temp_doc then
-            local status, cover_bb = pcall(temp_doc.getCoverPageImage, temp_doc)
-            if status and cover_bb and type(cover_bb.getWidth) == "function" then
-                bb = cover_bb
-                local write_ok, write_err = pcall(bb.writeToFile, bb, output_path, ext, nil, nil)
-                final_success = write_ok and write_err and true or false
-            end
-            temp_doc:close()
+        out_size = math.min(#data * 8 + 64, MAX_GUNZIP_OUT)
+    end
+    while true do
+        local out = ffi.new("unsigned char[?]", out_size)
+        local strm = ffi.new("z_stream")
+        strm.next_in = ffi.cast("const unsigned char*", data)
+        strm.avail_in = #data
+        strm.next_out = out
+        strm.avail_out = out_size
+        local ret = libz.inflateInit2_(strm, 15 + 32, "1.2.11", ffi.sizeof("z_stream"))
+        if ret ~= 0 then return nil, "inflateInit2 failed" end
+        ret = libz.inflate(strm, 4) -- Z_FINISH
+        libz.inflateEnd(strm)
+        if ret == 1 then
+            return ffi.string(out, strm.total_out)
         end
+        if ret ~= -5 then -- -5 = Z_BUF_ERROR（缓冲不足，扩大重试）
+            return nil, "inflate failed: " .. tostring(strm.msg or ret)
+        end
+        if out_size >= MAX_GUNZIP_OUT then
+            return nil, "inflate output too large"
+        end
+        out_size = math.min(out_size * 2, MAX_GUNZIP_OUT)
     end
+end
 
-    if bb and bb.free then
-        bb:free()
-    end
-    return final_success
+local function save_processed(data, output_path, ext)
+    local ok, err = util.writeToFile(data, output_path, true)
+    return ok and true or false
 end
 
 function M.findCustomCoverFileInDir(cover_path_no_ext)
@@ -45,7 +102,7 @@ function M.findCustomCoverFileInDir(cover_path_no_ext)
         return nil
     end
     if not util.pathExists(dir) then return nil end
-    local extensions = { "jpg", "jpeg", "png", "webp", "bmp", "tiff" }
+    local extensions = IMG.IMAGE_EXTENSIONS
     for _, ext in ipairs(extensions) do
         local cover_full_path = string.format("%s.%s", cover_path_no_ext, ext)
         if util.fileExists(cover_full_path) then
@@ -117,7 +174,7 @@ function M.download_cover(book_cache_id, img_src, is_force, opts)
         return nil, nil
     end
 
-    local extensions = { "jpg", "jpeg", "png", "webp", "bmp", "tiff" }
+    local extensions = IMG.IMAGE_EXTENSIONS
     for _, old_ext in ipairs(extensions) do
         local old_path = string.format("%s.%s", cover_path_no_ext, old_ext)
         if util.fileExists(old_path) then util.removeFile(old_path) end
@@ -192,14 +249,37 @@ function M.download_image(url, opts)
         return nil, (type(resp) == "string" and resp) or "image download failed"
     end
 
-    local ext = resp.ext
-    if not ext or ext == "" then
-        ext = M.get_url_extension(url)
+    local data = resp['data']
+    -- qread 服务器不遵守请求头, 会透传 gzip 压缩
+    if data:sub(1, 2) == "\x1f\x8b" then
+        local raw, gerr = M.gunzip(data)
+        if not raw then
+            return nil, "gunzip failed: " .. tostring(gerr)
+        end
+        data = raw
     end
-    if not ext or ext == "" then
-        ext = "png"
+
+    -- 合法性校验
+    -- （如 JPEG2000 等 mupdf 支持的冷门格式）交给 RenderImage 全解码兜底，
+    -- 能解码即视为合法图片——renderimage 避免误杀 sniff 覆盖外的合法图。
+    local ext = IMG.sniff_format(data)
+    if not IMG.is_valid_image(data) then
+        if ext ~= nil then
+            -- 7 格式内结构损坏/尺寸异常：丢弃（不兜底，避免放行伪造魔数的垃圾）
+            return nil, "invalid image data"
+        end
+        -- sniff 不识别：RenderImage 兜底验证
+        local ok2, bb = pcall(function()
+            local RenderImage = require("ui/renderimage")
+            return RenderImage:renderImageData(data, #data)
+        end)
+        if not ok2 or not bb then
+            return nil, "invalid image data"
+        end
+        -- mupdf 不返回格式信息，用通用图片扩展名（渲染按内容嗅探，不受扩展名影响）
+        ext = "img"
     end
-    return resp['data'], ext
+    return data, ext
 end
 
 return M

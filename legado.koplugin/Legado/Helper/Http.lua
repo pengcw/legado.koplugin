@@ -1,4 +1,5 @@
 local logger = require("logger")
+local IMG = require("Legado.Helper.image_meta")
 
 --- Common timeout values
 -- Large content 块超时 总超时
@@ -89,27 +90,6 @@ local function get_extension_from_mimetype(content_type)
         ["application/epub+zip"] = "epub",
     }
     return extensions[mime]
-end
-
-local function get_image_format_head8(image_data)
-    if type(image_data) ~= "string" or #image_data < 12 then return "bin" end
-    local b1 = string.byte(image_data, 1)
-    if b1 == 0xFF then
-        if string.sub(image_data, 1, 3) == "\xFF\xD8\xFF" then return "jpg" end
-    elseif b1 == 0x89 then
-        if string.sub(image_data, 1, 8) == "\x89\x50\x4E\x47\x0D\x0A\x1A\x0A" then return "png" end
-    elseif b1 == 0x52 then
-        if string.sub(image_data, 1, 4) == "RIFF" and string.sub(image_data, 9, 12) == "WEBP" then return "webp" end
-    elseif b1 == 0x42 then
-        if string.sub(image_data, 1, 2) == "BM" then return "bmp" end
-    elseif b1 == 0x47 then
-        if string.sub(image_data, 1, 4) == "GIF8" then return "gif" end
-    elseif b1 == 0x49 then
-        if string.sub(image_data, 1, 4) == "\x49\x49\x2A\x00" then return "tiff" end
-    elseif b1 == 0x4D then
-        if string.sub(image_data, 1, 4) == "\x4D\x4D\x00\x2A" then return "tiff" end
-    end
-    return "bin"
 end
 
 local function pGetUrlContent(options, is_create)
@@ -230,7 +210,7 @@ local function pGetUrlContent(options, is_create)
     if contentType then
         extension = get_extension_from_mimetype(contentType)
         if not extension and (contentType:match("^%s*image/") or is_pic) then
-            extension = get_image_format_head8(content)
+            extension = IMG.sniff_format(content)
         end
     end
     

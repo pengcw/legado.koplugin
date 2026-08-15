@@ -31,7 +31,7 @@ function M:openWebConfigTypeSelector()
             text = "轻阅读后端", callback = function()
                 on_select(3)
         end,}}, {{
-            text = "Reader3 服务器版", callback = function()
+            text = "Reader3/Rust 服务", callback = function()
                 on_select(2)
         end,}},},
     }
@@ -117,8 +117,8 @@ end
 function M:openWebConfigEditorWithType(config_name, config, server_type, is_current, prefill_url)
     local is_edit = config_name ~= nil
     local type_names = {
-        [1] = "手机APP",
-        [2] = "Reader3 服务器版", 
+        [1] = "手机 APP",
+        [2] = "Reader3/Rust 服务", 
         [3] = "轻阅读后端"
     }
 
@@ -281,6 +281,7 @@ function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
                 return "current_ok"
             end
         end
+        local net, net_err = NetProbe:getNetwork({ timeout = 0.4 })
         local hits = NetProbe:scan(ports, { timeout = 0.4 })
         if type(hits) ~= "table" then return nil end
         local list = {}
@@ -289,7 +290,7 @@ function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
                 table.insert(list, string.format("%s:%d", h.ip, h.port))
             end
         end
-        return list
+        return { net = net and net.cidr, list = list }
     end, function(ok, result)
         if not ok then
             return MessageBox:notice("未在局域网发现开源阅读服务")
@@ -297,10 +298,12 @@ function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
         if result == "current_ok" then
             return MessageBox:notice("当前服务可正常访问，无需扫描")
         end
-        if type(result) ~= "table" or #result == 0 then
-            return MessageBox:notice("未在局域网发现开放的服务")
+        if type(result) ~= "table" or not result.list or #result.list == 0 then
+            local scope = type(result) == "table" and result.net or nil
+            return MessageBox:notice(string.format("未在 %s 网段发现开源阅读服务",
+                scope and tostring(scope) or "局域网"))
         end
-        self:showScanResults(dialog, config_name, config, server_type, is_edit, result)
+        self:showScanResults(dialog, config_name, config, server_type, is_edit, result.list)
     end, { timeout = 20 })
 end
 

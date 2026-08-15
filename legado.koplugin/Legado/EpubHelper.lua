@@ -213,6 +213,9 @@ function EpubExporter:init(options)
                 self.cover_mime = "image/bmp"
             elseif ext == "tiff" then
                 self.cover_mime = "image/tiff"
+            elseif ext == "img" then
+                -- 兜底格式（如 JPEG2000）：无唯一 MIME，用通用类型，KOreader 按内容嗅探
+                self.cover_mime = "application/octet-stream"
             else
                 self.cover_mime = "image/jpeg"
                 self.cover_ext = "jpg"
@@ -530,7 +533,7 @@ function EpubExporter:packageEpub()
                 chapter_content = chapter_content:gsub('<p%s+style="text%-indent:%s*0em;"><span%s+class="duokan%-dropcaps%-two">(.)</span>', '<p>%1')
             end
         elseif cache_ext == "png" or cache_ext == "jpg" or cache_ext == "jpeg" or 
-                    cache_ext == "webp" or cache_ext == "bmp" or cache_ext == "tiff" then
+                    cache_ext == "webp" or cache_ext == "bmp" or cache_ext == "tiff" or cache_ext == "img" then
             -- 章节可能是单图片
             local img_data = util.readFromFile(cache_file_path, "rb")
             if img_data then
