@@ -372,12 +372,11 @@ function M.analyzing(chapter, content, filePath, opts)
             -- 一张图片就不打包cbz了
             if #img_sources == 1 then
                 local res_url = img_sources[1]
-                local status, err = httpReq({ url = res_url, timeout = 60, is_pic = true }, true)
-                if not status or not (H.is_tbl(err) and err["data"]) then error('单图下载失败') end
-
-                local ext = ImageUtil.get_url_extension(res_url)
-                if not ext or ext == "" then ext = err.ext or "png" end
-                return { kind = "file", chapter = chapter, filePath = string.format("%s.%s", filePath, ext), data = err['data'] }
+                -- 统一走 download_image：gzip 解压 + 合法性校验 + 魔数真实 ext（qread 单图可能是 gzip 流）
+                local data, ext = ImageUtil.download_image(res_url, { timeout = 60 })
+                if not data then error('单图下载失败') end
+                if not ext or ext == "" then ext = ImageUtil.get_url_extension(res_url) or "png" end
+                return { kind = "file", chapter = chapter, filePath = string.format("%s.%s", filePath, ext), data = data }
             else
                 filePath = filePath .. '.cbz'
                 return { kind = "cbz", chapter = chapter, filePath = filePath, img_sources = img_sources }

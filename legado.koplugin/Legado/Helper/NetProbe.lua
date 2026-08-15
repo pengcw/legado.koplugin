@@ -267,6 +267,21 @@ local function httpGet(ip, port, path, timeout, max_body)
     return tonumber(code), body
 end
 
+local function maskToPrefix(netmask)
+    local mask_n = ip2num(netmask or "255.255.255.0")
+    local prefix = 0
+    for i = 31, 0, -1 do
+        local p = 2 ^ i
+        if mask_n >= p then
+            prefix = prefix + 1
+            mask_n = mask_n - p
+        else
+            break
+        end
+    end
+    return prefix
+end
+
 function M:getNetwork(options)
     options = options or {}
     local ip = options.ip or self:getLocalIPv4()
@@ -274,12 +289,15 @@ function M:getNetwork(options)
     local netmask = options.netmask or self:getNetmask(ip) or "255.255.255.0"
     local range = self:getScanRange(ip, netmask)
     if not range then return nil, "无法确定本机网络" end
+    -- CIDR 网络地址独立计算（getScanRange 的 first 已排除网络地址本身）
+    local network = bit.band(bit.tobit(ip2num(ip)), bit.tobit(ip2num(netmask))) % MAX_U32
     logger.dbg("NetProbe: 网络 ip=", ip, "netmask=", netmask)
     return {
         ip = ip,
         netmask = netmask,
         first = range.first,
         last = range.last,
+        cidr = string.format("%s/%d", num2ip(network), maskToPrefix(netmask)),
     }
 end
 
