@@ -1,4 +1,3 @@
-local logger = require("logger")
 local util = require("util")
 local socket_url = require("socket.url")
 local socketutil = require("socketutil")
@@ -12,12 +11,34 @@ local M = BaseSpec:extend{
   settings = nil,
 }
 
+local function filter_search_book(book, search_text, is_exact_search, options)
+    if not H.is_tbl(book) then return false end
+    local has_name_filter = H.is_str(options and options.name) and options.name   ~= ""
+    local has_author_filter = H.is_str(options and options.author) and options.author ~= ""
+    local has_origin_filter = H.is_str(options and options.origin) and options.origin ~= ""
+    if has_name_filter or has_author_filter or has_origin_filter then
+        local match_name = has_name_filter and H.is_str(book.name) and book.name == options.name
+        local match_author = has_author_filter and H.is_str(book.author) and book.author == options.author
+        local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == options.origin
+
+        if has_name_filter and not match_name then return false end
+        if has_author_filter and not match_author then return false end
+        if has_origin_filter and not match_origin then return false end
+
+        return true
+    end
+    if is_exact_search then
+        return (H.is_str(book.name) and book.name == search_text)
+            or (H.is_str(book.author) and book.author == search_text)
+    end
+    return true
+end
+
 function M:init()
     BaseSpec.init(self)
 end
 
 function M:reader3Login()
-    local server_address = self.settings['server_address']
     local reader3_un = self.settings.reader3_un
     local reader3_pwd = self.settings.reader3_pwd
 
@@ -136,9 +157,12 @@ function M:saveBook(bookinfo, callback)
     end
   
     local bookUrl = bookinfo.bookUrl
+    -- refresh=true：仅清除缓存场景强制绕过服务器目录缓存
+    local refresh = bookinfo.refresh == true and 1 or 0
     return self:handleResponse(function()
           return self.client:getChapterList({
               url = bookUrl,
+              refresh = refresh,
               v = os.time()
           })
     end, callback, {
@@ -148,7 +172,6 @@ function M:saveBook(bookinfo, callback)
   
   function M:getBookContent(chapter, callback)
     local bookUrl = chapter.bookUrl
-    local chapters_index = chapter.chapters_index
     local down_chapters_index = chapter.chapters_index
   
     if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
@@ -169,7 +192,6 @@ function M:saveBook(bookinfo, callback)
 
 function M:refreshBookContent(chapter, callback)
     local bookUrl = chapter.bookUrl
-    local chapters_index = chapter.chapters_index
     local down_chapters_index = chapter.chapters_index
   
     if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
@@ -261,7 +283,7 @@ function M:getProxyCoverUrl(coverUrl)
     return socket_url.absolute(api_root_url, coverUrl)
 end
 
-function M:getProxyImageUrl(bookUrl, img_src)
+function M:getProxyImageUrl(_, img_src)
     local res_img_src = H.is_str(img_src) and tostring(img_src) or ""
     local server_address = self.settings.server_address
     
@@ -273,7 +295,7 @@ function M:getProxyImageUrl(bookUrl, img_src)
     return res_img_src
 end
 
-function M:getProxyEpubUrl(bookUrl, htmlUrl)
+function M:getProxyEpubUrl(_, htmlUrl)
     htmlUrl = H.is_str(htmlUrl) and tostring(htmlUrl) or ""
     local server_address = self.settings['server_address']
     if server_address:match("/reader3$") and htmlUrl:match("%.x?html$") then
@@ -369,54 +391,106 @@ function M:exploreBook(options, callback)
     }, 'exploreBook')
 end
 
-function M:getAvailableBookSource(options, callback)
-    if not (H.is_tbl(options) and H.is_str(options.book_url)) then
-        return nil, '获取可用书源参数错误'
+function M:getAvailableBookSource(options, on_finish, on_chunk)
+    if not (H.is_tbl(options) and H.is_str(options.book_url)
+            and H.is_str(options.name) and options.name ~= "") then
+        if H.is_func(on_finish) then on_finish(false, '获取可用书源参数错误') end
+        return nil
     end
+    on_finish = H.is_func(on_finish) and on_finish or function() end
+    on_chunk = H.is_func(on_chunk) and on_chunk or function() end
 
-    local bookUrl = options.book_url
+    local book_url = options.book_url
     local name = options.name
     local author = options.author
     local last_index = options.last_index
-    local search_size = options.search_size
-    local is_more_call = options.last_index ~= nil
-    if not is_more_call then
-        local ret, err_msg = self:handleResponse(function()
-            -- data=bookinfos
-            return self.client:getAvailableBookSource({
-                refresh = 0,
-                url = bookUrl,
-                v = os.time()
-            })
-        end, callback, {
-            timeouts = {30, 50},
-        }, 'getAvailableBookSource')
-        if ret == nil then
-            return ret, err_msg or "未知错误"
-        else
-            return {lastIndex = 0, list = ret}
+    local is_more_call = last_index ~= nil and H.is_num(last_index)
+
+    local finish_sent = false
+    local all_results = {}
+    local seen_origin = {}
+    -- author 兜底：调用方未提供时用缓存快查结果的 author 众数补全，避免同名异作者混入
+    local resolved_author = author
+    local author_votes = {}
+    local function note_author(a)
+        if not H.is_str(a) or a == "" then return end
+        author_votes[a] = (author_votes[a] or 0) + 1
+    end
+    local function resolve_author()
+        if H.is_str(resolved_author) and resolved_author ~= "" then return end
+        local best_a, best_n = nil, 0
+        for a, n in pairs(author_votes) do
+            if n > best_n then best_a, best_n = a, n end
+        end
+        resolved_author = best_a
+    end
+
+    local function add_results(list)
+        if not H.is_tbl(list) then return end
+        local new_chunk = {}
+        for _, book in ipairs(list) do
+            if H.is_tbl(book) and H.is_str(book.origin) and not seen_origin[book.origin] then
+                seen_origin[book.origin] = true
+                note_author(book.author)
+                table.insert(all_results, book)
+                table.insert(new_chunk, book)
+            end
+        end
+        if #new_chunk > 0 then
+            pcall(on_chunk, new_chunk)
         end
     end
 
-    if not H.is_num(last_index) then
-        last_index = -1
+    local function send_finish(success, data, msg, last_idx)
+        if finish_sent then return end
+        finish_sent = true
+        pcall(on_finish, success, data, msg, last_idx)
     end
-    if not H.is_num(search_size) then
-        search_size = 5
-    end
-    return self:handleResponse(function()
-        -- data.list data.lastindex
-        return self.client:searchBookSource({
-            url = bookUrl,
-            bookSourceGroup = '',
-            lastIndex = last_index,
-            searchSize = search_size,
-            v = os.time()
-        })
 
-    end, callback, {
-        timeouts = {70, 80},
-    }, 'searchBookSource')
+    local search_cancel = nil
+    local function search_more(start_index)
+        search_cancel = self:searchBookMulti({
+            search_text = name,
+            name = name,
+            author = resolved_author,
+            last_index = start_index,
+        }, function(chunk)
+            add_results(chunk)
+        end, function(success, msg, server_last_index)
+            if success then
+                send_finish(true, { list = all_results }, nil, server_last_index)
+            else
+                send_finish(false, nil, msg or "搜索失败")
+            end
+        end)
+    end
+
+    if is_more_call then
+        search_more(last_index)
+    else
+        local ok, ret = pcall(function()
+            return self:handleResponse(function()
+                return self.client:getAvailableBookSource({
+                    refresh = 0,
+                    url = book_url,
+                    v = os.time()
+                })
+            end, nil, {
+                timeouts = {30, 50},
+            }, 'getAvailableBookSource')
+        end)
+        if ok and H.is_tbl(ret) then
+            add_results(ret)
+            resolve_author()
+        end
+        -- 缓存快查无论成败，均追加全量搜索
+        search_more(-1)
+    end
+
+    return function()
+        if search_cancel then search_cancel() end
+        send_finish(false, nil, "已取消")
+    end
 end
 
 function M:changeBookSource(new_book_source, callback)
@@ -466,29 +540,163 @@ function M:searchBookSingle(options, callback)
     }, 'searchBookSingle')
 end
 
-function M:searchBookMulti(options, callback)
-     if not (H.is_tbl(options) and H.is_str(options.search_text) and options.search_text ~= '') then
-        return nil, "输入参数错误"
+function M:searchBookMulti(options, on_chunk, on_finish)
+    if not (H.is_tbl(options) and H.is_str(options.search_text) and options.search_text ~= '') then
+        if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
+        return nil
     end
 
-    local search_text = options.search_text
-    local lastIndex = H.is_num(options.last_index) and options.last_index or -1
-    local searchSize = H.is_num(options.search_size) and options.search_size or 20
-    local concurrentCount = options.concurrent_count or 32
-    
-    return self:handleResponse(function()
-        -- data.list data.lastindex
-        return self.client:searchBookMulti({
+    local is_exact_search = false
+    local search_text = util.trim(options.search_text)
+    if string.sub(search_text, 1, 1) == "=" then
+        is_exact_search = true
+        search_text = util.trim(string.sub(search_text, 2))
+    end
+    if search_text == '' then
+        if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
+        return nil
+    end
+
+    local last_index = H.is_num(options.last_index) and options.last_index or -1
+    -- 续搜：lastIndex >= 0（首搜 -1）
+    local is_more_call = last_index >= 0
+
+    -- 会话级去重（服务端去重仅单请求内）：新搜索重置，续搜沿用
+    if not is_more_call then
+        self._search_dedup = {}
+    end
+    local dedup = self._search_dedup or {}
+    self._search_dedup = dedup
+
+    local SSEClient = require("Legado/Helper/SSEClient")
+    local JSON = require("json")
+
+    local server_address = self.settings.server_address
+
+    local finish_sent = false
+    local function send_finish(success, msg, res_last_index)
+        if finish_sent then return end
+        finish_sent = true
+        if H.is_func(on_finish) then
+            pcall(on_finish, success, msg, res_last_index)
+        end
+    end
+
+    -- 登录：无凭证（secure=false 免认证）时 token 为 nil，不附加 accessToken
+    local login_ok, login_token = self:ensureLogin()
+    if login_ok ~= true then
+        if H.is_func(on_finish) then on_finish(false, tostring(login_token or "登录失败")) end
+        return nil
+    end
+    local token = login_token or nil
+
+    local function build_request()
+        local q = {
             key = search_text,
             bookSourceGroup = '',
-            concurrentCount = concurrentCount,
-            lastIndex = lastIndex,
-            searchSize = searchSize,
-            v = os.time()
-        })
-    end, callback, {
-        timeouts = {60, 80},
-    }, 'searchBookMulti')
+            lastIndex = last_index,
+            searchSize = 50,
+            concurrentCount = 32,
+            v = os.time(),
+        }
+        local parts = {}
+        for k, v in pairs(q) do
+            parts[#parts + 1] = k .. "=" .. util.urlEncode(tostring(v))
+        end
+        if H.is_str(token) and token ~= "" then
+            parts[#parts + 1] = "accessToken=" .. token
+        end
+        -- SSEClient 需完整 URL：server_address 去尾斜杠后拼 /searchBookMultiSSE
+        local base = server_address:gsub("/+$", "")
+        return base .. "/searchBookMultiSSE?" .. table.concat(parts, "&")
+    end
+
+    local client = nil
+    local relogin_attempted = false
+    local server_last_index = nil
+
+    local function handle_error_event(error_msg)
+        if error_msg == "请登录后使用" and not relogin_attempted then
+            relogin_attempted = true
+            if client then client:cancel() end
+            -- 清 token 重新登录（罕见路径，阻塞可接受）
+            if self.tokenManager then self.tokenManager:clear() end
+            local ok_login2, msg2 = self:ensureLogin()
+            if ok_login2 == true and H.is_str(msg2) and msg2 ~= "" then
+                token = msg2
+                open_stream()
+                return
+            end
+            send_finish(false, tostring(msg2 or error_msg))
+        else
+            send_finish(false, error_msg)
+        end
+    end
+
+    local function on_sse_event(evt_name, data_str)
+        if evt_name == "message" then
+            local ok, obj = pcall(JSON.decode, data_str)
+            if ok and H.is_tbl(obj) then
+                local chunk = {}
+                if H.is_tbl(obj.data) then
+                    for _, book in ipairs(obj.data) do
+                        if H.is_tbl(book)
+                                and filter_search_book(book, search_text, is_exact_search, options)
+                                and H.is_str(book.name) and book.name ~= ""
+                                and H.is_str(book.bookUrl) and book.bookUrl ~= ""
+                                and not dedup[book.bookUrl] then
+                            dedup[book.bookUrl] = true
+                            table.insert(chunk, book)
+                        end
+                    end
+                end
+                if H.is_num(obj.lastIndex) then
+                    server_last_index = obj.lastIndex
+                end
+                if #chunk > 0 and H.is_func(on_chunk) then
+                    pcall(on_chunk, chunk)
+                end
+            end
+        elseif evt_name == "error" then
+            local ok, obj = pcall(JSON.decode, data_str)
+            local error_msg = ok and H.is_tbl(obj) and H.is_str(obj.errorMsg) and obj.errorMsg or data_str
+            handle_error_event(error_msg)
+        elseif evt_name == "end" then
+            local ok, obj = pcall(JSON.decode, data_str)
+            if ok and H.is_tbl(obj) and H.is_num(obj.lastIndex) then
+                server_last_index = obj.lastIndex
+            end
+            send_finish(true, nil, server_last_index)
+            if client then client:cancel() end
+        end
+    end
+
+    local function open_stream()
+        client = SSEClient.open{
+            url = build_request(),
+            timeout = 120,
+            on_event = on_sse_event,
+            on_close = function(err)
+                -- err=nil：服务器关闭/终止块（正常流结束）；否则为失败原因
+                if not finish_sent then
+                    send_finish(false, err or "连接中断")
+                end
+            end,
+        }
+    end
+
+    open_stream()
+
+    return function()
+        if client then client:cancel() end
+        -- 尚未结束时同步补发结束回调
+        if not finish_sent then
+            send_finish(false, "已取消")
+        end
+    end
 end
+
+-- 单元测试钩子（仅测试用）
+M._parsers = require("Legado/Helper/SSEClient")._parsers
 
 return M
