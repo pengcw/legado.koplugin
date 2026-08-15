@@ -606,9 +606,10 @@ function M:searchBookMulti(options, on_chunk, on_finish)
         if H.is_str(token) and token ~= "" then
             parts[#parts + 1] = "accessToken=" .. token
         end
-        -- SSEClient 需完整 URL：server_address 去尾斜杠后拼 /searchBookMultiSSE
-        local base = server_address:gsub("/+$", "")
-        return base .. "/searchBookMultiSSE?" .. table.concat(parts, "&")
+        local parsed = socket_url.parse(server_address)  
+        parsed.path = (parsed.path or ""):gsub("/+$", "") .. "/searchBookMultiSSE"  
+        parsed.query = table.concat(parts, "&")  
+        return socket_url.build(parsed)
     end
 
     local client = nil
@@ -619,7 +620,7 @@ function M:searchBookMulti(options, on_chunk, on_finish)
         if error_msg == "请登录后使用" and not relogin_attempted then
             relogin_attempted = true
             if client then client:cancel() end
-            -- 清 token 重新登录（罕见路径，阻塞可接受）
+            -- 清 token 重新登录
             if self.tokenManager then self.tokenManager:clear() end
             local ok_login2, msg2 = self:ensureLogin()
             if ok_login2 == true and H.is_str(msg2) and msg2 ~= "" then

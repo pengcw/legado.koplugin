@@ -1,4 +1,3 @@
--- HTTP SSE 流式请求客户端
 local socket = require("socket")
 local ssl = require("ssl")
 local socket_url = require("socket.url")
@@ -127,7 +126,7 @@ local function chunked_decoder()
     }
 end
 
--- ==================== sse_parser ====================
+-- sse_parser
 local MAX_SSE_LINE = 256 * 1024
 local MAX_SSE_EVENT = 8 * 1024 * 1024
 
@@ -207,13 +206,10 @@ local function sse_parser()
     }
 end
 
--- 单元测试钩子：暴露解析器供独立验证
 SSEClient._parsers = {
     chunked_decoder = chunked_decoder,
     sse_parser = sse_parser,
 }
-
--- ==================== 传输层 ====================
 
 -- 批量读取：receive(n) 失败时第三返回值 partial 携带已读数据（零丢失）
 local function receive_available(sock, max_bytes)
@@ -332,8 +328,6 @@ local function send_get_request(sock, headers, host, port, parsed)
     end
     return true
 end
-
--- ==================== 流式客户端 ====================
 
 function SSEClient.open(opts)
     opts = opts or {}

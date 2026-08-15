@@ -76,6 +76,7 @@ function M:menuCenterShow(menuObj)
     return menu_container
 end
 
+-- 圆角和is_popout(默认true)互斥
 function M:createMenu(opts)
     opts = opts or {}
     local disable_close_gestures = opts.disable_close_gestures ~= false
@@ -140,7 +141,6 @@ function M:attachCancelToMenu(cancel_func)
     end
 end
 
--- 菜单内嵌 spinner：避免异步期间空白菜单"卡死"观感（首条数据到达/结束时隐藏）
 function M:showLoadingSpinner(message)
     if self._loading_spinner then return end
     local Progress = require("Legado.task.Progress")
@@ -329,17 +329,13 @@ end
 function M:searchBookDialog(onReturnCallback, def_input)
     local inputText
     local dialog
-
     self:init()
-
     local last_search_input = PlgState.last_search_input
     if last_search_input and not def_input then
         def_input = last_search_input
     end
-    
     self.call_mode = "SEARCH"
     self.on_success_callback = onReturnCallback
-
     dialog = MessageBox:input(
         "请键入要搜索的书籍或作者名称：\n(多源搜索可使用 '=书名' 语法精确匹配)", nil, {
             title = '添加书籍',
@@ -356,14 +352,15 @@ function M:searchBookDialog(onReturnCallback, def_input)
                 callback = function()
                     inputText = dialog:getInputText()
                     inputText = util.trim(inputText)
-
                     if not validateInput(inputText) then
                         return MessageBox:notice("请输入有效书籍或作者名称")
                     end
                     UIManager:close(dialog)
                     self.search_text = inputText
                     PlgState.last_search_input = inputText
-                    self:handleSingleSourceSearch(inputText)
+                    UIManager:nextTick(function()
+                        self:handleSingleSourceSearch(inputText)
+                    end)
                 end
             }, {
                 text = "多源搜索",
@@ -377,7 +374,9 @@ function M:searchBookDialog(onReturnCallback, def_input)
                     UIManager:close(dialog)
                     self.search_text = inputText
                     PlgState.last_search_input = inputText
-                    self:handleMultiSourceSearch(inputText)
+                    UIManager:nextTick(function()
+                        self:handleMultiSourceSearch(inputText)
+                    end)
                 end
             }, {
                 text = "取消",
@@ -431,11 +430,13 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
     if not is_more_call then
         self.results = {}
         self.has_more_api_results = nil
+        self:showLoadingSpinner(string.format("正在搜索[%s]", search_text))
         self:createBookSourceMenu({
             title = '多源搜索 (加载中...)',
             subtitle = string.format("key: %s", search_text),
         })
-        self:showLoadingSpinner(string.format("正在搜索[%s]", search_text))
+        -- 需要立即刷新,不然会被后面的计算阻塞
+        UIManager:forceRePaint()
     end
 
     local cancel_func
@@ -490,11 +491,12 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
     if not is_more_call then
         self.results = {}
         self.has_more_api_results = nil
+        self:showLoadingSpinner(string.format("搜索[%s]可用书源", bookinfo.name))
         self:createBookSourceMenu({
             title = '换源 (加载中...)',
             subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
         })
-        self:showLoadingSpinner(string.format("搜索[%s]可用书源", bookinfo.name))
+        UIManager:forceRePaint()
     end
 
     local cancel_func

@@ -114,7 +114,7 @@ function M:openWebConfigManager(callback)
     UIManager:show(self.manager_menu)
 end
 
-function M:openWebConfigEditorWithType(config_name, config, server_type, is_current)
+function M:openWebConfigEditorWithType(config_name, config, server_type, is_current, prefill_url)
     local is_edit = config_name ~= nil
     local type_names = {
         [1] = "手机APP",
@@ -123,7 +123,7 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
     }
 
     local name_input = config_name or ""
-    local url_input = config and config.url or "http://"
+    local url_input = prefill_url or (config and config.url or "http://")
     local desc_input = config and config.desc or ""
     local username_input = config and config.user or ""
     local password_input = config and config.pwd or ""
@@ -166,15 +166,24 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
                     callback = function()
                         UIManager:close(dialog)
                     end,
-                }, {
+                }}}
+    if current_type == 1 then
+        table.insert(buttons[1], {
+                    text = "扫描局域网",
+                    callback = function()
+                        self:scanLanServers(dialog, config_name, config, current_type, is_edit)
+                    end,
+                })
+    end
+    table.insert(buttons[1], {
                     text = is_edit and "修改" or "创建",
                     callback = function()
                         self:handleConfigSave(dialog, config_name, config, current_type, is_edit)
                     end,
-                }}}
+                })
     
     if is_edit then
-          table.insert(buttons[1], 2, {
+        table.insert(buttons[1], {
                     text = "删除",
                     callback = function()
                         if is_current then
@@ -204,7 +213,16 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
         title = title,
         fields = fields,
         buttons = buttons,
+        focused_field_idx = is_edit and 2 or 1,
     }
+    if is_edit then
+        -- 编辑模式, 配置名称不可修改, 字段设为只读
+        local name_field = dialog.input_fields[1]
+        if name_field then
+            name_field.readonly = true
+            name_field:onCloseKeyboard()
+        end
+    end
     UIManager:show(dialog)
 end
 
@@ -240,6 +258,73 @@ function M:handleConfigSave(dialog, current_conf_name, old_config, server_type, 
     end, function(err_msg)
         MessageBox:error((is_edit and '更新失败：' or '创建失败：'), tostring(err_msg))
     end)
+end
+
+function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
+    local NetProbe = require("Legado/Helper/NetProbe")
+    local TaskProg = require("Legado.task.Progress")
+
+    local NetworkMgr = require("ui/network/manager")
+    if not NetworkMgr:isConnected() then
+        return NetworkMgr:promptWifiOn(function()
+            UIManager:scheduleIn(1.0, function()
+                self:scanLanServers(dialog, config_name, config, server_type, is_edit)
+            end)
+        end)
+    end
+
+    local ports = {1122}
+    TaskProg.loading("正在检测服务", function()
+        local current_url = config and config.url
+        if current_url and current_url:match("^https?://") then
+            if NetProbe:check(current_url, { timeout = 3 }) then
+                return "current_ok"
+            end
+        end
+        local hits = NetProbe:scan(ports, { timeout = 0.4 })
+        if type(hits) ~= "table" then return nil end
+        local list = {}
+        for _, h in ipairs(hits) do
+            if NetProbe:isLegado(h.ip, h.port) then
+                table.insert(list, string.format("%s:%d", h.ip, h.port))
+            end
+        end
+        return list
+    end, function(ok, result)
+        if not ok then
+            return MessageBox:notice("未在局域网发现开源阅读服务")
+        end
+        if result == "current_ok" then
+            return MessageBox:notice("当前服务可正常访问，无需扫描")
+        end
+        if type(result) ~= "table" or #result == 0 then
+            return MessageBox:notice("未在局域网发现开放的服务")
+        end
+        self:showScanResults(dialog, config_name, config, server_type, is_edit, result)
+    end, { timeout = 20 })
+end
+
+function M:showScanResults(dialog, config_name, config, server_type, is_edit, results)
+    local result_dialog
+    local buttons = {}
+    for _, addr in ipairs(results) do
+        table.insert(buttons, {{ text = addr, callback = function()
+            local ip, port = addr:match("^([%d%.]+):(%d+)$")
+            UIManager:close(result_dialog)
+            UIManager:close(dialog)
+            self:openWebConfigEditorWithType(config_name, config, server_type, is_edit,
+                string.format("http://%s:%s", ip, port))
+        end }})
+    end
+    table.insert(buttons, {{ text = "取消", callback = function()
+        UIManager:close(result_dialog)
+    end }})
+    result_dialog = ButtonDialog:new{
+        title = "扫描结果 - 选择服务端",
+        title_align = "center",
+        buttons = buttons,
+    }
+    UIManager:show(result_dialog)
 end
 
 return M

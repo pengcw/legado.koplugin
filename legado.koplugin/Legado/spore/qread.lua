@@ -173,7 +173,7 @@ function M:getBookContentNew(chapter, callback)
   local bookUrl = chapter.bookUrl
   local down_chapters_index = chapter.chapters_index
   local bookSourceUrl = chapter.origin
-  -- 书名统一用 name 字段（DB 源头补充；所有章节来源均带 name）
+  -- 书名统一用 name 字段
   local bookname = H.is_str(chapter.name) and chapter.name or ""
 
   local ret, err_msg = self:handleResponse(function()
@@ -224,7 +224,7 @@ function M:getBookSourcesListNew(callback)
                 page = tostring(p),
             })
         end, nil, {
-            timeouts = {8, 12}
+            timeouts = {8, 18}
         }, 'getBookSourcesList')
 
         if H.is_tbl(page_data) then

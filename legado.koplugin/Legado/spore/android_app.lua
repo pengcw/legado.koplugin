@@ -414,7 +414,8 @@ function M:searchBookMulti(options, on_chunk, on_finish)
                 local chunk = {}
                 for i, v in ipairs(parsed_body) do
                     if type(v) == "table" and type(v.name) == "string" and v.name ~= "" and type(v.bookUrl) == "string" and v.bookUrl ~= "" then
-                        local deduplication_key = table.concat({v.name, v.author or "", tostring(v.originOrder or 1)}, "|||")
+                        -- 按 origin（书源）去重：不同书源同名同作者书不可合并（originOrder 可能相同）
+                        local deduplication_key = table.concat({v.origin or v.bookSourceUrl or "", v.name, v.author or ""}, "|||")
                         if not self.deduplication[deduplication_key] and self.filter_even(v) then
                             table.insert(chunk, v)
                             self.deduplication[deduplication_key] = true
@@ -529,7 +530,7 @@ function M:_searchBookSocket(search_text, filter, timeout)
           if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
               for i, v in ipairs(parsed_body) do
                 if H.is_tbl(v) and H.is_str(v.name) and v.name ~= "" and H.is_str(v.bookUrl) and v.bookUrl ~= "" then
-                    local deduplication_key = table.concat({v.name, v.author or "", tostring(v.originOrder or 1)}, "|||")
+                    local deduplication_key = table.concat({v.origin or v.bookSourceUrl or "", v.name, v.author or ""}, "|||")
                     if not deduplication[deduplication_key] and filter_even(v) then
                         table.insert(response, v)
                         deduplication[deduplication_key] = true
