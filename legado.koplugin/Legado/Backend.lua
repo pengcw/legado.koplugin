@@ -899,15 +899,10 @@ function M:cleanBookCache(book_cache_id, bookinfo)
         return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
     end
     local bookShelfId = self:getCurrentBookShelfId()
-
     self.dbManager:clearBook(bookShelfId, book_cache_id)
-
     local book_cache_path = Env.getBookCachePath(book_cache_id)
     if book_cache_path and util.pathExists(book_cache_path) then
-
         ffiUtil.purgeDir(book_cache_path)
-
-        -- 仅清除缓存场景：强制刷新服务器目录缓存（qread 24h / reader3 无 TTL），拿到最新目录
         if H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl) then
             local refresh_bookinfo = {
                 bookUrl = bookinfo.bookUrl,
@@ -919,7 +914,6 @@ function M:cleanBookCache(book_cache_id, bookinfo)
                 self:getChaptersList(refresh_bookinfo)
             end)
         end
-
         return wrap_response(true)
     else
         return wrap_response(nil, '没有缓存')

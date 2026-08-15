@@ -162,7 +162,7 @@ function BookDetails:getButtonGroup(other_elements_height)
                     end
                 end
                 UIManager:nextTick(function()
-                    if not util.fileExists(image_path) then 
+                    if not H.is_str(image_path) or not util.fileExists(image_path) then 
                         self:_reload() 
                         if self.lnk_file then Backend:emitMetadataChanged(self.lnk_file) end
                     end
