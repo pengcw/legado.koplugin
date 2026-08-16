@@ -340,6 +340,28 @@ function M:isLegado(ip, port, options)
     return status == 200 and body ~= nil and body:find("web/legado_test", 1, true) ~= nil
 end
 
+-- 扫描局域网 legado 服务：返回 { list = {"ip:port",...}, net = 网段信息 }（供手动/守卫共用）
+function M:scanLegadoServices(opts)
+    opts = opts or {}
+    local ports = opts.ports or { 1122 }
+    local scan_timeout = opts.timeout or 0.4
+    local net = self:getNetwork({ timeout = 0.4 })
+    local scan_opts = { timeout = scan_timeout }
+    if net and net.ip and net.netmask then
+        scan_opts.ip = net.ip -- 复用已探测网段，scan 内部不再重复 getNetwork
+        scan_opts.netmask = net.netmask
+    end
+    local hits = self:scan(ports, scan_opts)
+    if type(hits) ~= "table" then return { list = {}, net = net } end
+    local list = {}
+    for _, h in ipairs(hits) do
+        if self:isLegado(h.ip, h.port, { timeout = opts.legado_timeout or 2 }) then
+            table.insert(list, string.format("%s:%d", h.ip, h.port))
+        end
+    end
+    return { list = list, net = net }
+end
+
 -- 通断检测：任意 http/https URL，收到 HTTP 响应（任意状态码）即在线。
 -- 走 socket.http（自动 TLS/SNI，支持重定向），区别于局域网 httpGet 的裸 TCP。
 -- 用 HEAD 请求：socket.http 对 HEAD 不读 body（http.lua shouldreceivebody），

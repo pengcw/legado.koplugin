@@ -145,6 +145,7 @@ local function init_book_shelf(parent)
                         end
                         PlgState.ui_refresh_time = time.now()
                     end, function(err_msg)
+                        pcall(function() Backend:onServiceError(err_msg) end)
                         MessageBox:notice(tostring(err_msg) or '同步失败')
                     end)
                 end

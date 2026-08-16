@@ -1,8 +1,8 @@
 
 local UIManager = require("ui/uimanager")
-local socket_url = require("socket.url")
+
 local util = require("util")
-local logger = require("logger")
+
 
 local ButtonDialog = require("ui/widget/buttondialog")
 local Icons = require("Legado.res.icons")
@@ -59,7 +59,7 @@ function M:openWebConfigManager(callback)
     local settings = Backend:getSettings()
     local web_configs = settings.web_configs or {}
     local config_buttons = {}
-    
+
     table.insert(config_buttons, {{
         text = Icons.FA_PLUS .. " 新增配置",
         callback = function()
@@ -82,7 +82,7 @@ function M:openWebConfigManager(callback)
                     string.format("确定要切换到配置 \"%s\" 吗？", config_name),
                     function(result)
                         if result then
-                            Backend:HandleResponse(Backend:switchWebConfig(config_name), function(data)
+                            Backend:HandleResponse(Backend:switchWebConfig(config_name), function(_)
                                 UIManager:close(self.manager_menu)
                                 MessageBox:notice("配置切换成功")
                                 if H.is_func(self.refresh_library) then
@@ -118,7 +118,7 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
     local is_edit = config_name ~= nil
     local type_names = {
         [1] = "手机 APP",
-        [2] = "Reader3/Rust 服务", 
+        [2] = "Reader3/Rust 服务",
         [3] = "轻阅读后端"
     }
 
@@ -127,12 +127,12 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
     local desc_input = config and config.desc or ""
     local username_input = config and config.user or ""
     local password_input = config and config.pwd or ""
-    
+
     -- 根据编辑模式获取当前类型，否则使用传入的类型
     local current_type = is_edit and (config and config.type or 1) or server_type
 
-    local title = string.format("%s WEB 配置 - %s", 
-        is_edit and "编辑" or "新增", 
+    local title = string.format("%s WEB 配置 - %s",
+        is_edit and "编辑" or "新增",
         type_names[current_type] or "未知类型")
 
     local fields = {{
@@ -146,7 +146,7 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
             text = desc_input,
             hint = "描述 (可选)",
         },}
-        
+
     if current_type == 2 or current_type == 3 then
         local hint_info = current_type == 2 and "可选" or "必填"
         table.insert(fields, {
@@ -181,7 +181,7 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
                         self:handleConfigSave(dialog, config_name, config, current_type, is_edit)
                     end,
                 })
-    
+
     if is_edit then
         table.insert(buttons[1], {
                     text = "删除",
@@ -193,7 +193,7 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
                             string.format("确定要删除配置 \"%s\" 吗？", config_name),
                             function(result)
                                 if result then
-                                    Backend:HandleResponse(Backend:deleteWebConfig(config_name), function(data)
+                                    Backend:HandleResponse(Backend:deleteWebConfig(config_name), function(_)
                                         UIManager:close(dialog)
                                         MessageBox:notice("配置删除成功")
                                         self:openWebConfigManager()
@@ -207,7 +207,7 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
                             })
                     end,
                 })
-    end 
+    end
 
     dialog = require("ui/widget/multiinputdialog"):new{
         title = title,
@@ -232,7 +232,7 @@ function M:handleConfigSave(dialog, current_conf_name, old_config, server_type, 
     local url = util.trim(fields[2] or "")
     local description = util.trim(fields[3] or "")
     local user, pwd
-    
+
     -- 根据类型获取
     if server_type == 2 or server_type == 3 then
         user = util.trim(fields[4] or "")
@@ -251,7 +251,7 @@ function M:handleConfigSave(dialog, current_conf_name, old_config, server_type, 
         type = server_type,
         user = user,
         pwd = pwd,
-    }), function(data)
+    }), function(_)
         UIManager:close(dialog)
         MessageBox:notice(is_edit and "配置更新成功" or "配置创建成功")
         self:openWebConfigManager()
@@ -273,7 +273,7 @@ function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
         end)
     end
 
-    local ports = {1122}
+
     TaskProg.loading("正在检测服务", function()
         local current_url = config and config.url
         if current_url and current_url:match("^https?://") then
@@ -281,16 +281,7 @@ function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
                 return "current_ok"
             end
         end
-        local net, net_err = NetProbe:getNetwork({ timeout = 0.4 })
-        local hits = NetProbe:scan(ports, { timeout = 0.4 })
-        if type(hits) ~= "table" then return nil end
-        local list = {}
-        for _, h in ipairs(hits) do
-            if NetProbe:isLegado(h.ip, h.port) then
-                table.insert(list, string.format("%s:%d", h.ip, h.port))
-            end
-        end
-        return { net = net and net.cidr, list = list }
+        return NetProbe:scanLegadoServices({ timeout = 0.4 })
     end, function(ok, result)
         if not ok then
             return MessageBox:notice("未在局域网发现开源阅读服务")
@@ -299,7 +290,7 @@ function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
             return MessageBox:notice("当前服务可正常访问，无需扫描")
         end
         if type(result) ~= "table" or not result.list or #result.list == 0 then
-            local scope = type(result) == "table" and result.net or nil
+            local scope = type(result) == "table" and result.net and result.net.cidr or nil
             return MessageBox:notice(string.format("未在 %s 网段发现开源阅读服务",
                 scope and tostring(scope) or "局域网"))
         end
@@ -323,7 +314,7 @@ function M:showScanResults(dialog, config_name, config, server_type, is_edit, re
         UIManager:close(result_dialog)
     end }})
     result_dialog = ButtonDialog:new{
-        title = "扫描结果 - 选择服务端",
+        title = "扫描结果 - 发现服务端",
         title_align = "center",
         buttons = buttons,
     }

@@ -7,8 +7,44 @@ local Env = require("Legado.Helper.Env")
 local httpReq = require("Legado.Helper.Http")
 local IMG = require("Legado.Helper.image_meta")
 
+local LEGADO_ERR_PREFIX = '{"isSuccess":false'
+local function detect_server_error(data)
+    if type(data) ~= "string" or #data < 4 then return nil end
+    if #data >= #LEGADO_ERR_PREFIX
+            and data:sub(1, #LEGADO_ERR_PREFIX) == LEGADO_ERR_PREFIX then
+        return data:match('"errorMsg"%s*:%s*"([^"]*)"') or "legado 代理返回错误响应"
+    end
+    local head = data:sub(1, 128):lower()
+    if head:find("<!doctype html", 1, true) or head:find("<html", 1, true) then
+        return "服务器返回 HTML 页面（非图片）"
+    end
+    if head:find("404", 1, true) and head:find("not found", 1, true) then
+        return "服务器返回 404 文本（非图片）"
+    end
+    return nil
+end
+
 local M = {}
 
+-- 排查用开关：置 true 时校验失败的原始数据落盘 invalid_covers/ 供分析
+local LOCAL_DEBUG_SAVE_INVALID = false
+
+local function debug_save_invalid(data, reason, url)
+    if not LOCAL_DEBUG_SAVE_INVALID then return end
+    if type(data) ~= "string" or #data == 0 then return end
+    local ok = pcall(function()
+        local dir = Env.getTempDirectory()
+        FS.checkAndCreateFolder(FS.joinPath(dir, "invalid_covers"))
+        local name = string.format("%s_%s.raw", reason, H.md5(url or tostring(#data)))
+        local path = FS.joinPath(FS.joinPath(dir, "invalid_covers"), name)
+        util.writeToFile(data, path, true)
+        logger.warn("download_image: 无效图片数据已保留供分析 ->", path,
+            "size=", #data, "url=", tostring(url))
+    end)
+    if not ok then
+        logger.warn("download_image: 无效图片数据保留失败")
+    end
+end
 
 if not pcall(ffi.typeof, "z_stream") then
     ffi.cdef[[
@@ -88,8 +124,8 @@ function M.gunzip(data)
     end
 end
 
-local function save_processed(data, output_path, ext)
-    local ok, err = util.writeToFile(data, output_path, true)
+local function save_processed(data, output_path)
+    local ok = util.writeToFile(data, output_path, true)
     return ok and true or false
 end
 
@@ -131,7 +167,7 @@ function M.download_cover(book_cache_id, img_src, is_force, opts)
     if not is_force then
         local cover_full_path = M.get_default_cover_cache(book_cache_id)
         if H.is_str(cover_full_path) then
-            local dir, image_filename = util.splitFilePathName(cover_full_path)
+            local _, image_filename = util.splitFilePathName(cover_full_path)
             return cover_full_path, image_filename
         end
     end
@@ -180,8 +216,7 @@ function M.download_cover(book_cache_id, img_src, is_force, opts)
         if util.fileExists(old_path) then util.removeFile(old_path) end
     end
 
-    local ok_rename, err_rename = os.rename(lock_path, final_img_path)
-    if not ok_rename then
+    local ok_rename, err_rename = os.rename(lock_path, final_img_path)    if not ok_rename then
         logger.err("download_cover: rename failed", err_rename)
         return nil, nil
     end
@@ -264,8 +299,15 @@ function M.download_image(url, opts)
     -- 能解码即视为合法图片——renderimage 避免误杀 sniff 覆盖外的合法图。
     local ext = IMG.sniff_format(data)
     if not IMG.is_valid_image(data) then
+        local srv_err = detect_server_error(data)
+        if srv_err then
+            logger.warn("download_image: 服务器错误响应 ->", srv_err, "url=", tostring(url))
+            debug_save_invalid(data, "server", url)
+            return nil, "server error: " .. srv_err
+        end
         if ext ~= nil then
             -- 7 格式内结构损坏/尺寸异常：丢弃（不兜底，避免放行伪造魔数的垃圾）
+            debug_save_invalid(data, "struct", url)
             return nil, "invalid image data"
         end
         -- sniff 不识别：RenderImage 兜底验证
@@ -274,6 +316,7 @@ function M.download_image(url, opts)
             return RenderImage:renderImageData(data, #data)
         end)
         if not ok2 or not bb then
+            debug_save_invalid(data, "mupdf", url)
             return nil, "invalid image data"
         end
         -- mupdf 不返回格式信息，用通用图片扩展名（渲染按内容嗅探，不受扩展名影响）

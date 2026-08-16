@@ -88,7 +88,7 @@ function M:deleteBook(bookinfo, callback)
 end
 
 function M:getChapterList(bookinfo, callback)
-  if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then 
+  if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then
     return nil, "参数错误"
   end
 
@@ -108,7 +108,7 @@ end
 
 function M:getBookContent(chapter, callback)
   local bookUrl = chapter.bookUrl
-  local chapters_index = chapter.chapters_index
+
   local down_chapters_index = chapter.chapters_index
 
   if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
@@ -128,13 +128,13 @@ end
 
 function M:refreshBookContent(chapter, callback)
   local bookUrl = chapter.bookUrl
-  local chapters_index = chapter.chapters_index
+
   local down_chapters_index = chapter.chapters_index
 
   if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
       return nil, '刷新章节出错'
   end
-  
+
   return self:handleResponse(function()
           return self.client:refreshToc({
               url = bookUrl,
@@ -185,19 +185,19 @@ function M:getProxyImageUrl(bookUrl, img_src)
     img_src = H.is_str(img_src) and img_src or ""
     local width = Screen:getWidth() or 800
     local server_address = self.settings.server_address
-    
+
     local res_img_src = table.concat({server_address, '/image?url=', util.urlEncode(bookUrl), '&path=',
     util.urlEncode(img_src), '&width=', width})
 
     return res_img_src
 end
 
-function M:getProxyEpubUrl(bookUrl, htmlUrl)
+function M:getProxyEpubUrl(_bookUrl, htmlUrl)
     return htmlUrl
 end
 
 function M:getAvailableBookSource(options, on_finish, on_chunk)
-    if not (H.is_tbl(options) and H.is_str(options.book_url) and 
+    if not (H.is_tbl(options) and H.is_str(options.book_url) and
         options.name) then
         if H.is_func(on_finish) then on_finish(false, '获取可用书源参数错误') end
         return nil
@@ -323,21 +323,21 @@ function M:searchBookMulti(options, on_chunk, on_finish)
 
     local JSON = require("json")
     local websocket = require('Legado/websocket')
-    local UIManager = require("ui/uimanager")
-    local socket = require("socket")
-    
+
+
+
     local key_json = JSON.encode({ key = search_text })
     local client = websocket.client.sync({ timeout = 3 })
     local parsed = socket_url.parse(self.settings.server_address)
     local ws_scheme = parsed.scheme == 'http' and 'ws' or 'wss'
     parsed.port = (parsed.port or (ws_scheme == 'ws' and 80 or 443)) + 1
     local ws_server_address = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/searchBook")
-    
+
     local ok, err = client:connect(ws_server_address)
     if not ok then return on_finish(false, "连接失败：" .. tostring(err)) end
-    
+
     client:send(key_json)
-    
+
     local function filter_even(book)
         if not H.is_tbl(book) then return false end
         -- 换源场景：options 带 name/author 时精确匹配（与 _searchBookSocket 一致）
@@ -376,7 +376,7 @@ function M:searchBookMulti(options, on_chunk, on_finish)
         self.on_finish = on_finish
         self.filter_even = filter_even
         self.deduplication = {}
-        
+
         self.JSON = require("json")
         self.UIManager = require("ui/uimanager")
         self.socket = require("socket")
@@ -397,10 +397,10 @@ function M:searchBookMulti(options, on_chunk, on_finish)
             self.on_finish(false, "搜索超时")
             return nil
         end
-        
+
         local recvt = self.socket.select({self.client.sock}, nil, 0)
         if #recvt > 0 then
-            self.client.sock:settimeout(60) 
+            self.client.sock:settimeout(60)
             local response_body, recv_err = self.client:receive()
             if not response_body then
                 if recv_err == "timeout" then return nil end
@@ -408,11 +408,11 @@ function M:searchBookMulti(options, on_chunk, on_finish)
                 self.on_finish(true, nil)
                 return nil
             end
-            
+
             local ok_decode, parsed_body = pcall(self.JSON.decode, response_body)
             if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
                 local chunk = {}
-                for i, v in ipairs(parsed_body) do
+                for _, v in ipairs(parsed_body) do
                     if type(v) == "table" and type(v.name) == "string" and v.name ~= "" and type(v.bookUrl) == "string" and v.bookUrl ~= "" then
                         -- 按 origin（书源）去重：不同书源同名同作者书不可合并（originOrder 可能相同）
                         local deduplication_key = table.concat({v.origin or v.bookSourceUrl or "", v.name, v.author or ""}, "|||")
@@ -429,10 +429,10 @@ function M:searchBookMulti(options, on_chunk, on_finish)
         end
         return nil
     end
-    
+
     local task = SearchTask:new()
     task:start(client, timeout, on_chunk, on_finish, filter_even)
-    
+
     return function()
         if not task.is_done then
             task:stop()
@@ -528,7 +528,7 @@ function M:_searchBookSocket(search_text, filter, timeout)
 
           local ok_decode, parsed_body = pcall(JSON.decode, response_body)
           if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
-              for i, v in ipairs(parsed_body) do
+              for _, v in ipairs(parsed_body) do
                 if H.is_tbl(v) and H.is_str(v.name) and v.name ~= "" and H.is_str(v.bookUrl) and v.bookUrl ~= "" then
                     local deduplication_key = table.concat({v.origin or v.bookSourceUrl or "", v.name, v.author or ""}, "|||")
                     if not deduplication[deduplication_key] and filter_even(v) then
@@ -553,6 +553,147 @@ function M:_searchBookSocket(search_text, filter, timeout)
   end
 
   return result
+end
+
+-- ⚠️ 后端仅对 index==0 的第一本书打印详细字段日志
+-- ⚠️ Lua 模式是字节级的：多字节符号（┌└…）必须 plain find，不能进 [字符集]
+local BOOK_SOURCE_DEBUG_SYMBOLS = { "┌", "└", "︽", "⇒", "◇", "≡", "︾" }
+local BOOK_SOURCE_DEBUG_FIELD_MAP = {
+    ["书名"] = "name",
+    ["作者"] = "author",
+    ["分类"] = "kind",
+    ["字数"] = "wordCount",
+    ["最新章节"] = "durChapterTitle",
+    ["简介"] = "intro",
+    ["封面链接"] = "coverUrl",
+    ["详情页链接"] = "bookUrl",
+}
+
+local function splitBookSourceDebugLine(line)
+    if type(line) ~= "string" then return nil end
+    local body = line:match("^%[%d+:%d+%.%d+%]%s*(.*)$")
+    if not body then return nil end
+    for _, sym in ipairs(BOOK_SOURCE_DEBUG_SYMBOLS) do
+        if body:find(sym, 1, true) == 1 then
+            return sym, body:sub(#sym + 1)
+        end
+    end
+    return nil
+end
+
+function M:_bookSourceDebugNewState()
+    return {
+        books = {},
+        current_book = nil,
+        current_field = nil,
+        saw_activity = false, -- 是否收到过搜索日志（区分书源无响应）
+    }
+end
+
+function M:_bookSourceDebugCommit(state)
+    local book = state.current_book
+    state.current_book = nil
+    state.current_field = nil
+    if not (book and H.is_str(book.name) and book.name ~= ""
+            and H.is_str(book.bookUrl) and book.bookUrl ~= "") then
+        return
+    end
+    table.insert(state.books, book)
+end
+
+function M:_bookSourceDebugConsume(line, state)
+    state = state or self:_bookSourceDebugNewState()
+    local sym, content = splitBookSourceDebugLine(line)
+    if not sym then return false end
+    state.saw_activity = true
+
+    if sym == "┌" then
+        local field = content:match("^%s*获取(.+)%s*$")
+        if field == "书籍列表" then
+            self:_bookSourceDebugCommit(state)
+            state.current_field = nil
+        elseif field == "书名" then
+            self:_bookSourceDebugCommit(state)
+            state.current_book = {}
+            state.current_field = "书名"
+        elseif field then
+            state.current_field = field
+        end
+    elseif sym == "└" then
+        local key = state.current_field and BOOK_SOURCE_DEBUG_FIELD_MAP[state.current_field]
+        if key and state.current_book then
+            state.current_book[key] = content
+        end
+    elseif sym == "◇" or sym == "︽" then
+        self:_bookSourceDebugCommit(state)
+        return true
+    end
+    return false
+end
+
+function M:searchBookSingle(options)
+    if not (H.is_tbl(options) and H.is_str(options.search_text) and options.search_text ~= ''
+            and H.is_str(options.book_source_url) and options.book_source_url ~= '') then
+        return nil, "searchBookSingle参数错误"
+    end
+
+    local search_text = options.search_text
+    local bookSourceUrl = options.book_source_url
+    local timeout = H.is_num(options.timeout) and options.timeout or 30
+    local idle_timeout = H.is_num(options.idle_timeout) and options.idle_timeout or 8
+
+    local websocket = require('Legado/websocket')
+    local socket = require("socket")
+
+    local parsed = socket_url.parse(self.settings.server_address)
+    local ws_scheme = (parsed.scheme == 'http') and 'ws' or 'wss'
+    local default_port = (ws_scheme == 'ws') and 80 or 443
+    parsed.port = (parsed.port or default_port) + 1
+    local ws_addr = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/bookSourceDebug")
+
+    local client = websocket.client.sync({ timeout = 3 })
+    local ok, err = client:connect(ws_addr)
+    if not ok then
+        return nil, "连接失败：" .. tostring(err)
+    end
+
+    client:send(JSON.encode({ tag = bookSourceUrl, key = search_text }))
+
+    local state = self:_bookSourceDebugNewState()
+    local start = socket.gettime()
+    local idle_start = socket.gettime()
+    local finished = false
+
+    while socket.gettime() - start < timeout do
+        local recvt = socket.select({ client.sock }, nil, 0.5)
+        if #recvt > 0 then
+            local body = client:receive()
+            if not body then
+                break
+            end
+            if body ~= "ping" and body ~= "" then
+                if self:_bookSourceDebugConsume(body, state) then
+                    finished = true
+                    break
+                end
+                if state.saw_activity then
+                    idle_start = socket.gettime()
+                end
+            end
+        elseif socket.gettime() - idle_start > idle_timeout then
+            -- 请求发出后长时间无搜索日志：书源不存在/不可用（服务端仅 ping 保活）
+            break
+        end
+    end
+    pcall(function() client:close() end)
+
+    if not state.saw_activity then
+        return nil, "书源无响应（可能不存在或不可用）"
+    end
+    if finished and #state.books == 0 then
+        return {}
+    end
+    return state.books
 end
 
 return M

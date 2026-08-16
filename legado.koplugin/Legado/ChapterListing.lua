@@ -358,6 +358,7 @@ function ChapterListing:onRefreshChapters()
                         self.all_chapters_count = nil
                         self._ui_refresh_time = time.now()
                     end, function(err_msg)
+                        pcall(function() Backend:onServiceError(err_msg) end)
                         MessageBox:notice(err_msg or '同步失败')
                         if err_msg ~= '处理中' then
                             MessageBox:notice("请检查并刷新书架")
