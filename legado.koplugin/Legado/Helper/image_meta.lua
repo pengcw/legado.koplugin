@@ -186,11 +186,13 @@ function M.parse_dimensions(data, format)
         if not chunk_size then return nil end
         if 20 + chunk_size > #data then return nil end -- chunk 数据越界
         if fourcc == "VP8 " then
-            -- 有损（静态图必须为 key frame）：frame tag 首字节 0x9D + start code 0x9D 01 2A
-            -- 后 2 字节 14-bit 宽、2 字节 14-bit 高
+            -- 有损（静态图必须为 key frame）：帧标签 3 字节（bit7=key_frame 位）后
+            -- 跟 start code 0x9D 01 2A，再后 2 字节 14-bit 宽、2 字节 14-bit 高。
+            -- 帧标签首字节不固定为 0x9D（0x9D 只是 first_part_size 高位=001 的特例），
+            -- 写死 0x9D 会误杀 first_part_size ≥ 0x4000 或 version≠0 的合法关键帧
             if chunk_size < 10 then return nil end
-            local d = 21 -- chunk data 起始（20 是 chunk header 结束）
-            if string.byte(data, d) ~= 0x9D then return nil end -- key frame 标志
+            local d = 21 -- 帧标签起始（20 是 chunk header 结束）
+            if bit.band(string.byte(data, d), 0x80) == 0 then return nil end -- 非关键帧拒绝
             if string.byte(data, d + 3) ~= 0x9D or string.byte(data, d + 4) ~= 0x01
                     or string.byte(data, d + 5) ~= 0x2A then return nil end -- start code
             local w = string.byte(data, d + 6) + (string.byte(data, d + 7) % 0x40) * 256

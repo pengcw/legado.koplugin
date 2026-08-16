@@ -570,6 +570,10 @@ function M:getProxyCoverUrl(coverUrl)
         if string.sub(url_path, 1, 1) ~= "/" then url_path = "/" .. url_path end
         return server_address .. url_path
     end
+    if coverUrl:match("^%s*[hH][tT][tT][pP][sS]?://") then
+        local proxy = server_address .. '/proxypng?url=' .. util.urlEncode(coverUrl)
+        return { proxy, coverUrl }
+    end
     return server_address .. '/proxypng?url=' .. util.urlEncode(coverUrl)
 end
 

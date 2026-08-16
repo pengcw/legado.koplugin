@@ -3,7 +3,6 @@ local NetworkMgr = require("ui/network/manager")
 local ffiUtil = require("ffi/util")
 local dbg = require("dbg")
 local LuaSettings = require("luasettings")
-local socket_url = require("socket.url")
 local util = require("util")
 local time = require("ui/time")
 
@@ -31,9 +30,37 @@ local M = {
     apiClient = nil,
 }
 
+local SERVICE_UNREACHABLE_PATTERNS = {
+    "connection refused", "连接被拒绝",
+    "no route to host", "无法连接到服务",
+    "network unreachable", "网络不可用",
+    "host not found", "域名解析失败",
+    "wantread", "连接超时", "请求超时",
+    "ssl handshake failed", "安全连接失败",
+    "closed", "连接已关闭",
+    "eof", "连接意外终止",
+}
+
+local function isServiceUnreachable(err_msg)
+    if type(err_msg) ~= "string" or err_msg == "" then return false end
+    local lower = err_msg:lower()
+    for _, pattern in ipairs(SERVICE_UNREACHABLE_PATTERNS) do
+        if lower:find(pattern, 1, true) then return true end
+    end
+    return false
+end
+
+local function extract_err_msg(v)
+    if type(v) == "string" then return v end
+    if type(v) == "table" then
+        return v.message or v.errorMsg or v[2]
+    end
+    return nil
+end
+
 local function wrap_response(data, err_message)
-    local response = { 
-        type = data ~= nil and 'SUCCESS' or 'ERROR' 
+    local response = {
+        type = data ~= nil and 'SUCCESS' or 'ERROR'
     }
     if data ~= nil then
         response.body = data
@@ -57,6 +84,101 @@ function M:HandleResponse(response, on_success, on_error)
         return on_error(msg)
     end
     return on_error("Unknown response type: " .. tostring(rtype))
+end
+
+function M:onServiceError(err_msg)
+    if not self:_isLegadoApp() then return end
+    local msg = extract_err_msg(err_msg)
+    if not isServiceUnreachable(msg) then return end
+    if not NetworkMgr:isConnected() then return end
+    local PlgState = require("Legado/PlgState")
+    if PlgState.service_guard_cooldown_until
+            and PlgState.service_guard_cooldown_until > time.now() then return end
+    -- ⚠️ time.now() 返回 fts（定点时间）而非秒：必须用 time.s(30) 换算，
+    -- 直接 +30 只加 30 个 fts 单位（毫秒级），冷却会形同虚设
+    PlgState.service_guard_cooldown_until = time.now() + time.s(30)
+    self:promptServiceUnreachable(msg)
+end
+
+function M:promptServiceUnreachable()
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local NetProbe = require("Legado/Helper/NetProbe")
+    local TaskProg = require("Legado.task.Progress")
+    local dialog
+    local function startScan()
+        TaskProg.loading("正在扫描局域网服务", function()
+            return NetProbe:scanLegadoServices({ timeout = 0.4 })
+        end, function(ok, result)
+            if dialog and dialog.close then dialog:close() end
+            if not ok or type(result) ~= "table" or not result.list or #result.list == 0 then
+                -- 无结果短冷却 10s（用户可能忘了开服务，开完想立即重扫）
+                require("Legado/PlgState").service_guard_cooldown_until = time.now() + time.s(10)
+                local scope = type(result) == "table" and result.net and result.net.cidr or nil
+                return require("Legado/MessageBox"):notice(string.format("未在 %s 网段发现开源阅读服务",
+                    scope and tostring(scope) or "局域网"))
+            end
+            local result_dialog
+            local buttons = {}
+            for _, addr in ipairs(result.list) do
+                table.insert(buttons, {{ text = addr, callback = function()
+                    UIManager:close(result_dialog)
+                    self:HandleResponse(self:updateActiveServerAddress(addr), function()
+                        require("Legado/MessageBox"):notice("已切换至 " .. addr)
+                        local LibraryView = require("Legado/LibraryView")
+                        if LibraryView.instance then LibraryView.instance:onRefreshLibrary() end
+                    end, function(switch_err)
+                        require("Legado/MessageBox"):error("切换失败：", tostring(switch_err))
+                    end)
+                end }})
+            end
+            table.insert(buttons, {{ text = "取消", callback = function()
+                UIManager:close(result_dialog)
+                -- 取消选择：重置冷却
+                require("Legado/PlgState").service_guard_cooldown_until = time.now() + time.s(30)
+            end }})
+            result_dialog = ButtonDialog:new{
+                title = "扫描结果 - 发现服务端",
+                title_align = "center",
+                buttons = buttons,
+            }
+            UIManager:show(result_dialog)
+        end, { timeout = 20 })
+    end
+    dialog = ButtonDialog:new{
+        title = "请检查阅读 Web 服务是否开启，\n或扫描局域网重连",
+        title_align = "center",
+        buttons = {{
+            { text = "扫描并重连", callback = function()
+                UIManager:close(dialog)
+                startScan()
+            end },
+            { text = "忽略", callback = function() UIManager:close(dialog) end },
+        }},
+    }
+    UIManager:show(dialog)
+end
+
+function M:updateActiveServerAddress(new_url)
+    if not (H.is_str(new_url) and new_url ~= "") then
+        return wrap_response(nil, "地址无效")
+    end
+    if not new_url:match("^%s*[hH][tT][tT][pP][sS]?://") then
+        new_url = "http://" .. new_url
+    end
+    new_url = new_url:gsub("/+$", "")
+    local settings = self:getSettings()
+    local conf_name = settings.current_conf_name
+    local web_configs = settings.web_configs
+    if H.is_tbl(web_configs) and H.is_str(conf_name)
+            and H.is_tbl(web_configs[conf_name]) then
+        web_configs[conf_name].url = new_url
+        settings.web_configs = web_configs
+    end
+    settings.server_address = new_url
+    self:saveSettings(settings)
+    self:loadApiProvider()
+    logger.info("服务地址已切换至", new_url)
+    return wrap_response(true)
 end
 
 function M:_isQingread() return self.settings_data.data.server_type == 3 end
@@ -92,7 +214,7 @@ function M:initialize()
 
     self.settings_data = self:getLuaConfig(Env.getUserSettingsPath())
 
-    if H.is_tbl(self.settings_data) and not (H.is_tbl(self.settings_data.data) and 
+    if H.is_tbl(self.settings_data) and not (H.is_tbl(self.settings_data.data) and
                 self.settings_data.data['current_conf_name']) then
         self.settings_data.data = {
                 server_address = "http://127.0.0.1:1122",
@@ -136,7 +258,7 @@ function M:checkOta(is_compel)
     end
 end
 
-function M:_show_notice(msg, timeout)
+function M:_show_notice(msg)
     local Notification = require("ui/widget/notification")
     Notification:notify(msg or '', Notification.SOURCE_ALWAYS_SHOW)
 end
@@ -179,7 +301,7 @@ end
 
 function M:syncAndResortBooks()
     local wrapped_response = self:refreshLibraryCache()
-    return self:HandleResponse(wrapped_response, function(data)
+    return self:HandleResponse(wrapped_response, function(_)
         local bookShelfId = self:getCurrentBookShelfId()
         local status, err = pcall(function()
             return self.dbManager:resortBooksByLastRead(bookShelfId)
@@ -226,7 +348,6 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
         return wrap_response(nil, "获取目录参数错误")
     end
     local book_cache_id = bookinfo.cache_id
-    local bookUrl = bookinfo.bookUrl
 
     return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
         local status, err = safe_call(function()
@@ -341,10 +462,7 @@ function M:_pDownloadChapter(chapter)
     local bookUrl = chapter.bookUrl
     local book_cache_id = chapter.book_cache_id
     local chapters_index = chapter.chapters_index
-    local chapter_title = chapter.title or ''
-    local down_chapters_index = chapter.chapters_index
     -- qread only
-    local origin = chapter.origin
 
     if bookUrl == nil or not book_cache_id then
         error('_pDownloadChapter input parameters err' .. tostring(bookUrl) .. tostring(book_cache_id))
@@ -461,9 +579,6 @@ function M:findNextChapter(current_chapter, is_downloaded)
         return
     end
 
-    local book_cache_id = current_chapter.book_cache_id
-    local totalChapterNum = current_chapter.totalChapterNum
-    local current_chapters_index = current_chapter.chapters_index
 
     if current_chapter.call_event == nil then
         current_chapter.call_event = 'next'
@@ -524,7 +639,7 @@ end
 
 function M:preLoadingChapters(chapters, download_chapter_count, result_progress_callback, temp_disable_multithread)
     local has_result_progress_callback = H.is_func(result_progress_callback)
-    
+
     local return_error_handle = function(error_msg)
         error_msg = error_msg or "未知错误"
         logger.dbg("Legado.preLoadingChapters - ", error_msg)
@@ -535,8 +650,8 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     if not H.is_tbl(chapters) then return return_error_handle('Incorrect call parameters') end
     pcall(function() TaskLock.cleanExpired(self.dbManager) end)
 
+    local chapter_down_tasks
     local is_read_ahead = true
-    local chapter_down_tasks = {}
     if H.is_tbl(chapters[1]) and chapters[1].chapters_index ~= nil and chapters[1].book_cache_id ~= nil then
         chapter_down_tasks = chapters
         -- mark false when input is a list (e.g., 1000 chapters)
@@ -556,8 +671,8 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     local settings = self:getSettings()
     local max_threads = tonumber(settings.download_threads) or 2
     max_threads = math.max(1, math.min(16, max_threads))
-    if temp_disable_multithread then 
-        max_threads = 1 
+    if temp_disable_multithread then
+        max_threads = 1
         logger.info("Multi-threading temporarily disabled for this session")
     end
 
@@ -573,7 +688,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     local ch = TaskQueue:createChannel(channel_name, max_threads, nil, true)
     local completed_count = 0
     local has_error = false
-    
+
     local is_finalizing = false
     local pending_cbz_count = 0 -- 进行中的异步 CBZ 打包数(from_urls_async 不在 ch 任务队列中)
     local check_completion = function(progress, err_msg)
@@ -645,11 +760,11 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
 
     for i = #chapter_down_tasks, 1, -1 do
         local dlChapter = chapter_down_tasks[i]
-        
+
         if dlChapter.isDownLoaded ~= true and not self:isTaskRunning(dlChapter) then
             dlChapter.is_pre_loading = true
             table.insert(tasks_to_insert, dlChapter)
-            
+
             ch:pushTask(
                 function(chapter_info)
                     return self:_pDownloadChapter(chapter_info)
@@ -671,7 +786,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                                 -- 图片下载并发跟随"同时下载数", 与章节级并发解耦
                                 max_workers = max_threads,
                             },
-                            on_finish = function(aborted, result)
+                            on_finish = function(_, result)
                                 pending_cbz_count = pending_cbz_count - 1
                                 if not (result and result.success) then
                                     pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
@@ -704,15 +819,15 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                         logger.err("Failed to download chapter:", tostring(downloaded_chapter))
                         return check_completion(false, string.format("章节[%s]下载失败: %s", tostring(current_chapter.title), tostring(downloaded_chapter)))
                     end
-                    
+
                     local cache_file_path = downloaded_chapter.cacheFilePath
                     logger.dbg('Download chapter successfully:', current_chapter.book_cache_id, current_chapter.chapters_index, cache_file_path)
 
                     local ok, err = pcall(db_update_success, current_chapter, cache_file_path)
                     if not ok then logger.err('Error saving download to database:', tostring(err)) end
-                    
+
                     pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
-                    
+
                     completed_count = completed_count + 1
                     check_completion(completed_count)
                 end,
@@ -720,7 +835,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     args = {dlChapter},
                     insert_at_head = true,
                     timeout = chapter_timeout,
-                    on_start = function(retry)
+                    on_start = function()
                         logger.dbg('TaskQueue running: chapter_title:', dlChapter.title or nil)
                     end
                 }
@@ -729,7 +844,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
             logger.dbg('Legado.preLoadingChapters - Task already processed/locked, skip:', dlChapter.chapters_index)
         end
     end
-    
+
     if #tasks_to_insert > 0 then
         local lock_ttl = math.max(3600, chapter_timeout * #tasks_to_insert)
         pcall(function() TaskLock.setLock(self.dbManager, tasks_to_insert, true, lock_ttl, batch_id) end)
@@ -741,12 +856,12 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
             end)
         end
     end
-    
+
     if ch then ch:resume() end
     return true
 end
 
-function M:analyzeCacheStatus(book_cache_id, chapter_count, stats_only)
+function M:analyzeCacheStatus(book_cache_id, chapter_count)
     if not (H.is_num(chapter_count) and chapter_count > 0 ) then
         chapter_count = self:getChapterCount(book_cache_id)
     end
@@ -776,7 +891,7 @@ function M:analyzeCacheStatusForRange(book_cache_id, start_index, end_index, sta
                     is_cached = true
                 end
             end
-            if is_cached == true then 
+            if is_cached == true then
                 result.cached_count = result.cached_count + 1
                 if not stats_only then table.insert(result.cached_chapters, chapter) end
             else
@@ -871,7 +986,6 @@ function M:chapterSortingMode(bookCacheId, mode)
 end
 
 function M:getAllChaptersByUI(bookCacheId)
-    local bookShelfId = self:getCurrentBookShelfId()
 
     local chapter_sorting_mode = self:chapterSortingMode(bookCacheId)
     local is_desc_sort = true
@@ -883,7 +997,6 @@ function M:getAllChaptersByUI(bookCacheId)
 end
 
 function M:getBookChapterPlusCache(bookCacheId)
-    local bookShelfId = self:getCurrentBookShelfId()
     local chapter_data = self.dbManager:getAllChapters(bookCacheId)
     return chapter_data
 end
@@ -958,16 +1071,13 @@ function M:vacuumDatabase()
 end
 
 function M:MarkReadChapter(chapter, is_update_timestamp)
-    local chapters_index = chapter.chapters_index
     chapter.isRead = not chapter.isRead
     self.dbManager:updateIsRead(chapter, chapter.isRead, is_update_timestamp)
     return wrap_response(true)
 end
 
 function M:ChangeChapterCache(chapter)
-    local chapters_index = chapter.chapters_index
     local cacheFilePath = chapter.cacheFilePath
-    local book_cache_id = chapter.book_cache_id
     local isDownLoaded = chapter.isDownLoaded
 
     if isDownLoaded ~= true then
@@ -1005,7 +1115,7 @@ end
 function M:saveBookProgressAsync(chapter)
     self:launchProcess(function()
             return self:saveBookProgress(chapter)
-        end, function(status, response, r2)
+        end, function(_, response)
         if not (H.is_tbl(response) and response.type == 'SUCCESS') then
             -- local message = type(response) == 'table' and response.message or "阅读进度自动上传失败"
             self:_show_notice("自动上传进度失败")
@@ -1121,7 +1231,7 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
                 end
             end
             if not skip then
-                local timeout = (i < #candidates) and 8 or 15 
+                local timeout = (i < #candidates) and 8 or 15
                 local cover_path, cover_name = try_download(url, timeout)
                 if cover_path then
                     return cover_path, cover_name
@@ -1141,7 +1251,6 @@ function M:isTaskRunning(target)
 end
 
 function M:after_reader_chapter_show(chapter)
-    local chapters_index = chapter.chapters_index
     local cache_file_path = chapter.cacheFilePath
     local book_cache_id = chapter.book_cache_id
     local status, err = pcall(function()
@@ -1234,9 +1343,6 @@ function M:after_reader_chapter_show(chapter)
 end
 
 function M:downloadChapter(chapter)
-    local bookCacheId = chapter.book_cache_id
-    local chapterIndex = chapter.chapters_index
-    local chapterName = chapter.name
     if self:isTaskRunning(chapter) then
             return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
@@ -1394,7 +1500,7 @@ function M:saveSettings(settings)
         self.settings_data = LuaSettings:open(Env.getUserSettingsPath())
         return wrap_response(true)
     end
-    
+
     if not ConfigValidator.settings(settings) then
         return wrap_response(nil, '参数校检错误，保存失败')
     end
@@ -1479,7 +1585,7 @@ function M:onExitClean()
 end
 
 require("ffi/__gc")(M, {
-    __gc = function(t)
+    __gc = function()
         M:onExitClean()
     end
 })

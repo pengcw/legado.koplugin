@@ -192,6 +192,22 @@ local function pGetUrlContent(options, is_create)
         return false, "Remote server error or unavailable"
     end
 
+    -- 图片请求：Content-Type 明确非图片（text/*, application/json, xml）→ 提前失败
+    -- （octet-stream/image/* 放行——CDN 常不设正确类型，按 Content-Type 拒绝会误杀）
+    if is_pic and headers and headers["content-type"] then
+        local mime = headers["content-type"]:match("^%s*([^;%s]+)")
+        if mime then
+            mime = mime:lower()
+            if mime:match("^text/") or mime == "application/json"
+                    or mime == "application/xml"
+                    or mime == "application/xhtml+xml" then
+                logger.warn("HTTP Content-Type 非图片（图片请求）:", mime, "url=", tostring(url))
+                close_file()
+                return false, "server error: Content-Type " .. mime
+            end
+        end
+    end
+
     local content
     if not file_fp then
         content = table.concat(sink)
