@@ -22,6 +22,14 @@ local function show_progress_info(message, options)
     end
 
     defaultOptions.dismissable = (options.dismissable == true)
+    local user_closed = false
+    if defaultOptions.dismissable then
+        local orig_dismiss_cb = defaultOptions.dismiss_callback
+        defaultOptions.dismiss_callback = function()
+            user_closed = true 
+            if H.is_func(orig_dismiss_cb) then orig_dismiss_cb() end
+        end
+    end
 
     local spinner_chars = SPINNER_STYLES[math.random(1, #SPINNER_STYLES)]
     local updateText
@@ -34,6 +42,7 @@ local function show_progress_info(message, options)
     local progress_max = defaultOptions.progress_max
     local has_progress_max = H.is_num(progress_max)
     updateText = function()
+        if user_closed then return end
         if has_progress_max and current_progress then
             current_progress_text = progress_max and string.format("[%s/%s]", current_progress, progress_max) or ""
         else
@@ -63,7 +72,9 @@ local function show_progress_info(message, options)
 
     updateText()
     return {
+        closed = false,   -- 供调用方判断，用户手动关闭后 true，可据此重建/重置引用
         close = function()
+            user_closed = true
             UIManager:unschedule(updateText)
             if message_dialog then
                 UIManager:close(message_dialog)

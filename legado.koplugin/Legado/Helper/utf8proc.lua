@@ -1,11 +1,3 @@
---[[
-  UTF-8 模块 (utf8proc)
-  用途说明：
-  1. 深度清理全角空格 (U+3000) 和特殊空白符，保障文本洗稿和排版整洁。
-  2. 提供安全的 UTF-8 字符级遍历，防止多字节中文字符被截断产生乱码。
-  3. 为高级排版（如首字下沉、智能段落合并）提供精准的字符边界及标点识别。
-]]
-
 local ffi = require("ffi")
 
 local M = {}
@@ -220,6 +212,25 @@ function M.count(str)
         end
     end
     return count, true
+end
+
+function M.len(str)
+    if type(str) ~= "string" then return 0 end
+    return M.count(str)
+end
+
+function M.sub(str, i, j)
+    if type(str) ~= "string" or str == "" then return "" end
+    local chars, n = {}, 0
+    for _, _, ch in M.utf8_chars(str) do
+        n = n + 1
+        chars[n] = ch
+    end
+    if i < 0 then i = n + i + 1 end
+    if j == nil then j = n elseif j < 0 then j = n + j + 1 end
+    i, j = math.max(1, i), math.min(n, j)
+    if i > j then return "" end
+    return table.concat(chars, "", i, j)
 end
 
 function M.utf8_trim(str)

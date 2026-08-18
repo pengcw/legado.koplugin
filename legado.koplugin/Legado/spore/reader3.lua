@@ -4,35 +4,13 @@ local socketutil = require("socketutil")
 local H = require("Legado/Helper")
 local safe_pcall = require("Legado.Helper.Error").pcall
 local BaseSpec = require("Legado.spore.base")
+local bookutil = require("Legado.spore.bookutil")
 
 local M = BaseSpec:extend{
   name = "reader3",
   client = nil,
   settings = nil,
 }
-
-local function filter_search_book(book, search_text, is_exact_search, options)
-    if not H.is_tbl(book) then return false end
-    local has_name_filter = H.is_str(options and options.name) and options.name   ~= ""
-    local has_author_filter = H.is_str(options and options.author) and options.author ~= ""
-    local has_origin_filter = H.is_str(options and options.origin) and options.origin ~= ""
-    if has_name_filter or has_author_filter or has_origin_filter then
-        local match_name = has_name_filter and H.is_str(book.name) and book.name == options.name
-        local match_author = has_author_filter and H.is_str(book.author) and book.author == options.author
-        local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == options.origin
-
-        if has_name_filter and not match_name then return false end
-        if has_author_filter and not match_author then return false end
-        if has_origin_filter and not match_origin then return false end
-
-        return true
-    end
-    if is_exact_search then
-        return (H.is_str(book.name) and book.name == search_text)
-            or (H.is_str(book.author) and book.author == search_text)
-    end
-    return true
-end
 
 function M:init()
     BaseSpec.init(self)
@@ -302,9 +280,6 @@ function M:getProxyEpubUrl(_, htmlUrl)
         local api_root_url = server_address:gsub("/reader3$", "")
         -- 可能有空格 "data": "/book-assets/guest/紫川_老猪/紫川 作者：老猪.epub/index/OEBPS/Text/chapter_0.html"
         htmlUrl = custom_urlEncode(htmlUrl)
-        -- logger.info("custom_urlEncode:",htmlUrl)
-        -- logger.info("util.urlEncode",util.urlEncode(htmlUrl))
-        -- logger.info("url.escape",socket_url.escape(htmlUrl))
         return socket_url.absolute(api_root_url, htmlUrl)
     else
         return htmlUrl
@@ -392,8 +367,7 @@ function M:exploreBook(options, callback)
 end
 
 function M:getAvailableBookSource(options, on_finish, on_chunk)
-    if not (H.is_tbl(options) and H.is_str(options.book_url)
-            and H.is_str(options.name) and options.name ~= "") then
+    if not (H.is_tbl(options) and H.is_str(options.book_url) and options.book_url ~= "") then
         if H.is_func(on_finish) then on_finish(false, '获取可用书源参数错误') end
         return nil
     end
@@ -401,45 +375,13 @@ function M:getAvailableBookSource(options, on_finish, on_chunk)
     on_chunk = H.is_func(on_chunk) and on_chunk or function() end
 
     local book_url = options.book_url
-    local name = options.name
-    local author = options.author
-    local last_index = options.last_index
-    local is_more_call = last_index ~= nil and H.is_num(last_index)
+    local last_index = H.is_num(options.last_index) and options.last_index or -1
+    local is_more_call = last_index >= 0
 
     local finish_sent = false
     local all_results = {}
     local seen_origin = {}
-    -- author 兜底：调用方未提供时用缓存快查结果的 author 众数补全，避免同名异作者混入
-    local resolved_author = author
-    local author_votes = {}
-    local function note_author(a)
-        if not H.is_str(a) or a == "" then return end
-        author_votes[a] = (author_votes[a] or 0) + 1
-    end
-    local function resolve_author()
-        if H.is_str(resolved_author) and resolved_author ~= "" then return end
-        local best_a, best_n = nil, 0
-        for a, n in pairs(author_votes) do
-            if n > best_n then best_a, best_n = a, n end
-        end
-        resolved_author = best_a
-    end
-
-    local function add_results(list)
-        if not H.is_tbl(list) then return end
-        local new_chunk = {}
-        for _, book in ipairs(list) do
-            if H.is_tbl(book) and H.is_str(book.origin) and not seen_origin[book.origin] then
-                seen_origin[book.origin] = true
-                note_author(book.author)
-                table.insert(all_results, book)
-                table.insert(new_chunk, book)
-            end
-        end
-        if #new_chunk > 0 then
-            pcall(on_chunk, new_chunk)
-        end
-    end
+    local server_last_index
 
     local function send_finish(success, data, msg, last_idx)
         if finish_sent then return end
@@ -447,49 +389,97 @@ function M:getAvailableBookSource(options, on_finish, on_chunk)
         pcall(on_finish, success, data, msg, last_idx)
     end
 
-    local search_cancel = nil
-    local function search_more(start_index)
-        search_cancel = self:searchBookMulti({
-            search_text = name,
-            name = name,
-            author = resolved_author,
-            last_index = start_index,
-        }, function(chunk)
-            add_results(chunk)
-        end, function(success, msg, server_last_index)
-            if success then
-                send_finish(true, { list = all_results }, nil, server_last_index)
-            else
-                send_finish(false, nil, msg or "搜索失败")
-            end
-        end)
+    local SSE = require("Legado/Helper/SSEClient")
+    local JSON = require("json")
+    local server_address = self.settings.server_address
+
+    local login_ok, login_token = self:ensureLogin()
+    if login_ok ~= true then
+        on_finish(false, nil, tostring(login_token or "登录失败"))
+        return nil
+    end
+    local token = login_token or nil
+
+    local function build_request()
+        local q = {
+            url = book_url,
+            lastIndex = last_index,
+            searchSize = 30,
+            bookSourceGroup = '',
+            refresh = 0,
+            concurrentCount = 32,
+            v = os.time(),
+        }
+        local parts = {}
+        for k, v in pairs(q) do
+            parts[#parts + 1] = k .. "=" .. util.urlEncode(tostring(v))
+        end
+        if H.is_str(token) and token ~= "" then
+            parts[#parts + 1] = "accessToken=" .. token
+        end
+        local parsed = socket_url.parse(server_address)
+        parsed.path = (parsed.path or ""):gsub("/+$", "") .. "/searchBookSourceSSE"
+        parsed.query = table.concat(parts, "&")
+        return socket_url.build(parsed)
     end
 
-    if is_more_call then
-        search_more(last_index)
-    else
-        local ok, ret = pcall(function()
-            return self:handleResponse(function()
-                return self.client:getAvailableBookSource({
-                    refresh = 0,
-                    url = book_url,
-                    v = os.time()
-                })
-            end, nil, {
-                timeouts = {30, 50},
-            }, 'getAvailableBookSource')
-        end)
-        if ok and H.is_tbl(ret) then
-            add_results(ret)
-            resolve_author()
+    local client = nil
+    local function on_sse_event(evt_name, data_str)
+        if evt_name == "message" then
+            local ok, obj = pcall(JSON.decode, data_str)
+            if ok and H.is_tbl(obj) then
+                local chunk = {}
+                if H.is_tbl(obj.data) then
+                    for _, book in ipairs(obj.data) do
+                        if H.is_tbl(book) and H.is_str(book.origin) and not seen_origin[book.origin] then
+                            seen_origin[book.origin] = true
+                            table.insert(all_results, book)
+                            table.insert(chunk, book)
+                        end
+                    end
+                end
+                if H.is_num(obj.lastIndex) then
+                    server_last_index = obj.lastIndex
+                end
+                if #chunk > 0 and H.is_func(on_chunk) then
+                    pcall(on_chunk, chunk)
+                end
+            end
+        elseif evt_name == "end" then
+            local ok_end, obj_end = pcall(JSON.decode, data_str)
+            if ok_end and H.is_tbl(obj_end) and H.is_num(obj_end.lastIndex) then
+                server_last_index = obj_end.lastIndex
+            end
+            send_finish(true, { list = all_results }, nil, server_last_index)
+            if client then client:cancel() end
+        elseif evt_name == "error" then
+            local ok, obj = pcall(JSON.decode, data_str)
+            local error_msg = ok and H.is_tbl(obj) and H.is_str(obj.errorMsg) and obj.errorMsg or data_str
+            send_finish(false, nil, error_msg or "换源搜索失败")
+            if client then client:cancel() end
         end
-        -- 缓存快查无论成败，均追加全量搜索
-        search_more(-1)
     end
+
+    local function open_stream()
+        client = SSE.open{
+            url = build_request(),
+            timeout = 120,
+            on_event = on_sse_event,
+            on_close = function(err)
+                if not finish_sent then
+                    send_finish(false, nil, err or "连接中断")
+                end
+            end,
+        }
+    end
+
+    open_stream()
 
     return function()
-        if search_cancel then search_cancel() end
-        send_finish(false, nil, "已取消")
+        if client then client:cancel() end
+        if not finish_sent then
+            send_finish(false, nil, "已取消")
+        end
     end
 end
 
@@ -642,7 +632,7 @@ function M:searchBookMulti(options, on_chunk, on_finish)
                 if H.is_tbl(obj.data) then
                     for _, book in ipairs(obj.data) do
                         if H.is_tbl(book)
-                                and filter_search_book(book, search_text, is_exact_search, options)
+                                and bookutil.filter_search(book, search_text, is_exact_search, options)
                                 and H.is_str(book.name) and book.name ~= ""
                                 and H.is_str(book.bookUrl) and book.bookUrl ~= ""
                                 and not dedup[book.bookUrl] then

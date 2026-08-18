@@ -6,6 +6,7 @@ local socket_url = require("socket.url")
   local JSON = require("json")
 local H = require("Legado/Helper")
 local BaseSpec = require("Legado.spore.base")
+local bookutil = require("Legado.spore.bookutil")
 
 local M = BaseSpec:extend{
     name = "android_app",
@@ -339,24 +340,7 @@ function M:searchBookMulti(options, on_chunk, on_finish)
     client:send(key_json)
 
     local function filter_even(book)
-        if not H.is_tbl(book) then return false end
-        -- 换源场景：options 带 name/author 时精确匹配（与 _searchBookSocket 一致）
-        local has_name_filter = H.is_str(options and options.name) and options.name ~= ""
-        local has_author_filter = H.is_str(options and options.author) and options.author ~= ""
-        local has_origin_filter = H.is_str(options and options.origin) and options.origin ~= ""
-        if has_name_filter or has_author_filter or has_origin_filter then
-            local match_name = has_name_filter and H.is_str(book.name) and book.name == options.name
-            local match_author = has_author_filter and H.is_str(book.author) and book.author == options.author
-            local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == options.origin
-            if has_name_filter and not match_name then return false end
-            if has_author_filter and not match_author then return false end
-            if has_origin_filter and not match_origin then return false end
-            return true
-        end
-        if is_exact_search then
-            return (book.name == search_text) or (book.author == search_text)
-        end
-        return true
+        return bookutil.filter_search(book, search_text, is_exact_search, options)
     end
 
     local SearchTask = {}
@@ -484,30 +468,7 @@ function M:_searchBookSocket(search_text, filter, timeout)
   end
 
     local function filter_even(book)
-        if not H.is_tbl(book) then return false end
-
-        local has_name_filter = H.is_str(filter and filter.name) and filter.name   ~= ""
-        local has_author_filter = H.is_str(filter and filter.author) and filter.author ~= ""
-        local has_origin_filter = H.is_str(filter and filter.origin) and filter.origin ~= ""
-
-        if has_name_filter or has_author_filter or has_origin_filter then
-            local match_name = has_name_filter and H.is_str(book.name) and book.name == filter.name
-            local match_author = has_author_filter and H.is_str(book.author) and book.author == filter.author
-            local match_origin = has_origin_filter and H.is_str(book.origin) and book.origin == filter.origin
-
-            if has_name_filter and not match_name then return false end
-            if has_author_filter and not match_author then return false end
-            if has_origin_filter and not match_origin then return false end
-
-            return true
-        end
-
-        if is_exact_search then
-            return (H.is_str(book.name) and book.name == search_text)
-                or (H.is_str(book.author) and book.author == search_text)
-        end
-
-        return true
+        return bookutil.filter_search(book, search_text, is_exact_search, filter)
     end
 
   client:send(key_json)

@@ -3,6 +3,7 @@ local ssl = require("ssl")
 local socket_url = require("socket.url")
 local time = require("ui/time")
 local UIManager = require("ui/uimanager")
+local logger = require("logger")
 
 local SSEClient = {}
 
@@ -127,7 +128,7 @@ local function chunked_decoder()
 end
 
 -- sse_parser
-local MAX_SSE_LINE = 256 * 1024
+local MAX_SSE_LINE = 1 * 1024 * 1024   -- 单行上限 1MB（正常书单 JSON 行 <10KB；给大简介/章节目录留余量）
 local MAX_SSE_EVENT = 8 * 1024 * 1024
 
 local function sse_parser()
@@ -154,7 +155,8 @@ local function sse_parser()
         end
         if line:sub(1, 1) == ":" then
             return nil  -- SSE 注释行
-        end        if line:sub(1, 6) == "event:" then
+        end
+        if line:sub(1, 6) == "event:" then
             local v = line:sub(7)
             if v:sub(1, 1) == " " then v = v:sub(2) end
             event = v
@@ -183,18 +185,22 @@ local function sse_parser()
             elseif lf then idx = lf
             else break end
             local line = buf:sub(1, idx - 1)
+            local skip_line = false
             if #line > MAX_SSE_LINE then
-                set_error("SSE 行过长")
-                return {}, true
+                logger.warn(string.format("[SSEClient] SSE 行过长: %d 字节，跳过该行（head: %s）",
+                    #line, line:sub(1, 80)))
+                skip_line = true
             end
             if crlf and crlf == idx then
                 buf = buf:sub(idx + 2)
             else
                 buf = buf:sub(idx + 1)
             end
-            local evt, data = process_line(line)
-            if evt then
-                dispatched[#dispatched + 1] = { evt, data }
+            if not skip_line then
+                local evt, data = process_line(line)
+                if evt then
+                    dispatched[#dispatched + 1] = { evt, data }
+                end
             end
         end
         return dispatched
@@ -224,6 +230,8 @@ local function receive_available(sock, max_bytes)
 end
 
 -- 建立 TCP/TLS 连接；remaining() 为 open() 起的剩余秒数，各阶段超时取 min(阶段, remaining)
+-- DNS 预解析缓存：sock:connect 内部 getaddrinfo 在 UI 线程同步解析（Android 弱网 DNS
+-- 慢时冻结 UI 无超时控制）——预解析 IP 直连 + 原域名做 SNI/Host
 local function do_connect(url, connect_timeout, verify, remaining)
     local parsed = socket_url.parse(url)
     if not (parsed and parsed.host and parsed.scheme) then
@@ -398,7 +406,6 @@ function SSEClient.open(opts)
     end
 
     -- 逐行读响应头；receive("*l") 失败时 partial 携带半行数据，必须跨轮拼接
-    -- （服务器惰性发头/分片到达时头部可能被切断，实测丢失）
     local header_line_buf = ""
     local header_total = 0
     local MAX_HEADER_LINE = 16 * 1024
@@ -423,7 +430,7 @@ function SSEClient.open(opts)
                     if http_code ~= "200" then
                         return nil, "服务器返回 " .. tostring(http_code or "未知状态码")
                     end
-                    -- 仅支持 chunked：避免把 Content-Length 定长响应误当 chunk 解码（实测）
+                    -- 仅支持 chunked：避免把 Content-Length 定长响应误当 chunk 解码
                     local te = response_headers["transfer-encoding"] or ""
                     if not te:lower():find("chunked", 1, true) then
                         return nil, "服务器未使用 chunked Transfer-Encoding"
@@ -481,7 +488,6 @@ function SSEClient.open(opts)
                 return
             end
             for _, evt in ipairs(events) do
-                -- 业务回调异常不吞掉：终止连接并报告
                 local ok_ev, err_ev = pcall(on_event, evt[1], evt[2])
                 if not ok_ev then
                     finish("事件回调异常：" .. tostring(err_ev))
@@ -506,7 +512,6 @@ function SSEClient.open(opts)
         end
         local recvt = socket.select({ sock }, nil, 0)
         if #recvt > 0 then
-            -- 阻塞模式短超时：行/字节读取超时后下轮 select 再读；受总 deadline 约束
             sock:settimeout(math.min(read_timeout, remaining()))
             if stream_state == "headers" then
                 local ok_h, err_h = read_headers_step()
@@ -526,8 +531,6 @@ function SSEClient.open(opts)
                 end
             end
             if rerr == "closed" then
-                -- 服务器关闭连接：正常流结束（业务层用 finish_sent 区分是否已收 end 事件）；
-                -- 注意 receive 可能同时返回 partial 数据 + closed（数据已在上方处理）
                 if task.is_done then
                     return nil
                 end
@@ -543,22 +546,25 @@ function SSEClient.open(opts)
     end
 
     if not connect() then
-        return {
-            is_done = function() return true end,
-            cancel = function() end,
-        }
+        local handle = {}
+        function handle:is_done() return true end
+        function handle:cancel() end
+        return handle
     end
 
     zmq_ref = UIManager:insertZMQ(task)
 
-    return {
-        is_done = function() return task.is_done end,
-        cancel = function()
-            if not task.is_done then
-                finish("已取消")
-            end
-        end,
-    }
+    local handle = {}
+    function handle:is_done()
+        return task.is_done
+    end
+    function handle:cancel()
+        if not task.is_done then
+            finish("已取消")
+        end
+    end
+
+    return handle
 end
 
 return SSEClient
