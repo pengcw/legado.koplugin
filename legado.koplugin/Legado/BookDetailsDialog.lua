@@ -388,7 +388,7 @@ function BookDetails:getBookDetails()
             self.is_downloading = true
             Backend:launchProcess(function()
                 return Backend:download_cover_img(book_cache_id, cover_url)
-            end, function(status, cover_path, cover_name)
+            end, function(status, cover_path, _cover_name)
                 if self.loading_text_widget then
                     if status == true and H.is_str(cover_path) and util.fileExists(cover_path) then
                     self:reloadCoverImage()

@@ -128,8 +128,12 @@ local connect = function(self,ws_url,ws_protocol,ssl_params)
     return nil,err,nil
   end
   if protocol == 'wss' then
-    self.sock = ssl.wrap(self.sock, ssl_params)
-    self.sock:dohandshake()
+    local hs_ok, hs_err = self:sock_handshake(host, ssl_params)
+    if not hs_ok then
+      self.sock = nil
+      return nil, tostring(hs_err or "TLS 握手失败")
+    end
+    self.sock = hs_ok
   elseif protocol ~= "ws" then
     return nil, 'bad protocol'
   end
@@ -184,6 +188,25 @@ local extend = function(obj)
 
   if not obj.is_server then
     assert(obj.sock_connect)
+  end
+
+  -- 默认阻塞式 TLS 握手（sync 后端）；异步后端（如 copas）可覆盖为 select 驱动版
+  if not obj.sock_handshake then
+    obj.sock_handshake = function(self, host, ssl_params)
+      -- KOReader ssl 封装需要显式参数表
+      self.sock = ssl.wrap(self.sock, ssl_params or {
+          mode = 'client',
+          protocol = 'any',
+          options = { 'all', 'no_sslv2', 'no_sslv3', 'no_tlsv1' },
+          verify = 'none',
+      })
+      -- SNI：兼容 CF/Envoy 类服务器；不同 LuaSec 版本返回值不一致，失败不中止
+      if self.sock.sni then
+          pcall(self.sock.sni, self.sock, host)
+      end
+      self.sock:dohandshake()
+      return self.sock
+    end
   end
 
   if not obj.state then

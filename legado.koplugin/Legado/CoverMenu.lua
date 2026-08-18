@@ -21,9 +21,11 @@ local M = Menu:extend{
     _cover_batch_running = false,
     _is_closed = nil,
     is_enable_shortcut = false,
+    _last_page_summary = nil,
+    _cover_path = nil,
 }
 
--- fix the Koreader crash when `no_title = true`.
+-- fix KOReader crash when no_title = true
 function M:mergeTitleBarIntoLayout()
     if self.no_title then return end
     Menu.mergeTitleBarIntoLayout(self)
@@ -33,10 +35,26 @@ function M:init()
     self._is_closed = false
     self._cover_debounce_pending = false
     self._cover_batch_running = false
+    self._last_page_summary = nil
+    self._cover_path = {}
     Menu.init(self)
 end
 
--- 实例被复用缓存，close 后需在重新 show 时复位（否则封面只在首次打开时下载）
+-- 封面探测结果缓存, 命中免 get_default_cover_cache 频繁探测
+function M:_coverPath(cache_id)
+    if not (H.is_str(cache_id) and cache_id ~= "") then return nil end
+    local p = self._cover_path[cache_id]
+    if p ~= nil then return p and p or nil end   -- false 表示探测过不存在
+    p = Backend:get_default_cover_cache(cache_id)
+    self._cover_path[cache_id] = p or false
+    return p
+end
+
+function M:_forgetCoverPath(cache_id)
+    if not (H.is_str(cache_id) and cache_id ~= "") then return end
+    self._cover_path[cache_id] = nil
+end
+
 function M:onShowWidget()
     self._is_closed = false
 end
@@ -48,7 +66,6 @@ function M:_isCoverEnabled()
         and not self:_isEmptyHint()
 end
 
--- 运行于子进程：只做缓存检查 + 下载写入，不触碰 DB
 local function downloadCover(url, book_cache_id)
     if type(book_cache_id) ~= "string" then return false end
     local cover_cache_path = Backend:get_default_cover_cache(book_cache_id)
@@ -60,13 +77,12 @@ local function downloadCover(url, book_cache_id)
     return exists == true
 end
 
-local function buildCoverState(item, cover_w, cover_h)
+local function buildCoverState(item, cover_w, cover_h, cover_cache_path)
     if type(item) ~= "table" then return nil end
     item._is_cover_state = true
 
     local book_cache_id = item.cache_id
     if book_cache_id and book_cache_id ~= "" then
-        local cover_cache_path = Backend:get_default_cover_cache(book_cache_id)
         if cover_cache_path and util.fileExists(cover_cache_path) then
             item.state = CenterContainer:new{
                 dimen = Geom:new{ w = cover_w, h = cover_h },
@@ -131,14 +147,15 @@ function M:_updateCoverItems()
     local cover_w = self._cached_cover_w
 
     local items_on_page = math.min(perpage, total_items - idx_offset)
-    -- rebuild state for current page to avoid use-after-free
-    for idx = 1, items_on_page do
-        local item = self.item_table[idx_offset + idx]
-        if type(item) == "table" then
-            if not cover_h then
-                if item._is_cover_state then item.state = nil end
-            else
-                item._is_cover_loaded = buildCoverState(item, cover_w, cover_h)
+    -- 避免 item.state 悬垂
+    for _, it in ipairs(self.item_table) do
+        if type(it) == "table" then it.state = nil end
+    end
+    if cover_h then
+        for idx = 1, items_on_page do
+            local item = self.item_table[idx_offset + idx]
+            if type(item) == "table" then
+                item._is_cover_loaded = buildCoverState(item, cover_w, cover_h, self:_coverPath(item.cache_id))
             end
         end
     end
@@ -148,13 +165,23 @@ function M:_updateCoverItems()
     if #collectMissingCovers(self.item_table, idx_offset, items_on_page) == 0
         or self._cover_batch_running then return end
 
-    local page_changed = self.page ~= current_page
-    if self._cover_debounce_pending then
-        if not page_changed then return end
-        if self._debounce_timer_cancel then
-            self._debounce_timer_cancel()
-            self._debounce_timer_cancel = nil
+    -- 摘要（页码 + 页内容 cache_id）：同页 updateItems 抖动时不重启，翻页/数据更新时触发
+    local content_key = {}
+    local content_n = 0
+    for idx = 1, items_on_page do
+        local it = self.item_table[idx_offset + idx]
+        if type(it) == "table" and it.cache_id then
+            content_n = content_n + 1
+            content_key[content_n] = it.cache_id
         end
+    end
+    local new_last_page_summary = tostring(current_page) .. "_" .. tostring(perpage) .. "_" .. table.concat(content_key)
+    if new_last_page_summary == self._last_page_summary then return end
+    self._last_page_summary = new_last_page_summary
+
+    if self._cover_debounce_pending and self._debounce_timer_cancel then
+        self._debounce_timer_cancel()
+        self._debounce_timer_cancel = nil
         self._cover_debounce_pending = false
     end
 
@@ -179,14 +206,14 @@ function M:_updateCoverItems()
             task_func = downloadCover,
             max_retries = 2,
             get_task_args = function(req)
-                -- cache_id 非字符串时下载必然失败, 返回 nil 直接 abort, 避免白重试
                 if type(req.item.cache_id) ~= "string" then return nil end
                 return { req.item.cover_url, req.item.cache_id }
             end,
             on_item_end = function(_, req, success)
                 if not success and req and req.item then
-                    -- 失败标记：会话内不重试（书架刷新重建 item_table 后重置）
                     req.item._cover_failed = true
+                elseif req and req.item then
+                    self:_forgetCoverPath(req.item.cache_id)
                 end
                 if self._is_closed or self.page ~= current_page then return false end
                 if success and req and req.item and not pending_refresh then
@@ -203,7 +230,6 @@ function M:_updateCoverItems()
             on_batch_end = function(aborted)
                 self._cover_batch_running = false
                 if aborted or self._is_closed then return end
-                -- 批量运行期间用户翻了页：新页封面尚未调度，补一次评估
                 if self.page ~= current_page then
                     UIManager:nextTick(function()
                         if not self._is_closed then self:updateItems(nil, true) end
@@ -223,7 +249,7 @@ end
 function M:_recalculateDimen()
     if not self:_isEmptyHint() then
         local settings = Backend:getSettings()
-        local default_items = settings.show_cover and 10 or (G_reader_settings:readSetting("items_per_page") or 14)
+        local default_items = settings.show_cover and 8 or (G_reader_settings:readSetting("items_per_page") or 14)
         self.items_per_page = settings.items_per_page or default_items
     end
     Menu._recalculateDimen(self)
@@ -259,6 +285,8 @@ function M:onCloseWidget()
     self._is_closed = true
     self._cover_debounce_pending = false
     self._cover_batch_running = false
+    self._last_page_summary = nil
+    self._cover_path = {}
     if self._debounce_timer_cancel then
         self._debounce_timer_cancel()
         self._debounce_timer_cancel = nil

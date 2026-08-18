@@ -228,10 +228,10 @@ function Handlers:register(parent_ref)
 
                                 if new_state then
                                     local current_items = settings.items_per_page or G_reader_settings:readSetting("items_per_page") or 14
-                                    if current_items > 10 then
-                                        MessageBox:confirm("开启封面后，建议每页显示不超过 10 条，是否自动调整？", function(is_ok)
+                                    if current_items > 8 then
+                                        MessageBox:confirm("开启封面建议每页 8 条（可自行调整最佳行数），是否自动调整？", function(is_ok)
                                             if is_ok then
-                                                settings.items_per_page = 10
+                                                settings.items_per_page = 8
                                             end
                                             save_and_notify()
                                         end)
@@ -243,13 +243,13 @@ function Handlers:register(parent_ref)
                         }, {
                             text_func = function()
                                 local settings = Backend:getSettings()
-                                local default_items = settings.show_cover and 10 or (G_reader_settings:readSetting("items_per_page") or 14)
+                                local default_items = settings.show_cover and 8 or (G_reader_settings:readSetting("items_per_page") or 14)
                                 local current = settings.items_per_page or default_items
                                 return string.format("书架每页项数: %d", current)
                             end,
                             callback = function()
                                 local settings = Backend:getSettings()
-                                local default_items = settings.show_cover and 10 or (G_reader_settings:readSetting("items_per_page") or 14)
+                                local default_items = settings.show_cover and 8 or (G_reader_settings:readSetting("items_per_page") or 14)
                                 local thread_spin = require("ui/widget/spinwidget"):new{
                                     value = settings.items_per_page or default_items,
                                     value_min = 4,

@@ -12,6 +12,8 @@ local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
 local TaskProg = require("Legado.task.Progress")
 local PlgState = require("Legado/PlgState")
+local logger = require("logger")
+local utf8c = require("Legado.Helper.utf8proc")
 
 local M = {
     results = {},
@@ -131,6 +133,36 @@ function M:updateMenuTitle(new_title)
     self.results_menu:updateItems()
 end
 
+local function truncate_utf8(s, n)
+    if type(s) ~= "string" or utf8c.len(s) <= n then return s end
+    return utf8c.sub(s, 1, n)
+end
+
+-- 统一分页批次状态：has_more 落账 + 标题三态。加载中=请求在进行（入口处置），
+-- 完成后 has_more→“（还有更多）”，结束→正常/中止；EXPLORE 仅落账标题保持常态
+function M:updateBatchState(mode, success, has_more, msg)
+    if msg == "没有更多了" then has_more = nil end
+    self.has_more_api_results = has_more
+    if mode == "EXPLORE" then return has_more end
+    local done, aborted
+    if mode == "SEARCH" then
+        done, aborted = '多源搜索', '搜索中止'
+    else
+        done, aborted = '换源', '换源中止'
+    end
+    if not has_more and success then
+        self:updateMenuTitle(done)
+    elseif has_more then
+        self:updateMenuTitle(done .. '（还有更多）')
+    else
+        local err = tostring(msg or '')
+        local head = truncate_utf8(err, 20)
+        logger.warn("[BookSourceResults] " .. aborted .. ": " .. err)
+        self:updateMenuTitle(aborted .. ' (' .. (err ~= head and head .. '…' or head) .. ')')
+    end
+    return has_more
+end
+
 function M:attachCancelToMenu(cancel_func)
     if not (self.results_menu and cancel_func) then return end
     local orig_close = self.results_menu.close_callback
@@ -142,11 +174,18 @@ function M:attachCancelToMenu(cancel_func)
 end
 
 function M:showLoadingSpinner(message)
-    if self._loading_spinner then return end
+    if self._loading_spinner then
+        -- 旧 spinner 已被用户手动关闭：重置引用后再新建（否则后续请求不会再显示）
+        if self._loading_spinner.closed then
+            self._loading_spinner = nil
+        else
+            return
+        end
+    end
     local Progress = require("Legado.task.Progress")
     self._loading_spinner = Progress.showSpinner(message or "加载中", {
         show_icon = false,
-        dismissable = false,
+        dismissable = true,
     })
 end
 
@@ -430,14 +469,19 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
     if not is_more_call then
         self.results = {}
         self.has_more_api_results = nil
-        self:showLoadingSpinner(string.format("正在搜索[%s]", search_text))
+    end
+    self:showLoadingSpinner(string.format("正在搜索[%s]", search_text))
+    if not is_more_call then
         self:createBookSourceMenu({
             title = '多源搜索 (加载中...)',
             subtitle = string.format("key: %s", search_text),
         })
-        -- 需要立即刷新,不然会被后面的计算阻塞
-        UIManager:forceRePaint()
+    else
+        -- 续搜：菜单已存在，不得重建（丢滚动），仅回置标题
+        self:updateMenuTitle('多源搜索 (加载中...)')
     end
+    -- forceRePaint：否则会被后续计算阻塞不刷新
+    UIManager:forceRePaint()
 
     local cancel_func
 
@@ -452,17 +496,13 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
     end, function(success, msg, last_index)
         cancel_func = nil
         self:hideLoadingSpinner()
-        -- reader3 SSE 续搜推进 lastIndex；其他端第三参 nil → 永不触发（兼容性防线）
+        -- reader3 SSE 续搜推进 lastIndex；其他端第三参 nil → 永不触发
+        local has_more
         if success and H.is_num(last_index) and self.last_index ~= last_index then
-            self.has_more_api_results = true
             self.last_index = last_index
-        else
-            self.has_more_api_results = nil
+            has_more = true
         end
-        if msg == "没有更多了" then
-            self.has_more_api_results = nil
-        end
-        self:updateMenuTitle(success and '多源搜索' or ('搜索中止 (' .. tostring(msg) .. ')'))
+        self:updateBatchState("SEARCH", success, has_more, msg)
         if not success and msg ~= "已取消" then
             MessageBox:notice(msg or "搜索失败")
         elseif success and self.results and #self.results == 0 then
@@ -491,13 +531,17 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
     if not is_more_call then
         self.results = {}
         self.has_more_api_results = nil
-        self:showLoadingSpinner(string.format("搜索[%s]可用书源", bookinfo.name))
+    end
+    self:showLoadingSpinner(string.format("搜索[%s]可用书源", bookinfo.name))
+    if not is_more_call then
         self:createBookSourceMenu({
             title = '换源 (加载中...)',
             subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
         })
-        UIManager:forceRePaint()
+    else
+        self:updateMenuTitle('换源 (加载中...)')
     end
+    UIManager:forceRePaint()
 
     local cancel_func
 
@@ -505,30 +549,27 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
         cancel_func = nil
         self:hideLoadingSpinner()
         if not success then
-            if data == "没有更多了" or msg == "没有更多了" then self.has_more_api_results = nil end
-            self:updateMenuTitle('换源中止 (' .. tostring(msg or data) .. ')')
+            self:updateBatchState("CHANGE_SOURCE", false, nil, msg or data or "加载失败")
             return MessageBox:error(msg or data or '加载失败')
         end
         if not (H.is_tbl(data) and H.is_tbl(data.list)) then
             return MessageBox:notice('返回书源错误')
         end
         if #data.list == 0 then
-            self.has_more_api_results = nil
             return MessageBox:error('没有找到可用源')
         end
 
+        local has_more
         if H.is_num(last_index) and self.last_index ~= last_index then
-            self.has_more_api_results = true
             self.last_index = last_index
-        else
-            self.has_more_api_results = nil
+            has_more = true
         end
 
         if is_more_call ~= true then
             self.results = data.list
         end
+        self:updateBatchState("CHANGE_SOURCE", true, has_more, msg or data)
         -- 重新生成列表（菜单创建时 item_table 为空）
-        self:updateMenuTitle('换源')
         if self.results_menu and UIManager:isWidgetShown(self.results_menu._container) then
             self:refreshItems(false)
         end
@@ -787,11 +828,10 @@ function M:handleExploreBook(source_info, url, is_more_call)
         if not H.is_tbl(data) then
             return MessageBox:notice('服务器返回数据错误')
         end
-        self.has_more_api_results = #data > 0
-
         if #data == 0 and not is_more_call then
            return MessageBox:notice('没有更多书籍')
         end
+        self:updateBatchState("EXPLORE", true, #data > 0, nil)
         
         -- /exploreBook 返回标准 bookinfo, 不需要添加 origin originName
         if is_more_call ~= true then
@@ -805,7 +845,8 @@ function M:handleExploreBook(source_info, url, is_more_call)
             self:refreshItems(false, data)
         end
     end, function(err_msg)
-        if err_msg == "没有更多了" then self.has_more_api_results = nil end
+        -- 统一终止信号（"没有更多了"关闭 has_more）
+        self:updateBatchState("EXPLORE", true, self.has_more_api_results, err_msg)
         MessageBox:notice(err_msg or '加载失败')
     end)
 end

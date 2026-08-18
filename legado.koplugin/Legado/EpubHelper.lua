@@ -63,13 +63,15 @@ local function split_title_advanced(title)
         ["、"] = true,
         ["："] = true,
         ["》"] = true,
-        ["—"] = true
+        ["—"] = true,
+        ["."] = true
     }
     local need_clean = {
         ["、"] = true,
         ["："] = true,
         ["》"] = true,
-        ["—"] = true
+        ["—"] = true,
+        ["."] = true
     }
     -- 全空白标题 (仅含空格/分隔符): 无有效序号, 整体作 subpart
     local all_blank = true
@@ -112,11 +114,23 @@ local function split_title_advanced(title)
     end
 
     -- 回退支持: 中文"第X章/节/卷"开头
-    local matched = title:match("^(第[%d一二三四五六七八九十百千万零〇两]+[章节卷集篇回话页季部])")
-    if matched and #matched < #title then
-        local part = matched
-        local subpart = title:sub(#matched + 1)
-        return part, subpart
+    -- 字符级匹配：pattern 按字节会截断多字节（如"第1话"的"话"首字节 E8 产生乱码）
+    local CN_NUM = { ["一"]=true, ["二"]=true, ["三"]=true, ["四"]=true, ["五"]=true,
+        ["六"]=true, ["七"]=true, ["八"]=true, ["九"]=true, ["十"]=true,
+        ["百"]=true, ["千"]=true, ["万"]=true, ["零"]=true, ["〇"]=true, ["两"]=true }
+    local CN_SUFFIX = { ["章"]=true, ["节"]=true, ["卷"]=true, ["集"]=true, ["篇"]=true,
+        ["回"]=true, ["话"]=true, ["页"]=true, ["季"]=true, ["部"]=true }
+    if words[1] == "第" and #words >= 3 then
+        local j = 2
+        while j <= #words and (CN_NUM[words[j]] or (type(words[j]) == "string" and words[j]:match("^%d$"))) do
+            j = j + 1
+        end
+        -- j<=#words：纯"第X章"（如"第四章"）也算完整章节序号，EPUB 序号 span 不再为空
+        if j > 2 and j <= #words and CN_SUFFIX[words[j]] then
+            local part = table.concat(words, "", 1, j)
+            local subpart = table.concat(words, "", j + 1)   -- j==#words 时为空串
+            return part, subpart
+        end
     end
 
     return "", title
