@@ -7,6 +7,8 @@ local socket_url = require("socket.url")
 local H = require("Legado/Helper")
 local BaseSpec = require("Legado.spore.base")
 local bookutil = require("Legado.spore.bookutil")
+local errHandler = require("Legado.Helper.Error")
+local Probe = require("Legado.Helper.Probe")
 
 local M = BaseSpec:extend{
     name = "android_app",
@@ -306,12 +308,15 @@ function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
 end
 
 function M:searchBookMulti(options, on_chunk, on_finish)
+    if type(options) == "string" then
+        options = { search_text = options }
+    end
     if not (H.is_tbl(options) and H.is_str(options.search_text) and options.search_text ~= '') then
         if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
         return nil
     end
     local search_text = options.search_text
-    local timeout = 60
+    local timeout = options.timeout or 60
     local is_exact_search = false
     if string.sub(search_text, 1, 1) == '=' then
         search_text = string.sub(search_text, 2)
@@ -322,108 +327,98 @@ function M:searchBookMulti(options, on_chunk, on_finish)
         return nil
     end
 
-    local JSON = require("json")
-    local websocket = require('Legado/websocket')
-
-
-
-    local key_json = JSON.encode({ key = search_text })
-    local client = websocket.client.sync({ timeout = 3 })
+    local Task = require("Legado.task.v2")
     local parsed = socket_url.parse(self.settings.server_address)
-    local ws_scheme = parsed.scheme == 'http' and 'ws' or 'wss'
-    parsed.port = (parsed.port or (ws_scheme == 'ws' and 80 or 443)) + 1
+    local ws_scheme = (parsed.scheme == 'http') and 'ws' or 'wss'
+    local default_port = (ws_scheme == 'ws') and 80 or 443
+    parsed.port = (parsed.port or default_port) + 1
     local ws_server_address = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/searchBook")
 
-    local ok, err = client:connect(ws_server_address)
-    if not ok then return on_finish(false, "连接失败：" .. tostring(err)) end
+    local timeout = options and options.timeout or 60
 
-    client:send(key_json)
+    local task = Task.spawn(function(ctx)
+        local WS = require("Legado.websocket.client_copas")
+        local JSON = require("json")
+        local bookutil = require("Legado.spore.bookutil")
 
-    local function filter_even(book)
-        return bookutil.filter_search(book, search_text, is_exact_search, options)
-    end
+        local deduplication = {}
+        local ws_finished = false
+        local ws_error = nil
 
-    local SearchTask = {}
-    function SearchTask:new(o)
-        o = o or {}
-        setmetatable(o, self)
-        self.__index = self
-        o.is_done = false
-        return o
-    end
-
-    function SearchTask:start(client, timeout, on_chunk, on_finish, filter_even)
-        self.client = client
-        self.start_time = time.now()
-        self.timeout = timeout
-        self.on_chunk = on_chunk
-        self.on_finish = on_finish
-        self.filter_even = filter_even
-        self.deduplication = {}
-
-        self.JSON = require("json")
-        self.UIManager = require("ui/uimanager")
-        self.socket = require("socket")
-        self.zmq_ref = self.UIManager:insertZMQ(self)
-    end
-
-    function SearchTask:stop()
-        if self.is_done then return end
-        self.is_done = true
-        pcall(function() self.client:close() end)
-        if self.zmq_ref then self.UIManager:removeZMQ(self.zmq_ref) end
-    end
-
-    function SearchTask:waitEvent()
-        if self.is_done then return nil end
-        if time.since(self.start_time) > time.s(self.timeout) then
-            self:stop()
-            self.on_finish(false, "搜索超时")
-            return nil
-        end
-
-        local recvt = self.socket.select({self.client.sock}, nil, 0)
-        if #recvt > 0 then
-            self.client.sock:settimeout(60)
-            local response_body, recv_err = self.client:receive()
-            if not response_body then
-                if recv_err == "timeout" then return nil end
-                self:stop()
-                self.on_finish(true, nil)
-                return nil
-            end
-
-            local ok_decode, parsed_body = pcall(self.JSON.decode, response_body)
-            if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
-                local chunk = {}
-                for _, v in ipairs(parsed_body) do
-                    if type(v) == "table" and type(v.name) == "string" and v.name ~= "" and type(v.bookUrl) == "string" and v.bookUrl ~= "" then
-                        -- 按 origin（书源）去重：不同书源同名同作者书不可合并（originOrder 可能相同）
-                        local deduplication_key = table.concat({v.origin or v.bookSourceUrl or "", v.name, v.author or ""}, "|||")
-                        if not self.deduplication[deduplication_key] and self.filter_even(v) then
-                            table.insert(chunk, v)
-                            self.deduplication[deduplication_key] = true
+        local ws = WS.open({
+            url = ws_server_address,
+            send_on_open = { key = search_text },
+            timeout = timeout,
+            connect_timeout = 8,
+            on_message = function(response_body)
+                if ctx.is_cancelled() then return end
+                local ok_decode, parsed_body = pcall(JSON.decode, response_body)
+                if ok_decode and type(parsed_body) == 'table' and #parsed_body > 0 then
+                    local chunk = {}
+                    for _, v in ipairs(parsed_body) do
+                        if type(v) == "table" and type(v.name) == "string" and v.name ~= "" and type(v.bookUrl) == "string" and v.bookUrl ~= "" then
+                            local deduplication_key = table.concat({v.origin or v.bookSourceUrl or "", v.name, v.author or ""}, "|||")
+                            if not deduplication[deduplication_key] and bookutil.filter_search(v, search_text, is_exact_search, options) then
+                                table.insert(chunk, v)
+                                deduplication[deduplication_key] = true
+                            end
                         end
                     end
+                    if #chunk > 0 then
+                        ctx.emit("chunk", chunk) -- 离散帧实时推流回主进程
+                    end
                 end
-                if #chunk > 0 then
-                    self.on_chunk(chunk)
-                end
+            end,
+            on_close = function(clean, code, reason)
+                ws_finished = true
+            end,
+            on_error = function(err)
+                ws_finished = true
+                ws_error = err
+            end,
+        })
+
+        -- 协作等待，直到 WebSocket 关闭或收到取消信号
+        while not ws_finished and not ws:is_done() do
+            if ctx.is_cancelled() then
+                ws:cancel("task_cancelled")
+                break
             end
+            ctx.sleep(0.05)
         end
-        return nil
+
+        if ws_error then
+            error(tostring(ws_error))
+        end
+        return true
+    end, {
+        timeout = timeout + 5,
+    })
+
+    if H.is_func(on_chunk) then
+        task:on("chunk", on_chunk)
     end
 
-    local task = SearchTask:new()
-    task:start(client, timeout, on_chunk, on_finish, filter_even)
+    if H.is_func(on_finish) then
+        task:on("done", function(ok, res, state)
+            if ok then
+                on_finish(true, nil)
+            else
+                local Error = require("Legado.Helper.Error")
+                local err_msg = Error.extract_message(res)
+                on_finish(false, err_msg)
+            end
+        end)
+    end
 
     return function()
-        if not task.is_done then
-            task:stop()
-            on_finish(false, "已取消")
+        if not task:is_done() then
+            task:cancel("已取消")
         end
     end
 end
+
+M.searchBook = M.searchBookMulti
 
 function M:_searchBookSocket(search_text, filter, timeout)
   if not (H.is_str(search_text) and search_text ~= '') then
@@ -453,13 +448,13 @@ function M:_searchBookSocket(search_text, filter, timeout)
   local ws_scheme = (parsed.scheme == 'http') and 'ws' or 'wss'
   local default_port = (ws_scheme == 'ws') and 80 or 443
   parsed.port = (parsed.port or default_port) + 1
-
   local ws_server_address = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/searchBook")
+  local t_start = Probe.start("Spore", "WS_SEARCH", ws_server_address, string.format("(timeout: %ds)", timeout))
 
   local ok, err = client:connect(ws_server_address)
   if not ok then
-      logger.err('ws连接出错', err)
       err = errHandler.map_message(err)
+      Probe.fail("Spore", "WS_SEARCH", ws_server_address, t_start, "连接失败: " .. tostring(err))
       return nil, "请求失败：" .. tostring(err)
   end
 
@@ -483,7 +478,6 @@ function M:_searchBookSocket(search_text, filter, timeout)
           if not response_body then break end
 
           if time.since(start_time) > time.s(timeout) then
-              logger.err("ws receive 超时")
               break
           end
 
@@ -509,9 +503,12 @@ function M:_searchBookSocket(search_text, filter, timeout)
   end)
 
   if not ok then
-      logger.err('ws返回数据出错：', result)
+      Probe.fail("Spore", "WS_SEARCH", ws_server_address, t_start, result)
       return nil, 'ws返回数据出错：' .. tostring(result)
   end
+
+  local count_str = (H.is_tbl(result) and #result > 0) and string.format("%d books", #result) or "0 books"
+  Probe.done("Spore", "WS_SEARCH", ws_server_address, t_start, "200 OK", count_str)
 
   return result
 end
@@ -526,8 +523,8 @@ local BOOK_SOURCE_DEBUG_FIELD_MAP = {
     ["字数"] = "wordCount",
     ["最新章节"] = "durChapterTitle",
     ["简介"] = "intro",
-    ["封面链接"] = "coverUrl",
-    ["详情页链接"] = "bookUrl",
+    ["封面"] = "coverUrl",
+    ["目录链接"] = "tocUrl",
 }
 
 local function splitBookSourceDebugLine(line)
@@ -611,10 +608,12 @@ function M:searchBookSingle(options)
     local default_port = (ws_scheme == 'ws') and 80 or 443
     parsed.port = (parsed.port or default_port) + 1
     local ws_addr = string.format("%s://%s:%s%s", ws_scheme, parsed.host, parsed.port, "/bookSourceDebug")
+    local t_start = Probe.start("Spore", "WS_DEBUG", ws_addr, string.format("(timeout: %ds)", timeout))
 
     local client = websocket.client.sync({ timeout = 3 })
     local ok, err = client:connect(ws_addr)
     if not ok then
+        Probe.fail("Spore", "WS_DEBUG", ws_addr, t_start, "连接失败: " .. tostring(err))
         return nil, "连接失败：" .. tostring(err)
     end
 
@@ -649,8 +648,13 @@ function M:searchBookSingle(options)
     pcall(function() client:close() end)
 
     if not state.saw_activity then
+        Probe.fail("Spore", "WS_DEBUG", ws_addr, t_start, "书源无响应")
         return nil, "书源无响应（可能不存在或不可用）"
     end
+
+    local count_str = #state.books > 0 and string.format("%d books", #state.books) or "0 books"
+    Probe.done("Spore", "WS_DEBUG", ws_addr, t_start, "200 OK", count_str)
+
     if finished and #state.books == 0 then
         return {}
     end

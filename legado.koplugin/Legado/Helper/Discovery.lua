@@ -38,7 +38,7 @@ end
 function M:getNetmask(ip)
     local f = io.open("/proc/net/route")
     if not f then
-        logger.warn("NetProbe: /proc/net/route 无法打开（权限受限）")
+        logger.warn("Discovery: /proc/net/route 无法打开（权限受限）")
         return nil
     end
     local target = ip2num(ip)
@@ -49,7 +49,7 @@ function M:getNetmask(ip)
             local dest_n = swap32(tonumber(dest, 16))
             local mask_n = swap32(tonumber(mask, 16))
             if mask_n ~= 0 and mask_n ~= MAX_U32 - 1 then
-                logger.dbg("NetProbe: route行 iface=", iface, "dest=", num2ip(dest_n), "mask=", num2ip(mask_n))
+                logger.dbg("Discovery: route行 iface=", iface, "dest=", num2ip(dest_n), "mask=", num2ip(mask_n))
                 if bit.band(bit.tobit(target), bit.tobit(mask_n)) % MAX_U32
                         == bit.band(bit.tobit(dest_n), bit.tobit(mask_n)) % MAX_U32 then
                     if not best or mask_n > best then best = mask_n end
@@ -59,7 +59,7 @@ function M:getNetmask(ip)
     end
     f:close()
     if not best then
-        logger.warn("NetProbe: /proc/net/route 未找到包含本机 ", ip, " 的网段路由")
+        logger.warn("Discovery: /proc/net/route 未找到包含本机 ", ip, " 的网段路由")
         return nil
     end
     local mask = num2ip(best)
@@ -93,25 +93,25 @@ function M:getLocalIPv4()
                     if iface.name == default_iface and type(iface.ipv4) == "string" then
                         local ip = iface.ipv4:match("(%d+%.%d+%.%d+%.%d+)")
                         if ip then
-                            logger.dbg("NetProbe: 本机IP(netinfo)", iface.name, ip)
+                            logger.dbg("Discovery: 本机IP(netinfo)", iface.name, ip)
                             return ip
                         end
                     end
                 end
-                logger.warn("NetProbe: 默认路由接口 ", default_iface, " 未匹配到 IPv4，回退遍历")
+                logger.warn("Discovery: 默认路由接口 ", default_iface, " 未匹配到 IPv4，回退遍历")
             end
             for _, iface in ipairs(ifaces) do
                 if iface.name ~= "lo" and type(iface.ipv4) == "string" then
                     local ip = iface.ipv4:match("(%d+%.%d+%.%d+%.%d+)")
                     if ip then
-                        logger.dbg("NetProbe: 本机IP(netinfo)", iface.name, ip)
+                        logger.dbg("Discovery: 本机IP(netinfo)", iface.name, ip)
                         return ip
                     end
                 end
             end
-            logger.warn("NetProbe: netinfo 未返回 IPv4 接口，尝试 UDP 兜底")
+            logger.warn("Discovery: netinfo 未返回 IPv4 接口，尝试 UDP 兜底")
         else
-            logger.warn("NetProbe: netinfo 获取接口失败，尝试 UDP 兜底", tostring(ifaces))
+            logger.warn("Discovery: netinfo 获取接口失败，尝试 UDP 兜底", tostring(ifaces))
         end
     end
     -- UDP 兜底
@@ -121,10 +121,10 @@ function M:getLocalIPv4()
         local ip = ok_peer and udp:getsockname() or nil
         pcall(function() udp:close() end)
         if ip and ip:match("^(%d+%.%d+%.%d+%.%d+)$") then
-            logger.dbg("NetProbe: 本机IP(UDP兜底)", ip)
+            logger.dbg("Discovery: 本机IP(UDP兜底)", ip)
             return ip
         end
-        logger.warn("NetProbe: UDP 兜底也失败", tostring(ip))
+        logger.warn("Discovery: UDP 兜底也失败", tostring(ip))
     end
     return nil
 end
@@ -133,12 +133,12 @@ function M:getScanRange(ip, netmask)
     local ip_n = ip2num(ip)
     local mask_n = ip2num(netmask or "255.255.255.0")
     if not ip_n or not mask_n then
-        logger.warn("NetProbe: 无效 IP/掩码", tostring(ip), tostring(netmask))
+        logger.warn("Discovery: 无效 IP/掩码", tostring(ip), tostring(netmask))
         return nil
     end
     local network = bit.band(bit.tobit(ip_n), bit.tobit(mask_n)) % MAX_U32
     local broadcast = (network + (MAX_U32 - 1 - mask_n)) % MAX_U32
-    logger.dbg("NetProbe: 网段", num2ip(network), "~", num2ip(broadcast), "(本机", ip .. ")")
+    logger.dbg("Discovery: 网段", num2ip(network), "~", num2ip(broadcast), "(本机", ip .. ")")
     return { first = network + 1, last = broadcast - 1 }
 end
 
@@ -151,7 +151,7 @@ local function probeHosts(ips, ports, options)
     local callback = options.callback
 
     if type(ports) == "number" then ports = { ports } end
-    logger.dbg("NetProbe: 开始探测", #ips, "个IP x", #ports, "个端口, 并发", concurrency, "每轮", wait, "s, 总时限", total_timeout, "s")
+    logger.dbg("Discovery: 开始探测", #ips, "个IP x", #ports, "个端口, 并发", concurrency, "每轮", wait, "s, 总时限", total_timeout, "s")
 
     local queue = {}
     for i = #ips, 1, -1 do
@@ -170,7 +170,7 @@ local function probeHosts(ips, ports, options)
     local function record(ip, port)
         local entry = { ip = ip, port = port }
         results[#results + 1] = entry
-        logger.dbg("NetProbe: 命中", ip, port)
+        logger.dbg("Discovery: 命中", ip, port)
         if callback then pcall(callback, entry) end
     end
 
@@ -187,7 +187,7 @@ local function probeHosts(ips, ports, options)
                 -- 非阻塞 connect 的正常返回是 timeout（EINPROGRESS 等 select）；其他错误抽样记录
                 if err and err ~= "timeout" and err ~= "in progress" and diag_conn_errs < 3 then
                     diag_conn_errs = diag_conn_errs + 1
-                    logger.warn("NetProbe: connect 立即失败", item.ip, item.port, tostring(err))
+                    logger.warn("Discovery: connect 立即失败", item.ip, item.port, tostring(err))
                 end
                 socks[#socks + 1] = sock
                 info_of[sock] = item
@@ -221,7 +221,7 @@ local function probeHosts(ips, ports, options)
         socks = {}
         start_next()
     end
-    logger.dbg("NetProbe: 探测完成", #results, "个命中, 共", rounds, "轮",
+    logger.dbg("Discovery: 探测完成", #results, "个命中, 共", rounds, "轮",
         (socket.gettime() >= deadline and "(已达总时限)" or ""))
     return results
 end
@@ -291,7 +291,7 @@ function M:getNetwork(options)
     if not range then return nil, "无法确定本机网络" end
     -- CIDR 网络地址独立计算（getScanRange 的 first 已排除网络地址本身）
     local network = bit.band(bit.tobit(ip2num(ip)), bit.tobit(ip2num(netmask))) % MAX_U32
-    logger.dbg("NetProbe: 网络 ip=", ip, "netmask=", netmask)
+    logger.dbg("Discovery: 网络 ip=", ip, "netmask=", netmask)
     return {
         ip = ip,
         netmask = netmask,
@@ -308,7 +308,7 @@ function M:scan(port, options)
     local max_hosts = options.max_hosts or 512
     local host_count = net.last - net.first + 1
     if host_count > max_hosts then
-        logger.warn("NetProbe: 网段过大（", host_count, " 主机）超过上限 ", max_hosts)
+        logger.warn("Discovery: 网段过大（", host_count, " 主机）超过上限 ", max_hosts)
         return nil, "network too large"
     end
     local ips = {}

@@ -8,6 +8,7 @@ local new = function(ws)
   
   self.sock_connect = function(self,host,port)
     self.sock = socket.tcp()
+    pcall(function() self.sock:settimeout(-1, "t") end)
     if ws.timeout ~= nil then
       self.sock:settimeout(ws.timeout)
     end

@@ -11,17 +11,19 @@ local Geom = require("ui/geometry")
 local Size = require("ui/size")
 
 local H = require("Legado/Helper")
-local TaskQueue = require("Legado.task.Queue")
+local TaskQueue = require("Legado.task.v2")
 local Backend = require("Legado/Backend")
+local Probe = require("Legado.Helper.Probe")
 
 local M = Menu:extend{
-    _cover_channel = nil,
+    _active_batch = nil,
     _debounce_timer_cancel = nil,
     _cover_debounce_pending = false,
     _cover_batch_running = false,
     _is_closed = nil,
     is_enable_shortcut = false,
-    _last_page_summary = nil,
+    _last_page = nil,
+    _last_page_ids = nil,
     _cover_path = nil,
 }
 
@@ -35,8 +37,10 @@ function M:init()
     self._is_closed = false
     self._cover_debounce_pending = false
     self._cover_batch_running = false
-    self._last_page_summary = nil
+    self._last_page = nil
+    self._last_page_ids = nil
     self._cover_path = {}
+    self._active_batch = nil
     Menu.init(self)
 end
 
@@ -55,8 +59,18 @@ function M:_forgetCoverPath(cache_id)
     self._cover_path[cache_id] = nil
 end
 
-function M:onShowWidget()
+function M:onShow()
     self._is_closed = false
+end
+
+function M:onShowWidget()
+    self:onShow()
+end
+
+function M:resetCoverCheck()
+    self._last_page = nil
+    self._last_page_ids = nil
+    self._cover_path = {}
 end
 
 function M:_isCoverEnabled()
@@ -67,7 +81,7 @@ function M:_isCoverEnabled()
 end
 
 local function downloadCover(url, book_cache_id)
-    if type(book_cache_id) ~= "string" then return false end
+    if type(book_cache_id) ~= "string" or book_cache_id == "" then return false end
     local cover_cache_path = Backend:get_default_cover_cache(book_cache_id)
     local exists = cover_cache_path and util.fileExists(cover_cache_path)
     if not exists and type(url) == "string" and url ~= "" then
@@ -162,22 +176,25 @@ function M:_updateCoverItems()
 
     if not cover_h or items_on_page <= 0 then return end
 
-    if #collectMissingCovers(self.item_table, idx_offset, items_on_page) == 0
-        or self._cover_batch_running then return end
-
-    -- 摘要（页码 + 页内容 cache_id）：同页 updateItems 抖动时不重启，翻页/数据更新时触发
-    local content_key = {}
-    local content_n = 0
-    for idx = 1, items_on_page do
-        local it = self.item_table[idx_offset + idx]
-        if type(it) == "table" and it.cache_id then
-            content_n = content_n + 1
-            content_key[content_n] = it.cache_id
+    local page_changed = (self._last_page ~= current_page
+                          or not self._last_page_ids
+                          or #self._last_page_ids ~= items_on_page)
+    if not page_changed then
+        for idx = 1, items_on_page do
+            local it = self.item_table[idx_offset + idx]
+            local cid = (type(it) == "table") and it.cache_id
+            if cid ~= self._last_page_ids[idx] then
+                page_changed = true
+                break
+            end
         end
     end
-    local new_last_page_summary = tostring(current_page) .. "_" .. tostring(perpage) .. "_" .. table.concat(content_key)
-    if new_last_page_summary == self._last_page_summary then return end
-    self._last_page_summary = new_last_page_summary
+    if not page_changed then return end
+    if self._active_batch and self._active_batch.cancel then
+        self._active_batch.cancel()
+        self._active_batch = nil
+    end
+    self._cover_batch_running = false
 
     if self._cover_debounce_pending and self._debounce_timer_cancel then
         self._debounce_timer_cancel()
@@ -185,8 +202,15 @@ function M:_updateCoverItems()
         self._cover_debounce_pending = false
     end
 
-    self._cover_channel = self._cover_channel or TaskQueue:createChannel("Menu_Covers", 4)
-    self._cover_channel:clearTasks()
+    self._last_page = current_page
+    local new_page_ids = {}
+    for idx = 1, items_on_page do
+        local it = self.item_table[idx_offset + idx]
+        new_page_ids[idx] = (type(it) == "table") and it.cache_id
+    end
+    self._last_page_ids = new_page_ids
+
+    if #collectMissingCovers(self.item_table, idx_offset, items_on_page) == 0 then return end
 
     self._cover_debounce_pending = true
     self._debounce_timer_cancel = TaskQueue.delay(1, function()
@@ -194,45 +218,70 @@ function M:_updateCoverItems()
         self._cover_debounce_pending = false
         if self._is_closed or not UIManager:isWidgetShown(self) then return end
         if self.page ~= current_page then return end
-        if not NetworkMgr:isConnected() then return end
+        if not NetworkMgr:isConnected() then
+            self._last_page_ids = nil
+            return
+        end
 
         local missing = collectMissingCovers(self.item_table, idx_offset, items_on_page)
         if #missing == 0 then return end
 
+        local total_covers = #missing
+        local action_name = string.format("batch_page_%d", current_page)
+        local t_batch_start = Probe.start("Cover", action_name, string.format("covers=%d", total_covers), string.format("(timeout: %d covers, concurrency=4)", total_covers))
+        local success_count = 0
         local pending_refresh = false
         self._cover_batch_running = true
-        self._cover_channel:executeBatch({
-            items = missing,
-            task_func = downloadCover,
-            max_retries = 2,
-            get_task_args = function(req)
-                if type(req.item.cache_id) ~= "string" then return nil end
-                return { req.item.cover_url, req.item.cache_id }
-            end,
-            on_item_end = function(_, req, success)
+
+        self._active_batch = TaskQueue.batch(missing, function(req, idx, ctx)
+            if not (req and req.item and H.is_str(req.item.cache_id)) then
+                return false, "invalid_cache_id"
+            end
+            if ctx and ctx.is_cancelled and ctx:is_cancelled() then
+                return false, "cancelled"
+            end
+            local ok = downloadCover(req.item.cover_url, req.item.cache_id)
+            if not ok then
+                return false, "download_failed"
+            end
+            return true
+        end, {
+            concurrency = 4,
+            engine = "copas",
+            on_item = function(idx, success, res)
+                if success then success_count = success_count + 1 end
+                local req = missing[idx]
                 if not success and req and req.item then
                     req.item._cover_failed = true
                 elseif req and req.item then
                     self:_forgetCoverPath(req.item.cache_id)
                 end
-                if self._is_closed or self.page ~= current_page then return false end
+                if self._is_closed or self.page ~= current_page then return end
                 if success and req and req.item and not pending_refresh then
                     pending_refresh = true
                     UIManager:nextTick(function()
                         pending_refresh = false
-                        if not self._is_closed then
+                        if not self._is_closed and self.page == current_page then
                             self:updateItems(nil, true)
                         end
                     end)
                 end
-                return false
             end,
-            on_batch_end = function(aborted)
+            on_finish = function(all_ok, results)
                 self._cover_batch_running = false
-                if aborted or self._is_closed then return end
-                if self.page ~= current_page then
+                self._active_batch = nil
+                local summary = string.format("%d/%d loaded", success_count, total_covers)
+                if all_ok then
+                    Probe.done("Cover", action_name, string.format("covers=%d", total_covers), t_batch_start, "200 OK", summary)
+                else
+                    Probe.done("Cover", action_name, string.format("covers=%d", total_covers), t_batch_start, "PARTIAL", summary)
+                end
+                if self._is_closed then return end
+                if self.page == current_page then
                     UIManager:nextTick(function()
-                        if not self._is_closed then self:updateItems(nil, true) end
+                        if not self._is_closed and self.page == current_page then
+                            self:updateItems(nil, true)
+                        end
                     end)
                 end
             end,
@@ -281,15 +330,26 @@ function M:updateItems(select_number, no_recalculate_dimen)
 end
 
 function M:onCloseWidget()
-    if self._cover_channel then self._cover_channel:clearTasks() end
+    if self._active_batch and self._active_batch.cancel then
+        self._active_batch.cancel()
+        self._active_batch = nil
+    end
     self._is_closed = true
     self._cover_debounce_pending = false
     self._cover_batch_running = false
-    self._last_page_summary = nil
+    self._last_page = nil
+    self._last_page_ids = nil
     self._cover_path = {}
     if self._debounce_timer_cancel then
         self._debounce_timer_cancel()
         self._debounce_timer_cancel = nil
+    end
+    if H.is_tbl(self.item_table) then
+        for _, item in ipairs(self.item_table) do
+            if type(item) == "table" and item._is_cover_state then
+                item.state = nil
+            end
+        end
     end
     Menu.onCloseWidget(self)
 end
