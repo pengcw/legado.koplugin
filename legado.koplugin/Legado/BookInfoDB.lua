@@ -341,34 +341,49 @@ function M:transaction(write_func, opts)
     return function(...)
         local conn = self:getDB()
         opts = opts or {}
+        
+        self._txn_depth = self._txn_depth or 0
+        local is_nested = (self._txn_depth > 0) or (self.in_transaction == true)
         local savepoint_name
-        local use_savepoint = opts.enable_savepoint and self.in_transaction
 
-        if use_savepoint then
+        if is_nested then
+            self._txn_depth = self._txn_depth + 1
             savepoint_name = string.format("sp_%08x", math.random(0x7fffffff))
-            local savepoint_sql = string.format("SAVEPOINT %s", savepoint_name)
-            conn:exec(savepoint_sql)
+            local ok_sp, err_sp = pcall(conn.exec, conn, string.format("SAVEPOINT %s", savepoint_name))
+            if not ok_sp then
+                logger.warn("[DB] Failed to create SAVEPOINT:", tostring(err_sp))
+            end
         else
-
+            self._txn_depth = 1
             local txn_type = opts.transaction_type or "IMMEDIATE"
-            conn:exec(string.format("BEGIN %s TRANSACTION", txn_type))
-            self.in_transaction = true
+            local ok_begin, err_begin = pcall(conn.exec, conn, string.format("BEGIN %s TRANSACTION", txn_type))
+            if not ok_begin then
+                logger.warn("[DB] BEGIN TRANSACTION failed, falling back to SAVEPOINT:", tostring(err_begin))
+                savepoint_name = string.format("sp_%08x", math.random(0x7fffffff))
+                pcall(conn.exec, conn, string.format("SAVEPOINT %s", savepoint_name))
+                is_nested = true
+            else
+                self.in_transaction = true
+            end
         end
 
         local ok, result = xpcall(function(...)
             return write_func(...)
         end, function(err)
-
             return debug.traceback(tostring(err), 2)
         end, ...)
 
-        if use_savepoint then
-            if ok then
-                conn:exec(string.format("RELEASE %s", savepoint_name))
-            else
-                pcall(conn.exec, conn, string.format("ROLLBACK TO %s", savepoint_name))
+        if is_nested then
+            self._txn_depth = math.max(0, self._txn_depth - 1)
+            if savepoint_name then
+                if ok then
+                    pcall(conn.exec, conn, string.format("RELEASE %s", savepoint_name))
+                else
+                    pcall(conn.exec, conn, string.format("ROLLBACK TO %s", savepoint_name))
+                end
             end
         else
+            self._txn_depth = 0
             local status = ok and "COMMIT" or "ROLLBACK"
             pcall(conn.exec, conn, status)
             self.in_transaction = false
@@ -376,7 +391,6 @@ function M:transaction(write_func, opts)
 
         if not ok then
             error(result, 0)
-
         end
         return result
     end

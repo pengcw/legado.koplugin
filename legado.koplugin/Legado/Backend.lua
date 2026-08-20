@@ -1334,7 +1334,7 @@ function M:_pPreloadReadAheadV2(chapter, count)
     end
 
     PlgState:cancelPreload("new_preload_started")
-    TaskLock.setLock(self.dbManager, tasks, true)
+    pcall(function() TaskLock.setLock(self.dbManager, tasks, true) end)
     local t_batch_start = Probe.start("Preload", "启动V2预读批次", format_chapter_desc(chapter), string.format("共%d章 (threads=1, mode=spawn)", #tasks))
 
     local task = TaskQueueV2.spawn(function(ctx)
@@ -1370,18 +1370,18 @@ function M:_pPreloadReadAheadV2(chapter, count)
     PlgState._preload_task = task
 
     task:on("chapter_done", function(data)
-        self.dbManager:updateCacheFilePath(data.chapter, data.cacheFilePath)
-        TaskLock.setLock(self.dbManager, data.chapter, false)
+        pcall(function() self.dbManager:updateCacheFilePath(data.chapter, data.cacheFilePath) end)
+        pcall(function() TaskLock.setLock(self.dbManager, data.chapter, false) end)
         Probe.done("Chapter", "章节入库", format_chapter_desc(data.chapter), data.t_start, "200 OK", Probe.format_bytes(data.size), data.progress)
     end)
 
     task:on("chapter_failed", function(data)
-        TaskLock.setLock(self.dbManager, data.chapter, false)
+        pcall(function() TaskLock.setLock(self.dbManager, data.chapter, false) end)
     end)
 
     local function cleanup()
         PlgState._preload_task = nil
-        TaskLock.setLock(self.dbManager, tasks, false)
+        pcall(function() TaskLock.setLock(self.dbManager, tasks, false) end)
     end
 
     task:on("finish", function()
