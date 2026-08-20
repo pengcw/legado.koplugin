@@ -2,3 +2,7 @@
 .claude/settings.local.json
 AGENTS.md
 legado.koplugin/tests/
+.reasonix/
+notes/
+.tmp_dbg/
+tests/

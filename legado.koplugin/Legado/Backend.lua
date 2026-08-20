@@ -19,6 +19,8 @@ local ContentParser = require("Legado.ContentParser")
 local ConfigValidator = require("Legado.ConfigValidator")
 local socket = require("socket")
 local Probe = require("Legado.Helper.Probe")
+local TaskQueueV2 = require("Legado.task.v2")
+local PlgState = require("Legado/PlgState")
 
 local function format_chapter_desc(ch)
     if not ch then return "未知章节" end
@@ -446,6 +448,7 @@ function M:getReplaceRules(callback)
 end
 
 function M:changeBookSource(newBookSource)
+    PlgState:cancelPreload("change_book_source")
     return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
         if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
             local bookShelfId = self:getCurrentBookShelfId()
@@ -487,7 +490,7 @@ local chapter_writeToFile = function(chapter, filePath, resources)
     end
 end
 
-function M:_pDownloadChapter(chapter)
+function M:_pDownloadChapter(chapter, download_opts)
     local bookUrl = chapter.bookUrl
     local book_cache_id = chapter.book_cache_id
     local chapters_index = chapter.chapters_index
@@ -504,10 +507,13 @@ function M:_pDownloadChapter(chapter)
         return cache_chapter
     end
 
+    local t_dl_start = Probe.start("Chapter", "下载章节内容", format_chapter_desc(chapter), tostring(bookUrl))
     local response = self:pGetChapterContent(chapter)
 
     if not H.is_tbl(response) or response.type ~= 'SUCCESS' then
-        error((response and response.message) or '章节下载失败')
+        local err_msg = (response and response.message) or '章节下载失败'
+        Probe.fail("Chapter", "章节下载失败", format_chapter_desc(chapter), t_dl_start, tostring(err_msg))
+        error(err_msg)
     end
 
     local filePath = Env.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
@@ -519,14 +525,30 @@ function M:_pDownloadChapter(chapter)
     }
     local result = ContentParser.analyzing(chapter, response.body, filePath, opts)
     if result.kind == "cbz" then
-        -- 图片章节, 不写缓存, 由调用方异步打包
-        return result
+        if download_opts and download_opts.auto_pack_cbz then
+            Probe.done("Chapter", "漫画图片解析完成", format_chapter_desc(chapter), t_dl_start, "200 OK", Probe.format_bytes(#(response.body or "")), string.format("(%d P)", #(result.img_sources or {})))
+            local max_threads = tonumber(self.settings_data.data.download_threads) or 4
+            local QueueCbz = require("Legado.task.QueueCbz")
+            local cbz_path = QueueCbz.from_urls(result.filePath, result.img_sources, download_opts and download_opts.check_running, {
+                max_workers = max_threads,
+                comic_info = { name = chapter.title or chapter.name or "" },
+                chapter_desc = format_chapter_desc(chapter),
+            })
+            result.chapter.cacheFilePath = cbz_path
+            return result.chapter
+        else
+            Probe.done("Chapter", "漫画图片解析完成", format_chapter_desc(chapter), t_dl_start, "CBZ_PENDING", string.format("(%d P)", #(result.img_sources or {})))
+            return result
+        end
     end
     if result.kind ~= "file" then
         -- 避免静默写空文件
         error(string.format("未知章节解析类型: %s", tostring(result.kind)))
     end
-    return chapter_writeToFile(result.chapter, result.filePath, result.data)
+    local written = chapter_writeToFile(result.chapter, result.filePath, result.data)
+    local cache_size = get_file_size(result.filePath)
+    Probe.done("Chapter", "章节下载完成", format_chapter_desc(chapter), t_dl_start, "200 OK", Probe.format_bytes(cache_size))
+    return written
 end
 
 -- write_to_db, run in subprocess, no DB writes allowed
@@ -1304,34 +1326,91 @@ function M:isTaskRunning(target)
     return TaskLock.isLocked(self.dbManager, target)
 end
 
-function M:after_reader_chapter_show(chapter)
-    local cache_file_path = chapter.cacheFilePath
-    local book_cache_id = chapter.book_cache_id
-    Probe.start("Reader", "阅读展示", format_chapter_desc(chapter), string.format("(book_id: %s, idx: %s, ext: %s)", tostring(book_cache_id), tostring(chapter.chapters_index), tostring(chapter.cacheExt or "txt")))
+function M:_pPreloadReadAheadV2(chapter, count)
+    local tasks = self:findNextChaptersNotDownLoad(chapter, count)
+    if not tasks or #tasks == 0 then
+        Probe.done("Preload", "全部已缓存跳过", format_chapter_desc(chapter), nil, "CACHE_HIT")
+        return
+    end
 
-    local status, err = pcall(function()
-        local update_state = {}
-        if chapter.isDownLoaded ~= true then
-            update_state.content = 'downloaded'
-            update_state.cacheFilePath = cache_file_path
+    PlgState:cancelPreload("new_preload_started")
+    TaskLock.setLock(self.dbManager, tasks, true)
+    local t_batch_start = Probe.start("Preload", "启动V2预读批次", format_chapter_desc(chapter), string.format("共%d章 (threads=1, mode=spawn)", #tasks))
+
+    local task = TaskQueueV2.spawn(function(ctx)
+        for i, ch in ipairs(tasks) do
+            if ctx.is_cancelled() then break end
+            local t_ch_start = socket.gettime()
+            local ok, ch_file = pcall(function()
+                return self:_pDownloadChapter(ch, {
+                    auto_pack_cbz = true,
+                    check_running = function() return ctx.is_cancelled() end,
+                })
+            end)
+            if ok and ch_file and ch_file.cacheFilePath then
+                local size = get_file_size(ch_file.cacheFilePath)
+                ctx.emit("chapter_done", {
+                    chapter = ch,
+                    cacheFilePath = ch_file.cacheFilePath,
+                    size = size,
+                    t_start = t_ch_start,
+                    progress = string.format("进度 %d/%d", i, #tasks)
+                })
+            else
+                ctx.emit("chapter_failed", {
+                    chapter = ch,
+                    t_start = t_ch_start,
+                    err = tostring(ch_file)
+                })
+            end
         end
-        if chapter.isRead ~= true then
-            update_state.isRead = true
-        end
-        update_state.lastUpdated = {
-            _set = "= strftime('%s', 'now')"
-        }
+    end)
+
+    task._target_idx = tasks[1] and tasks[1].chapters_index
+    PlgState._preload_task = task
+
+    task:on("chapter_done", function(data)
+        self.dbManager:updateCacheFilePath(data.chapter, data.cacheFilePath)
+        TaskLock.setLock(self.dbManager, data.chapter, false)
+        Probe.done("Chapter", "章节入库", format_chapter_desc(data.chapter), data.t_start, "200 OK", Probe.format_bytes(data.size), data.progress)
+    end)
+
+    task:on("chapter_failed", function(data)
+        TaskLock.setLock(self.dbManager, data.chapter, false)
+    end)
+
+    local function cleanup()
+        PlgState._preload_task = nil
+        TaskLock.setLock(self.dbManager, tasks, false)
+    end
+
+    task:on("finish", function()
+        cleanup()
+        Probe.done("Preload", "预读批处理完成", format_chapter_desc(chapter), t_batch_start, "SUCCESS", string.format("%d/%d loaded", #tasks, #tasks))
+    end)
+    task:on("error", function(err)
+        cleanup()
+        Probe.fail("Preload", "预读批处理失败", format_chapter_desc(chapter), t_batch_start, tostring(err))
+    end)
+    task:on("cancel", function(reason)
+        cleanup()
+        Probe.retry("Preload", "预读批处理取消", format_chapter_desc(chapter), t_batch_start, tostring(reason or "cancelled"))
+    end)
+end
+
+function M:after_reader_chapter_show(chapter)
+    local book_cache_id = chapter.book_cache_id
+    local chapters_index = chapter.chapters_index
+    local cache_file_path = chapter.cacheFilePath
+    Probe.start("Reader", "阅读展示", format_chapter_desc(chapter), string.format("(book_id: %s, idx: %s, ext: %s)", tostring(book_cache_id), tostring(chapters_index), tostring(chapter.cacheExt or "txt")))
+
+    local status, err = safe_call(function()
         local bookShelfId = self:getCurrentBookShelfId()
         self.dbManager:transaction(function()
-            self.dbManager:dynamicUpdateChapters(chapter, update_state)
-            return self.dbManager:dynamicUpdate('books', {
-                sortOrder = {
-                    _set = "= CAST(ROUND((julianday('now') - 2440587.5) * 86400000) AS INTEGER)"
-                }
-            }, {
-                bookCacheId = book_cache_id,
-                bookShelfId = bookShelfId
-            })
+            self.dbManager:updateIsRead(chapter, true, true)
+            if book_cache_id and H.is_num(chapters_index) then
+                self.dbManager:updateReadingProgress(bookShelfId, book_cache_id, chapters_index, chapter.title or chapter.name, 0)
+            end
         end)()
     end)
     if not status then
@@ -1342,6 +1421,7 @@ function M:after_reader_chapter_show(chapter)
         local cache_name = select(2, util.splitFilePathName(cache_file_path)) or ''
         local _, extension = util.splitFileNameSuffix(cache_name)
         if extension and chapter.cacheExt ~= extension then
+            chapter.cacheExt = extension
             local p_status, p_err = pcall(function()
                 local bookShelfId = self:getCurrentBookShelfId()
                 self.dbManager:transaction(function()
@@ -1376,23 +1456,26 @@ function M:after_reader_chapter_show(chapter)
                 self._save_progress_timer_cancel = nil
             end)
         end
-        if not chapter.isRead then
-            if self._preload_timer_cancel then
-                self._preload_timer_cancel()
-                self._preload_timer_cancel = nil
-                Probe.retry("Preload", "防抖重置 (快速翻页)", format_chapter_desc(chapter), nil, "取消前次未触发预读")
+        local preDownloadNum = tonumber(settings.preload_chapters) or 5
+        if chapter.cacheExt == 'cbz' then
+            preDownloadNum = 1
+        end
+        local cached_ahead = self:getcompleteReadAheadChapters(chapter)
+        if preDownloadNum > 0 and cached_ahead < 40 then
+            if PlgState._preload_timer_cancel then
+                PlgState._preload_timer_cancel()
+                PlgState._preload_timer_cancel = nil
+                Probe.retry("Preload", "防抖重置 (快速切章)", format_chapter_desc(chapter), nil, "取消前次未触发预读")
             end
-            local preDownloadNum = tonumber(settings.preload_chapters)
-            if preDownloadNum == nil then preDownloadNum = 3 end
-            local cached_ahead = self:getcompleteReadAheadChapters(chapter)
-            if preDownloadNum > 0 and cached_ahead < 40 then
-                if chapter.cacheExt == 'cbz' then
-                    preDownloadNum = 1
-                end
+
+            local cur_task = PlgState._preload_task
+            if cur_task and cur_task._target_idx == (chapter.chapters_index + 1) and not cur_task:is_done() then
+                Probe.done("Preload", "顺读复用在途任务", format_chapter_desc(chapter))
+            else
                 Probe.start("Preload", "预读排队防抖 (1.5s)", format_chapter_desc(chapter), string.format("(预下载: %d章, 已预存: %d/40)", preDownloadNum, cached_ahead))
-                self._preload_timer_cancel = TaskQueue.delay(1.5, function()
-                    self:preLoadingChapters(chapter, preDownloadNum)
-                    self._preload_timer_cancel = nil
+                PlgState._preload_timer_cancel = TaskQueue.delay(1.5, function()
+                    PlgState._preload_timer_cancel = nil
+                    self:_pPreloadReadAheadV2(chapter, preDownloadNum)
                 end)
             end
         end
@@ -1403,13 +1486,15 @@ end
 
 function M:downloadChapter(chapter)
     if self:isTaskRunning(chapter) then
-            return wrap_response(nil, "此章节后台下载中, 请等待...")
+        Probe.retry("Chapter", "章节正在后台执行中", format_chapter_desc(chapter), nil, "LOCK_HELD")
+        return wrap_response(nil, "此章节后台下载中, 请等待...")
     end
     local status, err = safe_call(function()
         return self:_pDownloadChapter(chapter)
     end)
     if not status then
         logger.err('下载章节失败：', err)
+        Probe.fail("Chapter", "下载章节失败", format_chapter_desc(chapter), nil, tostring(err))
         return wrap_response(nil, "下载章节失败：" .. tostring(err))
     end
     return wrap_response(err)
@@ -1637,6 +1722,7 @@ end
 function M:onExitClean()
     dbg.v('Backend call onExitClean')
 
+    PlgState:cancelPreload("backend_exit_clean")
     self:closeDbManager()
     collectgarbage()
     collectgarbage()

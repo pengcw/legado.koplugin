@@ -274,12 +274,12 @@ function Handlers:register(parent_ref)
                             end,
                         }, {
                             text_func = function()
-                                return string.format("预下载章数: %d", Backend:getSettings().preload_chapters or 3)
+                                return string.format("预下载章数: %d", Backend:getSettings().preload_chapters or 5)
                             end,
                             callback = function()
                                 local settings = Backend:getSettings()
                                 local thread_spin = require("ui/widget/spinwidget"):new{
-                                    value = settings.preload_chapters or 3,
+                                    value = settings.preload_chapters or 5,
                                     value_min = 0,
                                     value_max = 40,
                                     value_step = 1,
@@ -287,8 +287,8 @@ function Handlers:register(parent_ref)
                                     ok_text = "确定",
                                     title_text = "预下载章节数",
                                     info_text = "阅读时, 向后预缓存正文",
-                                    default_value = 3,
-                                    default_text = "3",
+                                    default_value = 5,
+                                    default_text = "5",
                                     callback = function(spin)
                                         settings.preload_chapters = spin.value
                                         Backend:HandleResponse(Backend:saveSettings(settings), function()

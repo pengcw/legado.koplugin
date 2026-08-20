@@ -10,7 +10,7 @@ end
 local socket = require("socket")
 
 local Probe = {
-    ENABLED = false,
+    ENABLED = true,
     LOG_LEVEL = "info",
 }
 

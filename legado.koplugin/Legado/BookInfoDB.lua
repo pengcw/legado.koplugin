@@ -1007,6 +1007,37 @@ function M:updateIsRead(chapter, isRead, is_update_timestamp)
     return self:dynamicUpdateChapters(chapter, update_state)
 end
 
+function M:updateReadingProgress(bookShelfId, bookCacheId, chapterIndex, chapterTitle, durChapterPos)
+    if not (H.is_str(bookCacheId) and H.is_num(chapterIndex)) then
+        return false
+    end
+    local now_ms = os.time() * 1000
+    local conditions = {
+        bookCacheId = bookCacheId,
+    }
+    if H.is_str(bookShelfId) then
+        conditions.bookShelfId = bookShelfId
+    end
+    return self:dynamicUpdate('books', {
+        durChapterIndex = chapterIndex,
+        durChapterTitle = chapterTitle or "",
+        durChapterPos = durChapterPos or 0,
+        durChapterTime = now_ms,
+        sortOrder = now_ms,
+    }, conditions)
+end
+
+function M:updateChapterReadDownLoad(bookCacheId, chapterIndex, isRead, isDownloaded)
+    if not (H.is_str(bookCacheId) and H.is_num(chapterIndex)) then
+        return false
+    end
+    local chapter = {
+        book_cache_id = bookCacheId,
+        chapters_index = chapterIndex,
+    }
+    return self:updateIsRead(chapter, isRead == true, true)
+end
+
 function M:updateCacheFilePath(chapter, cacheFilePath)
 
     local cacheFilePath_add = ''

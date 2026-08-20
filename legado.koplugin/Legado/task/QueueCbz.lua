@@ -5,6 +5,8 @@ local TaskQueue = require("Legado.task.Queue")
 local ZipUtil = require("Legado.Helper.ZipUtil")
 local ZipWrite = ZipUtil.Writer
 local ImageUtil = require("Legado.Helper.ImageUtil")
+local socket = require("socket")
+local Probe = require("Legado.Helper.Probe")
 
 local M = {}
 M.__index = M
@@ -290,6 +292,10 @@ end
 -- Serial download + zip pack in calling thread (usually child process).
 -- Errors always throw via error() (caller wraps with pcall).
 -- img_sources: URL string, or { url=..., name=... } table.
+-- ==========================================
+-- Serial/Copas concurrent download + zip pack in calling thread (usually child process).
+-- Errors always throw via error() (caller wraps with pcall).
+-- img_sources: URL string, or { url=..., name=... } table.
 -- opts.allow_failed=false aborts on any failure (default tolerates failures).
 -- ==========================================
 function M.from_urls(filePath, img_sources, check_running_callback, opts)
@@ -300,9 +306,16 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
         error("Cbz param error: invalid img_sources")
     end
     opts = opts or {}
+    local max_workers = math.max(1, math.floor(tonumber(opts.max_workers) or 4))
+    local total_items = #img_sources
+    local desc = opts.chapter_desc or (opts.comic_info and opts.comic_info.name) or filePath
+
+    local t_cbz_start = Probe.start("Chapter", "CBZ打包", desc, string.format("(%dP, workers=%d)", total_items, max_workers))
+
     local cbz_path_tmp = filePath .. '.downloading'
     if util.fileExists(cbz_path_tmp) then
         if type(check_running_callback) == "function" and check_running_callback() then
+            Probe.retry("Chapter", "CBZ已取消", desc, t_cbz_start, "Other threads downloading")
             error("Other threads downloading, cancelled")
         else
             util.removeFile(cbz_path_tmp)
@@ -310,12 +323,14 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
     end
     local new_ok, writer = pcall(ZipWrite.new, ZipWrite)
     if not new_ok or not writer then
+        Probe.fail("Chapter", "CBZ初始化失败", desc, t_cbz_start, tostring(writer))
         error("CreateCBZ init zip backend err: " .. tostring(writer))
     end
     local open_ok, open_err = writer:open(cbz_path_tmp)
     if not open_ok then
         pcall(writer.close, writer)
         if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        Probe.fail("Chapter", "CBZ打开失败", desc, t_cbz_start, tostring(open_err))
         error("CreateCBZ cbz:open err: " .. cbz_path_tmp .. (open_err and (": " .. tostring(open_err)) or ""))
     end
 
@@ -323,6 +338,7 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
     if not mimetype_ok then
         pcall(writer.close, writer)
         if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        Probe.fail("Chapter", "CBZ写入mimetype失败", desc, t_cbz_start, tostring(mimetype_err))
         error("CreateCBZ write mimetype err: " .. tostring(mimetype_err))
     end
 
@@ -331,6 +347,7 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
     local function abort(msg)
         pcall(writer.close, writer)
         if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        Probe.fail("Chapter", "CBZ失败", desc, t_cbz_start, tostring(msg))
         error(msg)
     end
 
@@ -339,6 +356,7 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
         if type(check_running_callback) == "function" and check_running_callback() then
             abort("Other threads downloading, cancelled")
         end
+        local t_img_start = socket.gettime()
         local url = img_src
         local custom_name = nil
         if type(img_src) == "table" then
@@ -357,6 +375,7 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
         if not imgdata then
             if strict then abort(string.format("CreateCBZ download err: %s", tostring(img_extension))) end
             logger.dbg('CreateCBZ download err:', url, tostring(img_extension))
+            Probe.retry("Chapter", "图片下载跳过", string.format("%d.img", i), t_img_start, string.format("原因: %s [进度 %d/%d]", tostring(img_extension), i, total_items))
             return false
         end
 
@@ -378,12 +397,48 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
             return false
         end
         succeeded = succeeded + 1
+        Probe.done("Chapter", "图片落盘", img_name, t_img_start, "200 OK", Probe.format_bytes(#imgdata), string.format("进度 %d/%d", succeeded, total_items))
         return true
     end
 
-    for i, img_src in ipairs(img_sources) do
-        process_one(i, img_src)
+    local ok_copas, copas = pcall(require, "Legado.vendor.copas")
+    if ok_copas and copas and max_workers > 1 and total_items > 1 then
+        local next_idx = 1
+        local active_workers = max_workers
+        local has_aborted = false
+        local abort_err = nil
+
+        for w = 1, max_workers do
+            copas.addnamedthread(string.format("cbz_worker_%d", w), function()
+                while not has_aborted do
+                    local cur_i = next_idx
+                    next_idx = next_idx + 1
+                    if cur_i > total_items then break end
+
+                    local ok, res = pcall(process_one, cur_i, img_sources[cur_i])
+                    if not ok then
+                        has_aborted = true
+                        abort_err = res
+                        break
+                    end
+                end
+                active_workers = active_workers - 1
+            end)
+        end
+
+        while active_workers > 0 and not has_aborted do
+            copas.step(0.02)
+        end
+
+        if has_aborted then
+            abort(tostring(abort_err or "copas worker aborted"))
+        end
+    else
+        for i, img_src in ipairs(img_sources) do
+            process_one(i, img_src)
+        end
     end
+
     if succeeded > 0 then
         local comic_ok, comic_err = writer:add("ComicInfo.xml", ZipUtil.createComicInfo(opts.comic_info, succeeded), true)
         if not comic_ok then
@@ -393,21 +448,37 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
     local close_ok, close_err = writer:close()
     if not close_ok then
         if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        Probe.fail("Chapter", "CBZ关闭失败", desc, t_cbz_start, tostring(close_err))
         error("CreateCBZ cbz:close err: " .. tostring(close_err))
     end
     if succeeded == 0 then
         if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        Probe.fail("Chapter", "CBZ无图片成功", desc, t_cbz_start, "no image downloaded")
         error("CreateCBZ: no image downloaded")
     end
     if util.fileExists(filePath) then
         if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        Probe.fail("Chapter", "CBZ目标文件已存在", desc, t_cbz_start, "exist target file")
         error('exist target file, cancelled')
     end
     local ok_rename, rename_err = os.rename(cbz_path_tmp, filePath)
     if not ok_rename then
         if util.fileExists(cbz_path_tmp) then util.removeFile(cbz_path_tmp) end
+        Probe.fail("Chapter", "CBZ重命名失败", desc, t_cbz_start, tostring(rename_err))
         error(string.format("CreateCBZ rename err: %s", tostring(rename_err)))
     end
+
+    local function get_sz(p)
+        local f = io.open(p, "rb")
+        if f then
+            local sz = f:seek("end")
+            f:close()
+            return sz or 0
+        end
+        return 0
+    end
+    local cbz_sz = get_sz(filePath)
+    Probe.done("Chapter", "CBZ完成", desc, t_cbz_start, "200 OK", Probe.format_bytes(cbz_sz), string.format("%d/%dP", succeeded, total_items))
     return filePath
 end
 
