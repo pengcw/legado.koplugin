@@ -46,17 +46,17 @@ M.getKoreaderDirectory = function()
 end
 
 M.getTempDirectory = function()
-    local plg_cache_dir = PlgState.plg_name .. '.cache'
+    local plg_cache_dir = (PlgState.plg_name or "legado") .. '.cache'
     local plg_cache_path = FS.joinPath(DataStorage:getDataDir(), 'cache/' .. plg_cache_dir)
     return FS.checkAndCreateFolder(plg_cache_path)
 end
 
-M.getPluginName =function()
-    return PlgState.plg_name
+M.getPluginName = function()
+    return PlgState.plg_name or "legado"
 end
 
 M.getPluginDirectory = function()
-    local plg_path_alt = table.concat({DataStorage:getDataDir(), "/plugins/", PlgState.plg_name, '.koplugin'})
+    local plg_path_alt = table.concat({DataStorage:getDataDir(), "/plugins/", PlgState.plg_name or "legado", '.koplugin'})
     return PlgState.plg_path or plg_path_alt
 end
 

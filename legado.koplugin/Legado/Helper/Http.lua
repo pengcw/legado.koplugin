@@ -92,18 +92,101 @@ local function get_extension_from_mimetype(content_type)
     return extensions[mime]
 end
 
+-- =========================================================================
+-- Transport 驱动分离：解耦同步 (LuaSocket) 与 协程异步 (Copas) 传输细节
+-- =========================================================================
+local SyncTransport = {}
+
+function SyncTransport.request(opts)
+    local http = require("socket.http")
+    local socket = require("socket")
+    local socketutil = require("socketutil")
+    local ltn12 = require("ltn12")
+
+    local response_sink
+    if not opts.file_fp then
+        if opts.total_timeout and opts.total_timeout > 0 then
+            response_sink = socketutil.table_sink(opts.sink_table)
+        else
+            response_sink = ltn12.sink.table(opts.sink_table)
+        end
+    else
+        if opts.total_timeout and opts.total_timeout > 0 then
+            response_sink = socketutil.file_sink(opts.file_fp)
+        else
+            response_sink = ltn12.sink.file(opts.file_fp)
+        end
+    end
+
+    local request = {
+        url = opts.url,
+        method = opts.method,
+        headers = opts.headers,
+        sink = response_sink,
+        source = opts.source,
+        redirect = opts.redirect,
+        create = (opts.is_create and opts.is_http) and socketutil.tcp or nil,
+    }
+
+    socketutil:set_timeout(opts.block_timeout, opts.total_timeout)
+    local code, headers, status = socket.skip(1, http.request(request))
+    socketutil:reset_timeout()
+
+    if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
+        return nil, nil, "request interrupted:" .. tostring(code)
+    end
+    return code, headers, status
+end
+
+local CopasTransport = {}
+
+function CopasTransport.request(opts)
+    local copas_http = require("Legado.vendor.copas.http")
+    local socket = require("socket")
+    local ltn12 = require("ltn12")
+
+    local response_sink = opts.file_fp and ltn12.sink.file(opts.file_fp) or ltn12.sink.table(opts.sink_table)
+
+    local request = {
+        url = opts.url,
+        method = opts.method,
+        headers = opts.headers,
+        sink = response_sink,
+        source = opts.source,
+        redirect = opts.redirect,
+        timeout = opts.block_timeout,
+    }
+
+    local pcall_ok, ok, code, headers, status = pcall(copas_http.request, request)
+    if not pcall_ok then
+        local err_str = type(ok) == "table" and tostring(ok[1] or ok) or tostring(ok)
+        if err_str:find("timeout") then
+            return nil, nil, "request interrupted:timeout"
+        end
+        return nil, nil, "request interrupted:" .. err_str
+    end
+
+    if not ok then
+        local err_str = type(code) == "table" and tostring(code[1] or code) or tostring(code)
+        if err_str:find("timeout") then
+            return nil, nil, "request interrupted:timeout"
+        end
+        return nil, nil, "request interrupted:" .. err_str
+    end
+    return code, headers, status
+end
+
+local Probe = require("Legado.Helper.Probe")
+
 local function pGetUrlContent(options, is_create)
     options = options or {}
-    local ltn12 = require("ltn12")
-    local socket = require("socket")
-    local http = require("socket.http")
-    local socketutil = require("socketutil")
     local socket_url = require("socket.url")
 
     local url = options.url
     local file_fp = options.file
     local is_pic = options.is_pic
     local is_file = file_fp ~= nil
+    local method = (type(options.method) == "string" and options.method ~= "") and options.method:upper() or "GET"
 
     local block_timeout, total_timeout = resolve_timeouts(options, is_file)
 
@@ -111,20 +194,23 @@ local function pGetUrlContent(options, is_create)
         if file_fp then pcall(function() file_fp:close() end) end
     end
 
+    local is_copas = Probe.is_copas()
+
     if type(url) ~= "string" or url == "" then
         close_file()
+        Probe.fail("Http", method, '""', nil, "Invalid URL")
         return false, "Invalid URL"
     end
 
     local parsed = socket_url.parse(url)
     if not parsed or (parsed.scheme ~= "http" and parsed.scheme ~= "https") then
         close_file()
+        local reason = "Unsupported protocol: " .. tostring(parsed and parsed.scheme)
+        Probe.fail("Http", method, tostring(url), nil, reason)
         return false, "Unsupported protocol"
     end
 
-    local sink = {}
-    -- Only use the custom TCP creator for plain HTTP; leave HTTPS to default so TLS/SNI works properly
-    local use_custom_create = is_create and parsed and parsed.scheme == "http"
+    local t_start = Probe.start("Http", method, tostring(url), string.format("(timeout: block=%ss, total=%ss)", block_timeout, total_timeout))
 
     local req_headers = {}
     if type(options.headers) == "table" then
@@ -138,62 +224,44 @@ local function pGetUrlContent(options, is_create)
     end
 
     if is_pic and not req_headers["Accept"] then
-        -- Image requests prioritize
         req_headers["Accept"] = "image/png, image/jpeg, image/webp, image/bmp;q=0.9, image/tiff;q=0.8, image/*;q=0.7"
     end
 
-    -- total_timeout > 0 时使用带总超时控制的 socketutil sink，否则普通 ltn12 sink
-    local response_sink
-    if not file_fp then
-        if total_timeout and total_timeout > 0 then
-            response_sink = socketutil.table_sink(sink)
-        else
-            response_sink = ltn12.sink.table(sink)
-        end
-    else
-        if total_timeout and total_timeout > 0 then
-            response_sink = socketutil.file_sink(file_fp)
-        else
-            response_sink = ltn12.sink.file(file_fp)
-        end
-    end
-
-    local request = {
+    local sink = {}
+    local transport = is_copas and CopasTransport or SyncTransport
+    local code, headers, status = transport.request({
         url = url,
-        method = options.method or "GET",
+        method = method,
         headers = req_headers,
-        sink = response_sink,
         source = options.source,
         redirect = options.redirect,
-        -- Strictly customized TCP only for HTTP; HTTPS relies on underlying SSL stack for SNI/TLS
-        create = use_custom_create and socketutil.tcp or nil,
-    }
-    logger.dbg("HTTP timeout:", "block=" .. tostring(block_timeout), "total=" .. tostring(total_timeout), "file=" .. tostring(is_file))
-    socketutil:set_timeout(block_timeout, total_timeout)
-    local code, headers, status = socket.skip(1, http.request(request))
-    socketutil:reset_timeout()
+        file_fp = file_fp,
+        sink_table = sink,
+        block_timeout = block_timeout,
+        total_timeout = total_timeout,
+        is_create = is_create,
+        is_http = parsed.scheme == "http",
+    })
 
-    if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
-        logger.err("request interrupted:", tostring(code), "block_timeout=" .. tostring(block_timeout), "total_timeout=" .. tostring(total_timeout))
+    if not code and status and status:find("^request interrupted") then
         close_file()
-        return false, "request interrupted:" .. tostring(code)
+        Probe.fail("Http", method, tostring(url), t_start, status)
+        return false, status
     end
 
     if headers == nil then
-        logger.warn("No HTTP headers:", status or code or "network unreachable")
         close_file()
+        Probe.fail("Http", method, tostring(url), t_start, "No HTTP headers")
         return false, "Network or remote server unavailable"
     end
 
     if type(code) ~= 'number' or code < 200 or code > 299 then
-        logger.warn("HTTP status not okay:", status or code or "network unreachable")
-        logger.dbg("Response headers:", headers)
         close_file()
+        Probe.fail("Http", method, tostring(url), t_start, "HTTP " .. tostring(code))
         return false, "Remote server error or unavailable"
     end
 
     -- 图片请求：Content-Type 明确非图片（text/*, application/json, xml）→ 提前失败
-    -- （octet-stream/image/* 放行——CDN 常不设正确类型，按 Content-Type 拒绝会误杀）
     if is_pic and headers and headers["content-type"] then
         local mime = headers["content-type"]:match("^%s*([^;%s]+)")
         if mime then
@@ -201,8 +269,8 @@ local function pGetUrlContent(options, is_create)
             if mime:match("^text/") or mime == "application/json"
                     or mime == "application/xml"
                     or mime == "application/xhtml+xml" then
-                logger.warn("HTTP Content-Type 非图片（图片请求）:", mime, "url=", tostring(url))
                 close_file()
+                Probe.fail("Http", method, tostring(url), t_start, "Invalid image MIME " .. mime)
                 return false, "server error: Content-Type " .. mime
             end
         end
@@ -211,11 +279,11 @@ local function pGetUrlContent(options, is_create)
     local content
     if not file_fp then
         content = table.concat(sink)
-        if headers and headers["content-length"] and options.method ~= "HEAD" then
+        if headers and headers["content-length"] and method ~= "HEAD" then
             local content_length = tonumber(headers["content-length"])
             if content_length and #content ~= content_length then
                 close_file()
-                logger.warn("Incomplete content received:", "expected=" .. tostring(content_length), "actual=" .. tostring(#content))
+                Probe.fail("Http", method, tostring(url), t_start, "Incomplete content")
                 return false, "Incomplete content received"
             end
         end
@@ -231,6 +299,9 @@ local function pGetUrlContent(options, is_create)
     end
     
     close_file()
+
+    local size_str = is_file and "file" or Probe.format_bytes(content and #content or 0)
+    Probe.done("Http", method, tostring(url), t_start, code, size_str, extension)
 
     return true, {
         data = content,

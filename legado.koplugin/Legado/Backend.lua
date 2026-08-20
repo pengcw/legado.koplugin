@@ -17,6 +17,34 @@ local TaskLock = require("Legado.task.Lock")
 local ImageUtil = require("Legado.Helper.ImageUtil")
 local ContentParser = require("Legado.ContentParser")
 local ConfigValidator = require("Legado.ConfigValidator")
+local socket = require("socket")
+local Probe = require("Legado.Helper.Probe")
+
+local function format_chapter_desc(ch)
+    if not ch then return "未知章节" end
+    local idx = ch.chapters_index or ch.index or "?"
+    local title = ch.title or ch.name or ""
+    if title ~= "" then
+        return string.format("第%s章: %s", tostring(idx), tostring(title))
+    end
+    return string.format("第%s章", tostring(idx))
+end
+
+local function get_file_size(path)
+    if not path or not util.fileExists(path) then return 0 end
+    local ok, size = pcall(function()
+        local lfs = require("libs/libkoreader-lfs")
+        return lfs.attributes(path, "size")
+    end)
+    if ok and type(size) == "number" then return size end
+    local f = io.open(path, "rb")
+    if f then
+        local sz = f:seek("end")
+        f:close()
+        return sz or 0
+    end
+    return 0
+end
 
 -- 太旧版本缺少这个函数
 if not dbg.log then
@@ -53,9 +81,9 @@ end
 local function extract_err_msg(v)
     if type(v) == "string" then return v end
     if type(v) == "table" then
-        return v.message or v.errorMsg or v[2]
+        return v[1] or v.message or v.errorMsg or v.error or v.reason or v.err or v[2] or "unknown error"
     end
-    return nil
+    return v and tostring(v) or nil
 end
 
 local function wrap_response(data, err_message)
@@ -65,7 +93,8 @@ local function wrap_response(data, err_message)
     if data ~= nil then
         response.body = data
     else
-        response.message = H.is_str(err_message) and err_message or "Unknown error"
+        local clean_err = extract_err_msg(err_message)
+        response.message = clean_err or "Unknown error"
     end
     return response
 end
@@ -102,12 +131,12 @@ end
 
 function M:promptServiceUnreachable()
     local ButtonDialog = require("ui/widget/buttondialog")
-    local NetProbe = require("Legado/Helper/NetProbe")
+    local Discovery = require("Legado.Helper.Discovery")
     local TaskProg = require("Legado.task.Progress")
     local dialog
     local function startScan()
         TaskProg.loading("正在扫描局域网服务", function()
-            return NetProbe:scanLegadoServices({ timeout = 0.4 })
+            return Discovery:scanLegadoServices({ timeout = 0.4 })
         end, function(ok, result)
             if dialog and dialog.close then dialog:close() end
             if not ok or type(result) ~= "table" or not result.list or #result.list == 0 then
@@ -470,6 +499,8 @@ function M:_pDownloadChapter(chapter)
 
     local cache_chapter = self:getCacheChapterFilePath(chapter, true)
     if cache_chapter and cache_chapter.cacheFilePath then
+        local cache_size = get_file_size(cache_chapter.cacheFilePath)
+        Probe.done("Chapter", "命中本地缓存", format_chapter_desc(chapter), chapter._t_probe_start, "CACHE_HIT", Probe.format_bytes(cache_size))
         return cache_chapter
     end
 
@@ -664,6 +695,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
 
     if not H.is_tbl(chapter_down_tasks) or #chapter_down_tasks < 1 then
         logger.dbg("Legado.preLoadingChapters - All chapters already cached")
+        Probe.done("Preload", "所有章节已缓存", tostring(chapters[1] and chapters[1].book_cache_id or "-"), nil, "CACHE_HIT", "0 chapters")
         if has_result_progress_callback then result_progress_callback(true, "所有章节已缓存") end
         return true, "所有章节已缓存"
     end
@@ -676,9 +708,17 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
         logger.info("Multi-threading temporarily disabled for this session")
     end
 
-    local book_cache_id = chapter_down_tasks[1].book_cache_id
+    local first_ch = chapter_down_tasks[1]
+    local last_ch = chapter_down_tasks[#chapter_down_tasks]
+    local book_cache_id = first_ch.book_cache_id
     local is_comic = self:isBookTypeComic(book_cache_id)
     local chapter_timeout = is_comic and 120 or 20
+
+    local mode_name = is_read_ahead and "翻页预读" or "批量下载"
+    local book_title = first_ch.book_name or first_ch.name or tostring(book_cache_id)
+    local range_str = string.format("第%s..%s章", tostring(first_ch.chapters_index or 1), tostring(last_ch.chapters_index or #chapter_down_tasks))
+    local batch_desc = string.format("%s[%s] 共%d章 (%s)", mode_name, book_title, #chapter_down_tasks, range_str)
+    local t_batch_start = Probe.start("Preload", batch_desc, string.format("(threads=%d, type=%s, timeout=%ds)", max_threads, is_comic and "comic" or "text", chapter_timeout))
 
     logger.dbg("Legado.preLoadingChapters - START with", max_threads, "threads, type:", is_comic and "comic" or "text", "timeout:", chapter_timeout .. "s")
 
@@ -693,6 +733,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     local pending_cbz_count = 0 -- 进行中的异步 CBZ 打包数(from_urls_async 不在 ch 任务队列中)
     local check_completion = function(progress, err_msg)
         if progress == false then
+            Probe.fail("Preload", "预加载失败", batch_desc, t_batch_start, tostring(err_msg or "下载中断"))
             if not is_read_ahead and not has_error then
                 has_error = true
                 if ch then
@@ -726,6 +767,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                 if not is_read_ahead then
                     TaskQueue:destroyChannel(channel_name)
                 end
+                Probe.done("Preload", "预加载批处理完成", batch_desc, t_batch_start, "SUCCESS", string.format("%d/%d loaded", completed_count, #chapter_down_tasks))
                 if has_result_progress_callback and not has_error then
                     result_progress_callback(true, "任务结束")
                 end
@@ -777,6 +819,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     if success and H.is_tbl(downloaded_chapter) and downloaded_chapter.kind == "cbz" then
                         local pending = downloaded_chapter
                         pending_cbz_count = pending_cbz_count + 1
+                        local t_cbz_start = Probe.start("Chapter", "CBZ打包", format_chapter_desc(current_chapter), string.format("(%d P图片)", #pending.img_sources))
                         local cbz_writer = require("Legado.task.QueueCbz"):new()
                         local started, start_err = cbz_writer:from_urls_async({
                             output = pending.filePath,
@@ -791,6 +834,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                                 if not (result and result.success) then
                                     pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                                     logger.err("Failed to package cbz:", tostring(pending.filePath))
+                                    Probe.fail("Chapter", "CBZ打包失败", format_chapter_desc(current_chapter), t_cbz_start, tostring(result and result.output or pending.filePath))
                                     return check_completion(false, string.format("章节[%s]图片打包失败: %s", tostring(current_chapter.title), tostring(result and result.output or pending.filePath)))
                                 end
                                 current_chapter.cacheFilePath = pending.filePath
@@ -802,6 +846,9 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                                 pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
 
                                 completed_count = completed_count + 1
+                                local cbz_size = get_file_size(pending.filePath)
+                                local progress_str = string.format("进度 %d/%d", completed_count, #chapter_down_tasks)
+                                Probe.done("Chapter", "CBZ完成", format_chapter_desc(current_chapter), t_cbz_start, "200 OK", Probe.format_bytes(cbz_size), progress_str)
                                 check_completion(completed_count)
                             end,
                         })
@@ -809,6 +856,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                             pending_cbz_count = pending_cbz_count - 1
                             pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                             logger.err("Failed to start cbz packaging:", tostring(start_err))
+                            Probe.fail("Chapter", "CBZ启动失败", format_chapter_desc(current_chapter), t_cbz_start, tostring(start_err))
                             return check_completion(false, string.format("章节[%s]图片打包启动失败: %s", tostring(current_chapter.title), tostring(start_err)))
                         end
                         return
@@ -817,6 +865,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     if not (success and H.is_tbl(downloaded_chapter) and downloaded_chapter.cacheFilePath) then
                         pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                         logger.err("Failed to download chapter:", tostring(downloaded_chapter))
+                        Probe.fail("Chapter", "章节下载失败", format_chapter_desc(current_chapter), current_chapter._t_probe_start, tostring(downloaded_chapter))
                         return check_completion(false, string.format("章节[%s]下载失败: %s", tostring(current_chapter.title), tostring(downloaded_chapter)))
                     end
 
@@ -829,6 +878,9 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
 
                     completed_count = completed_count + 1
+                    local file_size = get_file_size(cache_file_path)
+                    local progress_str = string.format("进度 %d/%d", completed_count, #chapter_down_tasks)
+                    Probe.done("Chapter", "章节下载完成", format_chapter_desc(current_chapter), current_chapter._t_probe_start, "200 OK", Probe.format_bytes(file_size), progress_str)
                     check_completion(completed_count)
                 end,
                 {
@@ -836,6 +888,8 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     insert_at_head = true,
                     timeout = chapter_timeout,
                     on_start = function()
+                        dlChapter._t_probe_start = socket.gettime()
+                        Probe.start("Chapter", "下载章节", format_chapter_desc(dlChapter), string.format("(book_id: %s, idx: %s)", tostring(book_cache_id), tostring(dlChapter.chapters_index)))
                         logger.dbg('TaskQueue running: chapter_title:', dlChapter.title or nil)
                     end
                 }
@@ -1253,6 +1307,8 @@ end
 function M:after_reader_chapter_show(chapter)
     local cache_file_path = chapter.cacheFilePath
     local book_cache_id = chapter.book_cache_id
+    Probe.start("Reader", "阅读展示", format_chapter_desc(chapter), string.format("(book_id: %s, idx: %s, ext: %s)", tostring(book_cache_id), tostring(chapter.chapters_index), tostring(chapter.cacheExt or "txt")))
+
     local status, err = pcall(function()
         local update_state = {}
         if chapter.isDownLoaded ~= true then
@@ -1324,13 +1380,16 @@ function M:after_reader_chapter_show(chapter)
             if self._preload_timer_cancel then
                 self._preload_timer_cancel()
                 self._preload_timer_cancel = nil
+                Probe.retry("Preload", "防抖重置 (快速翻页)", format_chapter_desc(chapter), nil, "取消前次未触发预读")
             end
             local preDownloadNum = tonumber(settings.preload_chapters)
             if preDownloadNum == nil then preDownloadNum = 3 end
-            if preDownloadNum > 0 and self:getcompleteReadAheadChapters(chapter) < 40 then
+            local cached_ahead = self:getcompleteReadAheadChapters(chapter)
+            if preDownloadNum > 0 and cached_ahead < 40 then
                 if chapter.cacheExt == 'cbz' then
                     preDownloadNum = 1
                 end
+                Probe.start("Preload", "预读排队防抖 (1.5s)", format_chapter_desc(chapter), string.format("(预下载: %d章, 已预存: %d/40)", preDownloadNum, cached_ahead))
                 self._preload_timer_cancel = TaskQueue.delay(1.5, function()
                     self:preLoadingChapters(chapter, preDownloadNum)
                     self._preload_timer_cancel = nil

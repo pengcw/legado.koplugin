@@ -47,6 +47,7 @@ function M:init()
 end
 
 function M:getApiMoreRresults()
+    if self.is_loading then return end
     if not self.has_more_api_results then return end
     if self.call_mode == "SEARCH" then
         self:handleMultiSourceSearch(self.search_text, true)  
@@ -60,7 +61,7 @@ end
 function M:onMenuGotoPage(menu_self, new_page)
     Menu.onGotoPage(menu_self, new_page)
     local is_last_page = new_page == menu_self.page_num
-    if is_last_page and self.has_more_api_results and self.last_index ~= nil then
+    if is_last_page and self.has_more_api_results and not self.is_loading and self.last_index ~= nil then
         UIManager:nextTick(function()
             self:getApiMoreRresults()
         end)
@@ -139,9 +140,11 @@ local function truncate_utf8(s, n)
 end
 
 -- 统一分页批次状态：has_more 落账 + 标题三态。加载中=请求在进行（入口处置），
--- 完成后 has_more→“（还有更多）”，结束→正常/中止；EXPLORE 仅落账标题保持常态
+-- 完成后 has_more→“（还有更多）”，结束→正常/中止；EXPLORE 仅落账标题保持常态。
+-- "没有更多了" 是 reader3 服务端的正常结束信号，按正常完成处理（不显示中止）
 function M:updateBatchState(mode, success, has_more, msg)
-    if msg == "没有更多了" then has_more = nil end
+    local is_normal_end = msg == "没有更多了"
+    if is_normal_end then has_more = nil end
     self.has_more_api_results = has_more
     if mode == "EXPLORE" then return has_more end
     local done, aborted
@@ -150,7 +153,7 @@ function M:updateBatchState(mode, success, has_more, msg)
     else
         done, aborted = '换源', '换源中止'
     end
-    if not has_more and success then
+    if not has_more and (success or is_normal_end) then
         self:updateMenuTitle(done)
     elseif has_more then
         self:updateMenuTitle(done .. '（还有更多）')
@@ -174,14 +177,7 @@ function M:attachCancelToMenu(cancel_func)
 end
 
 function M:showLoadingSpinner(message)
-    if self._loading_spinner then
-        -- 旧 spinner 已被用户手动关闭：重置引用后再新建（否则后续请求不会再显示）
-        if self._loading_spinner.closed then
-            self._loading_spinner = nil
-        else
-            return
-        end
-    end
+    self:hideLoadingSpinner()
     local Progress = require("Legado.task.Progress")
     self._loading_spinner = Progress.showSpinner(message or "加载中", {
         show_icon = false,
@@ -191,7 +187,9 @@ end
 
 function M:hideLoadingSpinner()
     if self._loading_spinner then
-        self._loading_spinner:close()
+        if type(self._loading_spinner.close) == "function" then
+            self._loading_spinner:close()
+        end
         self._loading_spinner = nil
     end
 end
@@ -220,6 +218,7 @@ function M:onCloseMenu()
     self.bookinfo = nil
     self.last_index = nil
     self.is_single_source_search = nil
+    self.is_loading = nil
 
     self.explore_url = nil
     self.explore_page = nil
@@ -304,18 +303,12 @@ function M:generateItemTableFromResults(append_data)
         })
     end
     
-    -- 结果不足一页时追加"加载更多"按钮
+    -- 结果有更多时追加"加载更多"按钮
     if self.has_more_api_results == true then
-        local results_menu_perpage = 15
-        if self.results_menu and self.results_menu.perpage then
-            results_menu_perpage = tonumber(self.results_menu.perpage) or 15
-        end
-        if not (#self.results > results_menu_perpage) then
-            table.insert(item_table, {
-                source_index = 0,
-                text = Icons.FA_ARROW_DOWN .. " 点击加载更多 ..."
-            })
-        end
+        table.insert(item_table, {
+            source_index = 0,
+            text = Icons.FA_ARROW_DOWN .. " 点击加载更多 ..."
+        })
     end
 
     return item_table
@@ -361,6 +354,41 @@ function M:showBookInfo(bookinfo)
     UIManager:show(dialog)
 end
 
+function M:changeBookSource(new_bookinfo)
+    if not (H.is_tbl(new_bookinfo) and H.is_str(new_bookinfo.bookUrl) and H.is_str(new_bookinfo.origin)) then
+        return MessageBox:error("换源参数错误")
+    end
+
+    self:withLoading("正在换源 ", function()
+        return Backend:changeBookSource({
+            bookUrl = self.bookinfo.bookUrl,
+            newUrl = new_bookinfo.bookUrl,
+            bookSourceUrl = new_bookinfo.origin,
+            name = self.bookinfo.name,
+            author = self.bookinfo.author,
+        })
+    end, function(_)
+        MessageBox:notice('换源成功')
+        self:modifySuccessCallback(true)
+    end, function(err_msg)
+        MessageBox:notice(err_msg or '换源失败')
+    end)
+end
+
+function M:addBookToLibrary(bookinfo)
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name)) then
+        return MessageBox:error("添加书籍参数错误")
+    end
+    self:withLoading("正在保存书籍 ", function()
+        return Backend:saveBook(bookinfo)
+    end, function(_)
+        MessageBox:notice('已加入书架')
+        self:modifySuccessCallback(true)
+    end, function(err_msg)
+        MessageBox:notice(err_msg or '保存失败')
+    end)
+end
+
 local function validateInput(text)
     return type(text) == 'string' and text:gsub("%s+", "") ~= ""
 end
@@ -368,13 +396,17 @@ end
 function M:searchBookDialog(onReturnCallback, def_input)
     local inputText
     local dialog
+
     self:init()
+
     local last_search_input = PlgState.last_search_input
     if last_search_input and not def_input then
         def_input = last_search_input
     end
+    
     self.call_mode = "SEARCH"
     self.on_success_callback = onReturnCallback
+
     dialog = MessageBox:input(
         "请键入要搜索的书籍或作者名称：\n(多源搜索可使用 '=书名' 语法精确匹配)", nil, {
             title = '添加书籍',
@@ -391,6 +423,7 @@ function M:searchBookDialog(onReturnCallback, def_input)
                 callback = function()
                     inputText = dialog:getInputText()
                     inputText = util.trim(inputText)
+
                     if not validateInput(inputText) then
                         return MessageBox:notice("请输入有效书籍或作者名称")
                     end
@@ -407,6 +440,7 @@ function M:searchBookDialog(onReturnCallback, def_input)
                 callback = function()
                     inputText = dialog:getInputText()
                     inputText = util.trim(inputText)
+
                     if not validateInput(inputText) then
                         return MessageBox:notice("请输入有效书籍或作者名称")
                     end
@@ -438,9 +472,6 @@ function M:handleSingleSourceSearch(searchText)
                 book_source_url = book_source_url,
             })
         end, function(data)
-            if not H.is_tbl(data) then
-                return MessageBox:notice('服务器返回数据错误')
-            end
             if #data == 0 or not H.is_tbl(data[1]) then
                 return MessageBox:notice('未找到相关书籍')
             end
@@ -459,17 +490,25 @@ function M:handleSingleSourceSearch(searchText)
 end
 
 function M:handleMultiSourceSearch(search_text, is_more_call)
+    -- 续搜防重入：加载中重复触发（下一页/item 加载更多）直接忽略
+    if is_more_call and self.is_loading then return end
     if not (H.is_str(search_text) and search_text ~= "") then
         MessageBox:notice("参数错误")
         return
     end
     
-    self.last_index = self.last_index ~= nil and self.last_index or -1
+    self.call_mode = "SEARCH"
+    self.search_text = search_text
+    self.is_loading = true
 
     if not is_more_call then
         self.results = {}
+        self.last_index = -1
         self.has_more_api_results = nil
+    else
+        self.last_index = (self.last_index ~= nil and self.last_index >= 0) and self.last_index or -1
     end
+
     self:showLoadingSpinner(string.format("正在搜索[%s]", search_text))
     if not is_more_call then
         self:createBookSourceMenu({
@@ -477,7 +516,7 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
             subtitle = string.format("key: %s", search_text),
         })
     else
-        -- 续搜：菜单已存在，不得重建（丢滚动），仅回置标题
+        -- 续搜
         self:updateMenuTitle('多源搜索 (加载中...)')
     end
     -- forceRePaint：否则会被后续计算阻塞不刷新
@@ -494,17 +533,25 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
             self:refreshItems(false, chunk)
         end
     end, function(success, msg, last_index)
+        self.is_loading = false
         cancel_func = nil
         self:hideLoadingSpinner()
         -- reader3 SSE 续搜推进 lastIndex；其他端第三参 nil → 永不触发
         local has_more
-        if success and H.is_num(last_index) and self.last_index ~= last_index then
+        if success and H.is_num(last_index) and last_index >= 0 and self.last_index ~= last_index then
             self.last_index = last_index
             has_more = true
         end
-        self:updateBatchState("SEARCH", success, has_more, msg)
-        if not success and msg ~= "已取消" then
-            MessageBox:notice(msg or "搜索失败")
+        local Error = require("Legado.Helper.Error")
+        local clean_msg = Error.extract_message(msg)
+        self:updateBatchState("SEARCH", success, has_more, clean_msg)
+        if self.results_menu and UIManager:isWidgetShown(self.results_menu._container) then
+            self:refreshItems(false)
+        end
+        local is_cancel = clean_msg == "已取消" or clean_msg == "user_cancelled" or clean_msg == "cancelled"
+            or (type(clean_msg) == "string" and clean_msg:find("cancel"))
+        if not success and not is_cancel and clean_msg ~= "没有更多了" then
+            MessageBox:notice(clean_msg or "搜索失败")
         elseif success and self.results and #self.results == 0 then
             MessageBox:notice('未找到相关书籍')
         end
@@ -513,12 +560,24 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
 end
 
 function M:handleAvailableBookSource(bookinfo, is_more_call)
+    -- 续搜防重入
+    if is_more_call and self.is_loading then return end
 
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl)) then
         return MessageBox:error('参数错误')
     end
 
-    self.last_index = self.last_index ~= nil and self.last_index or -1
+    self.call_mode = "CHANGE_SOURCE"
+    self.bookinfo = bookinfo
+    self.is_loading = true
+
+    if not is_more_call then
+        self.results = {}
+        self.last_index = -1
+        self.has_more_api_results = nil
+    else
+        self.last_index = (self.last_index ~= nil and self.last_index >= 0) and self.last_index or -1
+    end
 
     local options = {
         book_url = bookinfo.bookUrl,
@@ -528,10 +587,6 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
         search_size = 8,
     }
 
-    if not is_more_call then
-        self.results = {}
-        self.has_more_api_results = nil
-    end
     self:showLoadingSpinner(string.format("搜索[%s]可用书源", bookinfo.name))
     if not is_more_call then
         self:createBookSourceMenu({
@@ -546,6 +601,7 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
     local cancel_func
 
     cancel_func = Backend:getAvailableBookSource(options, function(success, data, msg, last_index)
+        self.is_loading = false
         cancel_func = nil
         self:hideLoadingSpinner()
         if not success then
@@ -555,18 +611,24 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
         if not (H.is_tbl(data) and H.is_tbl(data.list)) then
             return MessageBox:notice('返回书源错误')
         end
-        if #data.list == 0 then
+        if #data.list == 0 and not is_more_call then
             return MessageBox:error('没有找到可用源')
         end
 
         local has_more
-        if H.is_num(last_index) and self.last_index ~= last_index then
+        if H.is_num(last_index) and last_index >= 0 and self.last_index ~= last_index then
             self.last_index = last_index
             has_more = true
         end
 
         if is_more_call ~= true then
             self.results = data.list
+        else
+            if H.is_tbl(data) and H.is_tbl(data.list) then
+                for _, item in ipairs(data.list) do
+                    table.insert(self.results, item)
+                end
+            end
         end
         self:updateBatchState("CHANGE_SOURCE", true, has_more, msg or data)
         -- 重新生成列表（菜单创建时 item_table 为空）

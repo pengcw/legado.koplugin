@@ -1,5 +1,4 @@
 local SQ3 = require("lua-ljsqlite3/init")
-local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local dbg = require("dbg")
 local Device = require("device")
@@ -287,7 +286,7 @@ function M:_initDB(is_repair)
         db:exec(string.format("PRAGMA user_version=%d;", BOOKINFO_DB_VERSION))
         return db:exec(BOOKINFO_DB_SCHEMA)
     end)
-    if success and rc == SQ3.OK then
+    if success then
         dbg.v("Database schema initialized successfully.")
         self.dbCreated = true
         self:closeDB()

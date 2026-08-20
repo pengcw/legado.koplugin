@@ -32,7 +32,17 @@ local receive = function(self)
       return clean(false,1006,'Websocket receive failed: frame was not masked')
     end
     if decoded then
-      if opcode == frame.CLOSE then
+      if opcode == frame.PING then
+        local pong_encoded = frame.encode(decoded, frame.PONG, not self.is_server)
+        self:sock_send(pong_encoded)
+        bytes = 3
+        encoded = ''
+        first_opcode = nil
+      elseif opcode == frame.PONG then
+        bytes = 3
+        encoded = ''
+        first_opcode = nil
+      elseif opcode == frame.CLOSE then
         if not self.is_closing then
           local code,reason = frame.decode_close(decoded)
           -- echo code
@@ -47,24 +57,25 @@ local receive = function(self)
         else
           return decoded,opcode
         end
-      end
-      if not first_opcode then
-        first_opcode = opcode
-      end
-      if not fin then
-        if not frames then
-          frames = {}
-        elseif opcode ~= frame.CONTINUATION then
-          return clean(false,1002,'protocol error')
-        end
-        bytes = 3
-        encoded = ''
-        tinsert(frames,decoded)
-      elseif not frames then
-        return decoded,first_opcode
       else
-        tinsert(frames,decoded)
-        return tconcat(frames),first_opcode
+        if not first_opcode then
+          first_opcode = opcode
+        end
+        if not fin then
+          if not frames then
+            frames = {}
+          elseif opcode ~= frame.CONTINUATION then
+            return clean(false,1002,'protocol error')
+          end
+          bytes = 3
+          encoded = ''
+          tinsert(frames,decoded)
+        elseif not frames then
+          return decoded,first_opcode
+        else
+          tinsert(frames,decoded)
+          return tconcat(frames),first_opcode
+        end
       end
     else
       assert(type(fin) == 'number' and fin > 0)
@@ -193,18 +204,30 @@ local extend = function(obj)
   -- 默认阻塞式 TLS 握手（sync 后端）；异步后端（如 copas）可覆盖为 select 驱动版
   if not obj.sock_handshake then
     obj.sock_handshake = function(self, host, ssl_params)
-      -- KOReader ssl 封装需要显式参数表
-      self.sock = ssl.wrap(self.sock, ssl_params or {
+      local params = ssl_params or {
           mode = 'client',
           protocol = 'any',
           options = { 'all', 'no_sslv2', 'no_sslv3', 'no_tlsv1' },
           verify = 'none',
-      })
-      -- SNI：兼容 CF/Envoy 类服务器；不同 LuaSec 版本返回值不一致，失败不中止
-      if self.sock.sni then
-          pcall(self.sock.sni, self.sock, host)
+      }
+      local ok_w, sock_w = pcall(function()
+          local s = ssl.wrap(self.sock, params)
+          if s.sni then
+              pcall(s.sni, s, host)
+          end
+          s:settimeout(60)
+          local ok_hs, err_hs = s:dohandshake()
+          if not ok_hs then
+              error(tostring(err_hs or "dohandshake failed"))
+          end
+          return s
+      end)
+      if not ok_w then
+          if self.sock then pcall(function() self.sock:close() end) end
+          self.sock = nil
+          error("TLS 握手失败: " .. tostring(sock_w))
       end
-      self.sock:dohandshake()
+      self.sock = sock_w
       return self.sock
     end
   end

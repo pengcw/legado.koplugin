@@ -261,7 +261,7 @@ function M:handleConfigSave(dialog, current_conf_name, old_config, server_type, 
 end
 
 function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
-    local NetProbe = require("Legado/Helper/NetProbe")
+    local Discovery = require("Legado.Helper.Discovery")
     local TaskProg = require("Legado.task.Progress")
 
     local NetworkMgr = require("ui/network/manager")
@@ -277,11 +277,11 @@ function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
     TaskProg.loading("正在检测服务", function()
         local current_url = config and config.url
         if current_url and current_url:match("^https?://") then
-            if NetProbe:check(current_url, { timeout = 3 }) then
+            if Discovery:check(current_url, { timeout = 3 }) then
                 return "current_ok"
             end
         end
-        return NetProbe:scanLegadoServices({ timeout = 0.4 })
+        return Discovery:scanLegadoServices({ timeout = 0.4 })
     end, function(ok, result)
         if not ok then
             return MessageBox:notice("未在局域网发现开源阅读服务")

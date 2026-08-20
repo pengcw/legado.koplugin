@@ -120,13 +120,14 @@ function M:reader3Login()
 end
 
 function M:ensureLogin()
-    if not self._need_login then return true end
-
-    local cache_token = self.tokenManager:get()
-    if cache_token then
+    local cache_token = self:ensureTokenManager():get()
+    if H.is_str(cache_token) and cache_token ~= "" then
         return true, cache_token
     end
-    return self:reader3Login()
+    if self._need_login then
+        return self:reader3Login()
+    end
+    return true, nil
 end
 
 function M:resetAndEnableMiddlewares(includeAuth)
@@ -142,8 +143,10 @@ function M:resetAndEnableMiddlewares(includeAuth)
     })
 end
 
+local Probe = require("Legado.Helper.Probe")
+
 function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
-    local server_address = self.settings.server_address
+    local server_address = self.settings and self.settings.server_address or ""
     logName = logName or 'handleResponse'
     opts = opts or {}
   
@@ -152,6 +155,10 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
         timeouts = {8, 12}
     end
   
+    local full_url = string.format("%s/%s", tostring(server_address), tostring(logName))
+    local retry_tag = isRetry and " (retry)" or ""
+    local t_start = Probe.start("Spore", logName, full_url, string.format("(timeout: block=%ds, total=%ds)%s", timeouts[1], timeouts[2], retry_tag))
+
     self:resetAndEnableMiddlewares(true)
   
     socketutil:set_timeout(timeouts[1], timeouts[2])
@@ -159,8 +166,8 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
     socketutil:reset_timeout()
   
     if not (status and H.is_tbl(res) and H.is_tbl(res.body)) then
-        logger.err(logName, "requestFunc err:", tostring(res))
         local err_msg = errHandler.map_message(res)
+        Probe.fail("Spore", logName, full_url, t_start, err_msg)
         return nil, string.format("Web 服务: %s", err_msg)
     end
   
@@ -168,19 +175,22 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
         if self.tokenManager then
             self.tokenManager:clear()
         end
+        Probe.retry("Spore", logName, full_url, t_start, "NEED_LOGIN -> Re-authenticating")
         self:ensureLogin()
-        logger.err("Need login, refreshed session and retrying")
         return self:handleResponse(requestFunc, callback, opts, logName, true)
     end
 
     if res.body.isSuccess == true then
-          if not res.body.data then res.body.data = {} end
-          if H.is_func(callback)  then
-              return callback(res.body) 
-           end
-          return res.body.data
+        if not res.body.data then res.body.data = {} end
+        Probe.done("Spore", logName, full_url, t_start, "200 OK", Probe.format_summary(res.body.data))
+        if H.is_func(callback) then
+            return callback(res.body) 
+        end
+        return res.body.data
     else
-        return nil, (res.body and res.body.errorMsg) and res.body.errorMsg or '出错'
+        local err_reason = (res.body and res.body.errorMsg) and res.body.errorMsg or '出错'
+        Probe.fail("Spore", logName, full_url, t_start, err_reason)
+        return nil, err_reason
     end
 end
 

@@ -1,27 +1,17 @@
 local util = require("util")
+local logger = require("logger")
 local socket_url = require("socket.url")
 local H = require("Legado/Helper")
 local safe_pcall = require("Legado.Helper.Error").pcall
 local LegadoSpec = require("Legado.spore.base")
 local bookutil = require("Legado.spore.bookutil")
+local Probe = require("Legado.Helper.Probe")
 
 local M = LegadoSpec:extend{
   name = "qread",
   client = nil,
   settings = nil,
 }
-
--- 打乱书源顺序，避免总是优先命中固定书源
-local function source_list_shuffle(t)
-    if type(t) ~= "table" or #t <= 1 then return t end
-    local n = #t
-    math.randomseed(os.time() + math.random(1000, 9999))
-    for i = n, 2, -1 do
-        local j = math.random(i)
-        t[i], t[j] = t[j], t[i]
-    end
-    return t
-end
 
 function M:init()
     LegadoSpec.init(self)
@@ -37,6 +27,10 @@ function M:reader3Login()
         return false, '认证信息设置不全'
     end
 
+    local server_address = self.settings and self.settings.server_address or ""
+    local full_url = string.format("%s/login", tostring(server_address))
+    local t_start = Probe.start("Spore", "login", full_url, "(timeout: 8s/10s)")
+
     self:resetAndEnableMiddlewares(false)
     socketutil:set_timeout(8, 10)
 
@@ -50,15 +44,21 @@ function M:reader3Login()
     socketutil:reset_timeout()
 
     if not status then
-        return false,  res and tostring(res) or '获取用户信息出错'
+        local err = res and tostring(res) or '获取用户信息出错'
+        Probe.fail("Spore", "login", full_url, t_start, err)
+        return false, err
     end
-    if not (H.is_tbl(res) and H.is_tbl(res.body) ) then
+    if not (H.is_tbl(res) and H.is_tbl(res.body)) then
+        Probe.fail("Spore", "login", full_url, t_start, "返回了无效数据")
         return false, "返回了无效数据"
     end
     if not (H.is_tbl(res.body.data) and H.is_str(res.body.data.accessToken)) then
-        return false, '获取 Token 失败:' .. tostring(res.body.errorMsg or "")
+        local err_msg = '获取 Token 失败:' .. tostring(res.body.errorMsg or "")
+        Probe.fail("Spore", "login", full_url, t_start, res.body.errorMsg or "Token缺失")
+        return false, err_msg
     end
 
+    Probe.done("Spore", "login", full_url, t_start, "200 OK", "Token OK")
     self:ensureTokenManager():set(res.body.data.accessToken)
     return true, res.body.data.accessToken
 end
@@ -603,14 +603,17 @@ function M:searchBookMulti(options, on_chunk, on_finish)
     for _, source in ipairs(book_sources) do
         if H.is_tbl(source) and source.enabled and H.is_str(source.bookSourceUrl) and
                 source.bookSourceUrl ~= "" then
-            table.insert(active_sources, source)
+            table.insert(active_sources, {
+                bookSourceUrl = source.bookSourceUrl,
+                bookSourceName = source.bookSourceName,
+            })
         end
     end
     if #active_sources == 0 then
         if H.is_func(on_finish) then on_finish(false, "没有启用的书源") end
         return nil
     end
-    active_sources = source_list_shuffle(active_sources)
+    active_sources = bookutil.list_shuffle(active_sources)
 
     local MAX_SOURCES = 500
     if #active_sources > MAX_SOURCES then
@@ -619,68 +622,77 @@ function M:searchBookMulti(options, on_chunk, on_finish)
         end
     end
 
-    local TaskQueue = require("Legado.task.Queue")
+    local server_settings = {
+        server_address = self.settings.server_address,
+        reader3_un = self.settings.reader3_un,
+        reader3_pwd = self.settings.reader3_pwd,
+    }
+    local token = self.tokenManager and self.tokenManager:get() or nil
+    local filter_opts = {
+        name = options.name,
+        author = options.author,
+    }
 
-    local MAX_WORKERS = 4
-    local SOURCE_TIMEOUT = 30
-
-    local finish_sent = false
-    local function send_finish(success, msg)
-        if finish_sent then return end
-        finish_sent = true
-        if H.is_func(on_finish) then
-            pcall(on_finish, success, msg)
+    local TaskQueue = require("Legado.task.v2")
+    local task = TaskQueue.spawn(function(ctx)
+        local qread_mod = require("Legado.spore.qread")
+        local bookutil = require("Legado.spore.bookutil")
+        local inst = qread_mod:new({ settings = server_settings })
+        if token and inst.tokenManager then
+            inst.tokenManager:set(token)
         end
-    end
 
-    local channel_name = string.format("qread_search_%d_%d", os.time(), math.random(1000, 9999))
-    local ch = TaskQueue:createChannel(channel_name, MAX_WORKERS, function(aborted)
-        TaskQueue:destroyChannel(channel_name)
-        if aborted then
-            send_finish(false, "已取消")
-        else
-            send_finish(true, nil)
-        end
-    end)
-
-    for _, source in ipairs(active_sources) do
-        ch:pushTask(function(src)
+        ctx.map(active_sources, function(src, idx)
+            if ctx.is_cancelled() then return end
             local status, ret = pcall(function()
-                return self:handleResponse(function()
-                    return self.client:searchBook({
+                return inst:handleResponse(function()
+                    return inst.client:searchBook({
                         key = search_text,
                         bookSourceUrl = src.bookSourceUrl,
                         page = 1,
                     })
                 end, nil, {
-                    timeouts = {10, 15},
+                    timeouts = { 10, 15 },
                 }, 'searchBookSingle')
             end)
-            if not status or not H.is_tbl(ret) then return nil end
 
-            local chunk = {}
-            for _, book in ipairs(ret) do
-                if H.is_tbl(book) and bookutil.filter_search(book, search_text, is_exact_search, options)
-                        and H.is_str(book.name) and book.name ~= ""
-                        and H.is_str(book.bookUrl) and book.bookUrl ~= "" then
-                    table.insert(chunk, book)
+            if status and type(ret) == "table" then
+                local chunk = {}
+                for _, book in ipairs(ret) do
+                    if type(book) == "table" and bookutil.filter_search(book, search_text, is_exact_search, filter_opts)
+                            and type(book.name) == "string" and book.name ~= ""
+                            and type(book.bookUrl) == "string" and book.bookUrl ~= "" then
+                        table.insert(chunk, book)
+                    end
+                end
+                if #chunk > 0 then
+                    ctx.emit("chunk", chunk)
                 end
             end
-            return chunk
-        end, function(ok, chunk)
-            if ok and H.is_tbl(chunk) and #chunk > 0 and H.is_func(on_chunk) then
-                pcall(on_chunk, chunk)
+        end, 4)
+
+        return true
+    end, { timeout = 120 })
+
+    if H.is_func(on_chunk) then
+        task:on("chunk", on_chunk)
+    end
+
+    if H.is_func(on_finish) then
+        task:on("done", function(ok, res, state)
+            if ok then
+                on_finish(true, nil)
+            else
+                local Error = require("Legado.Helper.Error")
+                on_finish(false, Error.extract_message(res))
             end
-        end, {
-            args = {source},
-            timeout = SOURCE_TIMEOUT,
-        })
+        end)
     end
 
     return function()
-        -- 已 drain（全部完成）时 clearTasks 不触发 abort 回调，幂等补发"已取消"
-        ch:clearTasks()
-        send_finish(false, "已取消")
+        if not task:is_done() then
+            task:cancel("已取消")
+        end
     end
 end
 

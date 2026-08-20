@@ -2,6 +2,15 @@ name: Manual Package & Release Plugin
 
 on:
   workflow_dispatch:
+    inputs:
+      source_branch:
+        description: "打包源码分支（dev 默认；main 回退）"
+        required: false
+        default: "dev"
+        type: choice
+        options:
+          - dev
+          - main
 
 permissions:
   contents: write
@@ -14,6 +23,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_branch || 'dev' }}
           fetch-depth: 0
 
       - name: Extract Version with Fallback
@@ -25,14 +35,18 @@ jobs:
           v = None
           if os.path.exists(meta):
               try:
-                  content = open(meta, "r", encoding="utf-8", errors="ignore").read()
-                  m = re.search(r"version\s*=\s*[\"]([^\"]+)[\"]", content)
+                  content = open(meta, "r", encoding="utf-8",
+                                 errors="ignore").read()
+                  m = re.search(r"version\s*=\s*[\"]([^\"]+)[\"]",
+                                content)
                   if m:
                       v = m.group(1).strip()
               except Exception as e:
-                  print(f"Warning: Failed to parse _meta.lua: {e}", file=sys.stderr)
+                  print(f"Warning: Failed to parse _meta.lua: {e}",
+                        file=sys.stderr)
           if not v:
-              print("Warning: Version fallback activated (default: 1.0.0)", file=sys.stderr)
+              print("Warning: Version fallback activated "
+                    "(default: 1.0.0)", file=sys.stderr)
               v = "1.0.0"
           print(v)
           ')
@@ -42,11 +56,13 @@ jobs:
       - name: Create Plugin Directory Structure
         run: |
           mkdir -p build/plugins/legado.koplugin
-          
           # 复制说明文件与协议文件（带容错处理）
-          [ -f README.md ] && cp README.md build/plugins/legado.koplugin/ || echo "Warning: README.md missing"
-          [ -f LICENSE ] && cp LICENSE build/plugins/legado.koplugin/ || echo "Warning: LICENSE missing"
-          
+          [ -f README.md ] && cp README.md \
+            build/plugins/legado.koplugin/ \
+            || echo "Warning: README.md missing"
+          [ -f LICENSE ] && cp LICENSE \
+            build/plugins/legado.koplugin/ \
+            || echo "Warning: LICENSE missing"
           # 复制插件核心代码
           if [ -d legado.koplugin ]; then
             cp -r legado.koplugin/* build/plugins/legado.koplugin/
@@ -62,11 +78,9 @@ jobs:
             echo "Error: Build directory structure missing!" >&2
             exit 1
           fi
-          
           cd build
           zip -r ../legado_plugin_update.zip plugins/
           cd ..
-          
           if [ ! -f "legado_plugin_update.zip" ]; then
             echo "Error: Zip archive creation failed!" >&2
             exit 1
@@ -92,25 +106,72 @@ jobs:
           SUCCESS=0
 
           for i in $(seq 1 $MAX_RETRIES); do
-            echo "=== Attempt $i of $MAX_RETRIES: Publishing Release $TAG_NAME ==="
+            echo "=== Attempt $i: Publishing Release $TAG_NAME ==="
             if gh release view "$TAG_NAME" >/dev/null 2>&1; then
-              echo "Release $TAG_NAME 已经存在，正在覆盖更新 asset..."
-              if gh release upload "$TAG_NAME" legado_plugin_update.zip --clobber; then
+              echo "Release $TAG_NAME 已存在，覆盖更新 asset..."
+              if gh release upload "$TAG_NAME" \
+                legado_plugin_update.zip --clobber; then
                 SUCCESS=1
                 break
               fi
             else
               echo "正在创建新 Release $TAG_NAME..."
-              if gh release create "$TAG_NAME" legado_plugin_update.zip --title "$RELEASE_TITLE" --generate-notes; then
+              if gh release create "$TAG_NAME" \
+                legado_plugin_update.zip --title "$RELEASE_TITLE" \
+                --generate-notes; then
                 SUCCESS=1
                 break
               fi
             fi
-            echo "Attempt $i failed. Waiting ${RETRY_DELAY}s before retry..."
+            echo "Attempt $i failed. Waiting ${RETRY_DELAY}s..."
             sleep $RETRY_DELAY
           done
 
           if [ $SUCCESS -ne 1 ]; then
-            echo "Error: Failed to publish or update release after $MAX_RETRIES attempts." >&2
+            echo "Error: Failed to publish or update release." >&2
             exit 1
+          fi
+
+      # 把当前源码分支的 _meta.lua 同步到 main，作为 Update.lua 的
+      # 版本号后备检测源（raw.githubusercontent.com/.../main/...）。
+      # 容错：重试 3 次，最终失败仅告警不阻塞（Release 已发布）。
+      - name: Sync _meta.lua to main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.get_version.outputs.VERSION }}
+          SOURCE_BRANCH: ${{ inputs.source_branch || 'dev' }}
+        run: |
+          MAX_RETRIES=3
+          RETRY_DELAY=5
+          SYNC_OK=0
+
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "=== Sync attempt $i: pushing _meta.lua to main ==="
+            if git fetch origin main; then
+              MAIN_VERSION=$(git show \
+                origin/main:legado.koplugin/_meta.lua \
+                | sed -n 's/.*version *= *"\([^"]*\)".*/\1/p')
+              echo "main version: '$MAIN_VERSION' dev: '$VERSION'"
+              # 版本号一致则跳过，不一致才同步 main
+              if [ -n "$MAIN_VERSION" ] && \
+                [ "$MAIN_VERSION" = "$VERSION" ]; then
+                echo "版本号一致，跳过同步"
+                SYNC_OK=1
+                break
+              fi
+              git checkout -B ci-sync-meta origin/main
+              git checkout "$SOURCE_BRANCH" \
+                -- legado.koplugin/_meta.lua
+              git commit -m "chore: sync _meta.lua v$VERSION"
+              if git push origin HEAD:main; then
+                SYNC_OK=1
+                break
+              fi
+            fi
+            echo "Sync attempt $i failed. Waiting ${RETRY_DELAY}s..."
+            sleep $RETRY_DELAY
+          done
+
+          if [ $SYNC_OK -ne 1 ]; then
+            echo "Warning: sync _meta.lua to main failed." >&2
           fi

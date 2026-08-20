@@ -1,10 +1,12 @@
 local util = require("util")
+local logger = require("logger")
 local socket_url = require("socket.url")
 local socketutil = require("socketutil")
 local H = require("Legado/Helper")
 local safe_pcall = require("Legado.Helper.Error").pcall
 local BaseSpec = require("Legado.spore.base")
 local bookutil = require("Legado.spore.bookutil")
+local Probe = require("Legado.Helper.Probe")
 
 local M = BaseSpec:extend{
   name = "reader3",
@@ -25,6 +27,10 @@ function M:reader3Login()
         return false, '认证信息设置不全'
     end
 
+    local server_address = self.settings and self.settings.server_address or ""
+    local full_url = string.format("%s/login", tostring(server_address))
+    local t_start = Probe.start("Spore", "login", full_url, "(timeout: 8s/10s)")
+
     self:resetAndEnableMiddlewares(false)
     socketutil:set_timeout(8, 10)
 
@@ -40,16 +46,22 @@ function M:reader3Login()
     socketutil:reset_timeout()
 
     if not status then
-        return false,  res and tostring(res) or '获取用户信息出错'
+        local err = res and tostring(res) or '获取用户信息出错'
+        Probe.fail("Spore", "login", full_url, t_start, err)
+        return false, err
     end
     
-    if not (H.is_tbl(res) and H.is_tbl(res.body) ) then
+    if not (H.is_tbl(res) and H.is_tbl(res.body)) then
+        Probe.fail("Spore", "login", full_url, t_start, "返回了无效数据")
         return false, "返回了无效数据"
     end
     if not (H.is_tbl(res.body.data) and H.is_str(res.body.data.accessToken)) then
-        return false, '获取 Token 失败:' .. tostring(res.body.errorMsg or "")
+        local err_msg = '获取 Token 失败:' .. tostring(res.body.errorMsg or "")
+        Probe.fail("Spore", "login", full_url, t_start, res.body.errorMsg or "Token缺失")
+        return false, err_msg
     end
     
+    Probe.done("Spore", "login", full_url, t_start, "200 OK", "Token OK")
     self:ensureTokenManager():set(res.body.data.accessToken)
     return true, res.body.data.accessToken
 end
@@ -366,119 +378,329 @@ function M:exploreBook(options, callback)
     }, 'exploreBook')
 end
 
-function M:getAvailableBookSource(options, on_finish, on_chunk)
-    if not (H.is_tbl(options) and H.is_str(options.book_url) and options.book_url ~= "") then
-        if H.is_func(on_finish) then on_finish(false, '获取可用书源参数错误') end
-        return nil
+local function resolve_host_sync(host)
+    if host:match("^%d+%.%d+%.%d+%.%d+$") then return host end
+    local socket = require("socket")
+    local ok, ip = pcall(socket.dns.toip, host)
+    if ok and ip and ip ~= "" then
+        return ip
     end
-    on_finish = H.is_func(on_finish) and on_finish or function() end
-    on_chunk = H.is_func(on_chunk) and on_chunk or function() end
+    return host
+end
 
-    local book_url = options.book_url
-    local last_index = H.is_num(options.last_index) and options.last_index or -1
-    local is_more_call = last_index >= 0
+local function fetch_sse_stream_sync(req_url, timeout_sec, ctx, on_event_sync)
+    local socket = require("socket")
+    local ssl = require("ssl")
+    local socket_url = require("socket.url")
+    local SSEClientCopas = require("Legado.Helper.SSEClientCopas")
 
-    local finish_sent = false
-    local all_results = {}
-    local seen_origin = {}
-    local server_last_index
+    local max_time = timeout_sec or 120
+    local t_start = Probe.start("Spore", "SSE_STREAM", req_url, string.format("(timeout: %ds)", max_time))
 
-    local function send_finish(success, data, msg, last_idx)
-        if finish_sent then return end
-        finish_sent = true
-        pcall(on_finish, success, data, msg, last_idx)
+    local function probe_fail(reason)
+        Probe.fail("Spore", "SSE_STREAM", req_url, t_start, reason)
     end
 
-    local SSE = require("Legado/Helper/SSEClient")
-    local JSON = require("json")
-    local server_address = self.settings.server_address
-
-    local login_ok, login_token = self:ensureLogin()
-    if login_ok ~= true then
-        on_finish(false, nil, tostring(login_token or "登录失败"))
-        return nil
+    local function probe_done()
+        Probe.done("Spore", "SSE_STREAM", req_url, t_start, "200 OK", "stream finished")
     end
-    local token = login_token or nil
 
-    local function build_request()
-        local q = {
-            url = book_url,
-            lastIndex = last_index,
-            searchSize = 30,
-            bookSourceGroup = '',
-            refresh = 0,
-            concurrentCount = 32,
-            v = os.time(),
-        }
-        local parts = {}
-        for k, v in pairs(q) do
-            parts[#parts + 1] = k .. "=" .. util.urlEncode(tostring(v))
+    local parsed = socket_url.parse(req_url)
+    if not (parsed and parsed.host) then
+        probe_fail("非法URL")
+        return false, "非法URL"
+    end
+    local is_https = parsed.scheme == "https"
+    local host = parsed.host
+    local port = tonumber(parsed.port) or (is_https and 443 or 80)
+    local req_path = (parsed.path or "/") .. (parsed.query and ("?" .. parsed.query) or "")
+
+    local connect_ip = resolve_host_sync(host)
+
+    local sock = socket.tcp()
+    sock:settimeout(5)
+    local ok_c, cerr = sock:connect(connect_ip, port)
+    if not ok_c then
+        sock:close()
+        local msg = "连接服务器失败(" .. tostring(connect_ip) .. ":" .. tostring(port) .. "): " .. tostring(cerr)
+        probe_fail(msg)
+        return false, msg
+    end
+
+    if is_https then
+        local ok_w, sock_w = pcall(function()
+            local s = ssl.wrap(sock, {
+                mode = "client",
+                protocol = "any",
+                options = { "all", "no_sslv2", "no_sslv3", "no_tlsv1" },
+                verify = "none",
+            })
+            if s.sni then
+                pcall(s.sni, s, host)
+            end
+            local hs_to = math.min(60, math.max(1, max_time - (socket.gettime() - start_time)))
+            s:settimeout(hs_to)
+            local ok_hs, err_hs = s:dohandshake()
+            if not ok_hs then
+                error(tostring(err_hs or "dohandshake failed"))
+            end
+            return s
+        end)
+        if not ok_w then
+            pcall(function() sock:close() end)
+            local msg = "TLS握手失败: " .. tostring(sock_w)
+            probe_fail(msg)
+            return false, msg
         end
-        if H.is_str(token) and token ~= "" then
-            parts[#parts + 1] = "accessToken=" .. token
-        end
-        local parsed = socket_url.parse(server_address)
-        parsed.path = (parsed.path or ""):gsub("/+$", "") .. "/searchBookSourceSSE"
-        parsed.query = table.concat(parts, "&")
-        return socket_url.build(parsed)
+        sock = sock_w
     end
 
-    local client = nil
-    local function on_sse_event(evt_name, data_str)
-        if evt_name == "message" then
-            local ok, obj = pcall(JSON.decode, data_str)
-            if ok and H.is_tbl(obj) then
-                local chunk = {}
-                if H.is_tbl(obj.data) then
-                    for _, book in ipairs(obj.data) do
-                        if H.is_tbl(book) and H.is_str(book.origin) and not seen_origin[book.origin] then
-                            seen_origin[book.origin] = true
-                            table.insert(all_results, book)
-                            table.insert(chunk, book)
-                        end
+    local req = string.format(
+        "GET %s HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\nConnection: close\r\nUser-Agent: KOReader-Legado\r\n\r\n",
+        req_path, host
+    )
+    local ok_s, serr = sock:send(req)
+    if not ok_s then
+        sock:close()
+        local msg = "发送请求失败: " .. tostring(serr)
+        probe_fail(msg)
+        return false, msg
+    end
+
+    sock:settimeout(0.5)
+    local http_code = nil
+    local is_chunked = false
+    local start_time = socket.gettime()
+
+    while socket.gettime() - start_time < max_time do
+        if ctx and ctx.is_cancelled() then
+            sock:close()
+            probe_fail("已取消")
+            return false, "已取消"
+        end
+        local line, rerr = sock:receive("*l")
+        if line then
+            if not http_code then
+                http_code = line:match("^HTTP/%d%.%d%s+(%d%d%d)")
+            end
+            local lk, lv = line:match("^([^:]+):%s*(.*)$")
+            if lk then
+                lk = lk:lower()
+                if lk == "transfer-encoding" and lv:lower():find("chunked", 1, true) then
+                    is_chunked = true
+                end
+            end
+            if line == "" then break end
+        elseif rerr ~= "timeout" and rerr ~= "wantread" and rerr ~= "wantwrite" then
+            sock:close()
+            local msg = "读取响应头失败: " .. tostring(rerr)
+            probe_fail(msg)
+            return false, msg
+        end
+    end
+
+    if not http_code then
+        sock:close()
+        probe_fail("读取响应头超时")
+        return false, "读取响应头超时"
+    end
+
+    if http_code == "401" then
+        sock:close()
+        probe_fail("RETRY_LOGIN (401)")
+        return false, "RETRY_LOGIN"
+    elseif http_code ~= "200" then
+        sock:close()
+        local msg = "HTTP状态码异常: " .. tostring(http_code)
+        probe_fail(msg)
+        return false, msg
+    end
+
+    local decoder = is_chunked and SSEClientCopas._parsers.chunked_decoder() or nil
+    local sse = SSEClientCopas._parsers.sse_parser()
+
+    while socket.gettime() - start_time < max_time do
+        if ctx and ctx.is_cancelled() then
+            sock:close()
+            probe_fail("已取消")
+            return false, "已取消"
+        end
+        local raw, rerr, partial = sock:receive(8192)
+        local chunk_data = raw or partial
+        if chunk_data and #chunk_data > 0 then
+            local decoded = chunk_data
+            if decoder then
+                decoder.decode(chunk_data)
+                decoded = decoder.get_output()
+            end
+            if decoded ~= "" then
+                local events = sse.push(decoded)
+                for _, evt in ipairs(events) do
+                    local res = on_event_sync(evt[1], evt[2])
+                    if res == true then
+                        sock:close()
+                        probe_done()
+                        return true
+                    elseif res == "RETRY_LOGIN" then
+                        sock:close()
+                        probe_fail("RETRY_LOGIN")
+                        return false, "RETRY_LOGIN"
+                    elseif type(res) == "string" and res ~= "" then
+                        sock:close()
+                        probe_fail(res)
+                        return false, res
                     end
                 end
-                if H.is_num(obj.lastIndex) then
-                    server_last_index = obj.lastIndex
-                end
-                if #chunk > 0 and H.is_func(on_chunk) then
-                    pcall(on_chunk, chunk)
-                end
             end
-        elseif evt_name == "end" then
-            local ok_end, obj_end = pcall(JSON.decode, data_str)
-            if ok_end and H.is_tbl(obj_end) and H.is_num(obj_end.lastIndex) then
-                server_last_index = obj_end.lastIndex
-            end
-            send_finish(true, { list = all_results }, nil, server_last_index)
-            if client then client:cancel() end
-        elseif evt_name == "error" then
-            local ok, obj = pcall(JSON.decode, data_str)
-            local error_msg = ok and H.is_tbl(obj) and H.is_str(obj.errorMsg) and obj.errorMsg or data_str
-            send_finish(false, nil, error_msg or "换源搜索失败")
-            if client then client:cancel() end
+        end
+        if rerr == "closed" then break end
+        if rerr ~= "timeout" and rerr ~= "wantread" and rerr ~= "wantwrite" and not raw and not partial then
+            break
         end
     end
+    sock:close()
+    probe_done()
+    return true
+end
 
-    local function open_stream()
-        client = SSE.open{
-            url = build_request(),
-            timeout = 120,
-            on_event = on_sse_event,
-            on_close = function(err)
-                if not finish_sent then
-                    send_finish(false, nil, err or "连接中断")
-                end
-            end,
-        }
+function M:getAvailableBookSource(options, on_finish, on_chunk)
+    if not (H.is_tbl(options) and H.is_str(options.book_url) and options.book_url ~= "") then
+        if H.is_func(on_finish) then on_finish(false, nil, '获取可用书源参数错误') end
+        return function() end
     end
 
-    open_stream()
+    local book_url = options.book_url
+    local last_index = (H.is_num(options.last_index) and options.last_index >= 0) and options.last_index or -1
+
+    local server_address = self.settings.server_address
+    local initial_token = self:ensureTokenManager():get()
+
+    local TaskQueue = require("Legado.task.v2")
+
+    local task = TaskQueue.spawn(function(ctx)
+        local token = initial_token
+        if (not token or token == "") and self._need_login then
+            local ok_lg, new_tok = self:reader3Login()
+            if ok_lg and H.is_str(new_tok) then
+                token = new_tok
+            end
+        end
+
+        local function build_req_url(cur_tok)
+            local parts = {
+                "url=" .. util.urlEncode(book_url),
+                "lastIndex=" .. tostring(last_index),
+                "searchSize=30",
+                "bookSourceGroup=",
+                "refresh=0",
+                "concurrentCount=32",
+                "v=" .. tostring(os.time()),
+            }
+            if H.is_str(cur_tok) and cur_tok ~= "" then
+                table.insert(parts, "accessToken=" .. cur_tok)
+            end
+            local parsed = socket_url.parse(server_address)
+            parsed.path = (parsed.path or ""):gsub("/+$", "") .. "/searchBookSourceSSE"
+            parsed.query = table.concat(parts, "&")
+            return socket_url.build(parsed)
+        end
+
+        local all_results = {}
+        local seen_origin = {}
+        local server_last_index = nil
+        local server_is_end = false
+        local sse_err = nil
+
+        local function do_fetch(cur_tok)
+            local req_url = build_req_url(cur_tok)
+            local JSON = require("json")
+
+            return fetch_sse_stream_sync(req_url, 120, ctx, function(evt_name, data_str)
+                if evt_name == "message" then
+                    local ok_j, obj = pcall(JSON.decode, data_str)
+                    if ok_j and H.is_tbl(obj) then
+                        local chunk = {}
+                        if H.is_tbl(obj.data) then
+                            for _, book in ipairs(obj.data) do
+                                if H.is_tbl(book) and H.is_str(book.origin) and not seen_origin[book.origin] then
+                                    seen_origin[book.origin] = true
+                                    table.insert(all_results, book)
+                                    table.insert(chunk, book)
+                                end
+                            end
+                        end
+                        if tonumber(obj.lastIndex) then
+                            server_last_index = tonumber(obj.lastIndex)
+                        end
+                        if #chunk > 0 then
+                            ctx.emit("chunk", chunk)
+                        end
+                    end
+                elseif evt_name == "end" then
+                    local ok_e, obj_e = pcall(JSON.decode, data_str)
+                    if ok_e and H.is_tbl(obj_e) then
+                        if tonumber(obj_e.lastIndex) then
+                            server_last_index = tonumber(obj_e.lastIndex)
+                        end
+                        if obj_e.isEnd == true then
+                            server_is_end = true
+                        end
+                    end
+                    return true
+                elseif evt_name == "error" then
+                    local ok_e, obj_e = pcall(JSON.decode, data_str)
+                    local msg = ok_e and H.is_tbl(obj_e) and obj_e.errorMsg or data_str
+                    if H.is_str(msg) and (msg:find("NEED_LOGIN", 1, true) or msg:find("登录", 1, true)) then
+                        return "RETRY_LOGIN"
+                    end
+                    -- 返回消息让 fetch 以失败结束并透传到 UI（如"没有更多了"为正常结束信号）
+                    return msg or "换源搜索失败"
+                end
+                return false
+            end)
+        end
+
+        local ok_f, err_f = do_fetch(token)
+        if (not ok_f and err_f and (err_f:find("401") or err_f == "RETRY_LOGIN")) or (err_f == "RETRY_LOGIN") then
+            if self._need_login then
+                local ok_lg2, new_tok2 = self:reader3Login()
+                if ok_lg2 and H.is_str(new_tok2) then
+                    ok_f, err_f = do_fetch(new_tok2)
+                end
+            end
+        end
+
+        if not ok_f and err_f ~= "RETRY_LOGIN" and err_f ~= "已取消" then
+            error({ message = err_f or sse_err or "换源搜索失败" })
+        end
+
+        return {
+            list = all_results,
+            lastIndex = server_is_end and nil or server_last_index,
+            isEnd = server_is_end,
+        }
+    end, { timeout = 125 })
+
+    if H.is_func(on_chunk) then
+        task:on("chunk", on_chunk)
+    end
+
+    if H.is_func(on_finish) then
+        task:on("done", function(ok, res)
+            if ok then
+                local res_list = (type(res) == "table" and res.list) or {}
+                local last_idx = (type(res) == "table" and res.lastIndex) or nil
+                on_finish(true, { list = res_list }, nil, last_idx)
+            else
+                local Error = require("Legado.Helper.Error")
+                on_finish(false, nil, Error.extract_message(res))
+            end
+        end)
+    end
 
     return function()
-        if client then client:cancel() end
-        if not finish_sent then
-            send_finish(false, nil, "已取消")
+        if not task:is_done() then
+            task:cancel("已取消")
         end
     end
 end
@@ -531,163 +753,179 @@ function M:searchBookSingle(options, callback)
 end
 
 function M:searchBookMulti(options, on_chunk, on_finish)
-    if not (H.is_tbl(options) and H.is_str(options.search_text) and options.search_text ~= '') then
+    local raw_text = (H.is_tbl(options) and (options.search_text or options.key)) or ""
+    if not (H.is_str(raw_text) and raw_text ~= '') then
         if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
-        return nil
+        return function() end
     end
 
     local is_exact_search = false
-    local search_text = util.trim(options.search_text)
+    local search_text = util.trim(raw_text)
     if string.sub(search_text, 1, 1) == "=" then
         is_exact_search = true
         search_text = util.trim(string.sub(search_text, 2))
     end
     if search_text == '' then
         if H.is_func(on_finish) then on_finish(false, "输入参数错误") end
-        return nil
+        return function() end
     end
 
-    local last_index = H.is_num(options.last_index) and options.last_index or -1
-    -- 续搜：lastIndex >= 0（首搜 -1）
+    local last_index = (H.is_num(options.last_index) and options.last_index >= 0) and options.last_index or -1
     local is_more_call = last_index >= 0
 
-    -- 会话级去重（服务端去重仅单请求内）：新搜索重置，续搜沿用
+    -- 会话级去重：首搜重置，续搜沿用
     if not is_more_call then
         self._search_dedup = {}
     end
     local dedup = self._search_dedup or {}
     self._search_dedup = dedup
 
-    local SSEClient = require("Legado/Helper/SSEClient")
-    local JSON = require("json")
+    local filter_opts = {
+        name = options.name,
+        author = options.author,
+    }
 
     local server_address = self.settings.server_address
+    local initial_token = self:ensureTokenManager():get()
 
-    local finish_sent = false
-    local function send_finish(success, msg, res_last_index)
-        if finish_sent then return end
-        finish_sent = true
-        if H.is_func(on_finish) then
-            pcall(on_finish, success, msg, res_last_index)
-        end
-    end
-
-    -- 登录：无凭证（secure=false 免认证）时 token 为 nil，不附加 accessToken
-    local login_ok, login_token = self:ensureLogin()
-    if login_ok ~= true then
-        if H.is_func(on_finish) then on_finish(false, tostring(login_token or "登录失败")) end
-        return nil
-    end
-    local token = login_token or nil
-
-    local function build_request()
-        local q = {
-            key = search_text,
-            bookSourceGroup = '',
-            lastIndex = last_index,
-            searchSize = 50,
-            concurrentCount = 32,
-            v = os.time(),
-        }
-        local parts = {}
-        for k, v in pairs(q) do
-            parts[#parts + 1] = k .. "=" .. util.urlEncode(tostring(v))
-        end
-        if H.is_str(token) and token ~= "" then
-            parts[#parts + 1] = "accessToken=" .. token
-        end
-        local parsed = socket_url.parse(server_address)  
-        parsed.path = (parsed.path or ""):gsub("/+$", "") .. "/searchBookMultiSSE"  
-        parsed.query = table.concat(parts, "&")  
-        return socket_url.build(parsed)
-    end
-
-    local client = nil
-    local relogin_attempted = false
-    local server_last_index = nil
-
-    local function handle_error_event(error_msg)
-        if error_msg == "请登录后使用" and not relogin_attempted then
-            relogin_attempted = true
-            if client then client:cancel() end
-            -- 清 token 重新登录
-            if self.tokenManager then self.tokenManager:clear() end
-            local ok_login2, msg2 = self:ensureLogin()
-            if ok_login2 == true and H.is_str(msg2) and msg2 ~= "" then
-                token = msg2
-                open_stream()
-                return
+    local TaskQueue = require("Legado.task.v2")
+    local task = TaskQueue.spawn(function(ctx)
+        local token = initial_token
+        if (not token or token == "") and self._need_login then
+            local ok_lg, new_tok = self:reader3Login()
+            if ok_lg and H.is_str(new_tok) then
+                token = new_tok
             end
-            send_finish(false, tostring(msg2 or error_msg))
-        else
-            send_finish(false, error_msg)
         end
-    end
 
-    local function on_sse_event(evt_name, data_str)
-        if evt_name == "message" then
-            local ok, obj = pcall(JSON.decode, data_str)
-            if ok and H.is_tbl(obj) then
-                local chunk = {}
-                if H.is_tbl(obj.data) then
-                    for _, book in ipairs(obj.data) do
-                        if H.is_tbl(book)
-                                and bookutil.filter_search(book, search_text, is_exact_search, options)
-                                and H.is_str(book.name) and book.name ~= ""
-                                and H.is_str(book.bookUrl) and book.bookUrl ~= ""
-                                and not dedup[book.bookUrl] then
-                            dedup[book.bookUrl] = true
-                            table.insert(chunk, book)
+        local function build_req_url(cur_tok)
+            local parts = {
+                "key=" .. util.urlEncode(search_text),
+                "bookSourceGroup=",
+                "lastIndex=" .. tostring(last_index),
+                "searchSize=50",
+                "concurrentCount=32",
+                "v=" .. tostring(os.time()),
+            }
+            if H.is_str(cur_tok) and cur_tok ~= "" then
+                table.insert(parts, "accessToken=" .. cur_tok)
+            end
+            local parsed = socket_url.parse(server_address)
+            parsed.path = (parsed.path or ""):gsub("/+$", "") .. "/searchBookMultiSSE"
+            parsed.query = table.concat(parts, "&")
+            return socket_url.build(parsed)
+        end
+
+        local server_last_index = nil
+        local server_is_end = false
+        local sse_err = nil
+
+        local function do_fetch(cur_tok)
+            local req_url = build_req_url(cur_tok)
+            local JSON = require("json")
+            local bookutil = require("Legado.spore.bookutil")
+
+            return fetch_sse_stream_sync(req_url, 120, ctx, function(evt_name, data_str)
+                if evt_name == "message" then
+                    local ok_j, obj = pcall(JSON.decode, data_str)
+                    if ok_j and H.is_tbl(obj) then
+                        local chunk = {}
+                        if H.is_tbl(obj.data) then
+                            for _, book in ipairs(obj.data) do
+                                if H.is_tbl(book)
+                                        and bookutil.filter_search(book, search_text, is_exact_search, filter_opts)
+                                        and H.is_str(book.name) and book.name ~= ""
+                                        and H.is_str(book.bookUrl) and book.bookUrl ~= "" then
+                                    table.insert(chunk, book)
+                                end
+                            end
+                        end
+                        if tonumber(obj.lastIndex) then
+                            server_last_index = tonumber(obj.lastIndex)
+                        end
+                        if #chunk > 0 then
+                            ctx.emit("chunk", chunk)
                         end
                     end
+                elseif evt_name == "end" then
+                    local ok_e, obj_e = pcall(JSON.decode, data_str)
+                    if ok_e and H.is_tbl(obj_e) then
+                        if tonumber(obj_e.lastIndex) then
+                            server_last_index = tonumber(obj_e.lastIndex)
+                        end
+                        if obj_e.isEnd == true then
+                            server_is_end = true
+                        end
+                    end
+                    return true
+                elseif evt_name == "error" then
+                    local ok_e, obj_e = pcall(JSON.decode, data_str)
+                    local msg = ok_e and H.is_tbl(obj_e) and obj_e.errorMsg or data_str
+                    if H.is_str(msg) and (msg:find("NEED_LOGIN", 1, true) or msg:find("登录", 1, true)) then
+                        return "RETRY_LOGIN"
+                    end
+                    -- 返回消息让 fetch 以失败结束并透传到 UI（如"没有更多了"为正常结束信号）
+                    return msg or "搜索失败"
                 end
-                if H.is_num(obj.lastIndex) then
-                    server_last_index = obj.lastIndex
-                end
-                if #chunk > 0 and H.is_func(on_chunk) then
-                    pcall(on_chunk, chunk)
-                end
-            end
-        elseif evt_name == "error" then
-            local ok, obj = pcall(JSON.decode, data_str)
-            local error_msg = ok and H.is_tbl(obj) and H.is_str(obj.errorMsg) and obj.errorMsg or data_str
-            handle_error_event(error_msg)
-        elseif evt_name == "end" then
-            local ok, obj = pcall(JSON.decode, data_str)
-            if ok and H.is_tbl(obj) and H.is_num(obj.lastIndex) then
-                server_last_index = obj.lastIndex
-            end
-            send_finish(true, nil, server_last_index)
-            if client then client:cancel() end
+                return false
+            end)
         end
-    end
 
-    local function open_stream()
-        client = SSEClient.open{
-            url = build_request(),
-            timeout = 120,
-            on_event = on_sse_event,
-            on_close = function(err)
-                -- err=nil：服务器关闭/终止块（正常流结束）；否则为失败原因
-                if not finish_sent then
-                    send_finish(false, err or "连接中断")
+        local ok_f, err_f = do_fetch(token)
+        if (not ok_f and err_f and (err_f:find("401") or err_f == "RETRY_LOGIN")) or (err_f == "RETRY_LOGIN") then
+            if self._need_login then
+                local ok_lg2, new_tok2 = self:reader3Login()
+                if ok_lg2 and H.is_str(new_tok2) then
+                    ok_f, err_f = do_fetch(new_tok2)
                 end
-            end,
+            end
+        end
+
+        if not ok_f and err_f ~= "RETRY_LOGIN" and err_f ~= "已取消" then
+            error({ message = err_f or sse_err or "网络请求失败" })
+        end
+
+        return {
+            lastIndex = server_is_end and nil or server_last_index,
+            isEnd = server_is_end,
         }
+    end, { timeout = 125 })
+
+    if H.is_func(on_chunk) then
+        task:on("chunk", function(chunk)
+            local filtered_chunk = {}
+            for _, b in ipairs(chunk) do
+                if not dedup[b.bookUrl] then
+                    dedup[b.bookUrl] = true
+                    table.insert(filtered_chunk, b)
+                end
+            end
+            if #filtered_chunk > 0 then
+                on_chunk(filtered_chunk)
+            end
+        end)
     end
 
-    open_stream()
+    if H.is_func(on_finish) then
+        task:on("done", function(ok, res)
+            if ok then
+                local last_idx = (type(res) == "table" and res.lastIndex) or nil
+                on_finish(true, nil, last_idx)
+            else
+                local Error = require("Legado.Helper.Error")
+                on_finish(false, Error.extract_message(res))
+            end
+        end)
+    end
 
     return function()
-        if client then client:cancel() end
-        -- 尚未结束时同步补发结束回调
-        if not finish_sent then
-            send_finish(false, "已取消")
+        if not task:is_done() then
+            task:cancel("已取消")
         end
     end
 end
 
--- 单元测试钩子（仅测试用）
-M._parsers = require("Legado/Helper/SSEClient")._parsers
+-- 仅测试用
+M._parsers = require("Legado.Helper.SSEClientCopas")._parsers
 
 return M

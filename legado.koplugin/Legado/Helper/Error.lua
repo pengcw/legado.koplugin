@@ -2,12 +2,37 @@ local logger = require("logger")
 
 local M = {}
 
+--- 提取错误信息（支持字符串、LuaSocket/Copas table 错误形如 {[1]="...", message="..."}，并自动剥离 traceback 与行号）
+M.extract_message = function(err)
+    if err == nil then return "unknown error" end
+    local raw_str = nil
+    if type(err) == "string" then
+        raw_str = err
+    elseif type(err) == "table" then
+        local val = err[1] or err.reason or err.message or err.error or err.errorMsg or err.err or err.msg or "unknown table error"
+        if type(val) == "table" then
+            return M.extract_message(val)
+        end
+        raw_str = tostring(val)
+    else
+        raw_str = tostring(err)
+    end
+
+    local clean = raw_str:match("^(.-)%s*[%->\n\r]+%s*stack traceback:") or raw_str:match("^(.-)\r?\n") or raw_str
+    while clean:match("^.-:%d+:%s*(.+)$") do
+        clean = clean:match("^.-:%d+:%s*(.+)$")
+    end
+    clean = clean:match("^%s*(.-)%s*$")
+    return (clean and clean ~= "") and clean or raw_str
+end
+
 M.pcall = function(f, ...)
     if type(f) ~= "function" then
         return false, "safe_pcall: first argument must be a function"
     end
     local function err_handler(err)
-        local err_msg = tostring(err or "unknown error")
+        local raw_msg = M.extract_message(err)
+        local err_msg = tostring(raw_msg or "unknown error")
         if logger and type(logger.err) == "function" and
             G_reader_settings and G_reader_settings:isTrue("debug") then
             local trace = debug.traceback(err_msg, 2)
@@ -21,10 +46,8 @@ M.pcall = function(f, ...)
 end
 
 M.map_message = function(err_msg)
-    if type(err_msg) ~= "string" then
-        return "网络请求失败"
-    end
-    local lower_err = err_msg:lower()
+    err_msg = M.extract_message(err_msg)
+    local lower_err = tostring(err_msg):lower()
     local err_map = {
         ["wantread"] = "连接超时，请稍后重试",
         ["connection refused"] = "连接被拒绝，请检查服务地址",
@@ -37,7 +60,7 @@ M.map_message = function(err_msg)
         ["closed"] = "连接已关闭",
         ["eof"] = "连接意外终止",
     }
-    return err_map[lower_err] or ("网络请求失败，请检查：" .. err_msg)
+    return err_map[lower_err] or ("网络请求失败，请检查：" .. tostring(err_msg))
 end
 
 return M
