@@ -328,7 +328,10 @@ function LibraryView:loadAndRenderChapter(chapter)
                         local started, start_err = cbz_writer:from_urls_async({
                             output = pending.filePath,
                             images = pending.img_sources,
-                            opts = { comic_info = { name = pending.chapter.title or "" } },
+                            opts = {
+                                max_workers = tonumber(Backend.settings_data.data.download_threads) or 4,
+                                comic_info = { name = pending.chapter.title or "" }
+                            },
                             on_progress = function(completed)
                                 if progress_bar and progress_bar.reportProgress then
                                     progress_bar:reportProgress(completed)
@@ -362,6 +365,8 @@ function LibraryView:loadAndRenderChapter(chapter)
                     MessageBox:notice("请检查并刷新书架")
                     MessageBox:error(err_msg or '错误')
                 end)
+            else
+                MessageBox:error(tostring(response or '下载正文失败'))
             end
         end)
     end

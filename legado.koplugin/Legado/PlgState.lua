@@ -16,7 +16,21 @@ local M = {
     plg_path = nil,
     is_low_version = nil,
     last_search_input = nil,
+
+    _preload_task = nil,
+    _preload_timer_cancel = nil,
 }
+
+function M:cancelPreload(reason)
+    if M._preload_timer_cancel then
+        pcall(M._preload_timer_cancel)
+        M._preload_timer_cancel = nil
+    end
+    if M._preload_task and M._preload_task.cancel then
+        pcall(M._preload_task.cancel, M._preload_task, reason or "cancelled")
+        M._preload_task = nil
+    end
+end
 
 local is_str = function(s)
     return "string" == type(s)
