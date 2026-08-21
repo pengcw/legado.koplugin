@@ -262,8 +262,8 @@ function M.get_url_extension(url)
     path = socket_url.unescape(path):gsub("/+$", "")
 
     local filename = path:match("([^/]+)$") or ""
-    local ext = filename:match("%.([%w]+)$")
-    return ext and ext:lower() or "", filename
+    local ext = IMG.get_image_ext(filename)
+    return ext or "", filename
 end
 
 -- success: data, ext | fail: nil, err

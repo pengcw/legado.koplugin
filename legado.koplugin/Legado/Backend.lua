@@ -408,7 +408,10 @@ function M:getProxyEpubUrl(bookUrl, htmlUrl)
     return self.apiClient:getProxyEpubUrl(bookUrl, htmlUrl)
 end
 function M:getProxyImageUrl(bookUrl, img_src)
-    return self.apiClient:getProxyImageUrl(bookUrl, img_src)
+    if self.apiClient and self.apiClient.getProxyImageUrl then
+        return self.apiClient:getProxyImageUrl(bookUrl, img_src)
+    end
+    return img_src
 end
 function M:getBookSourcesList(callback)
     return wrap_response(self.apiClient:getBookSourcesList(callback))
@@ -663,6 +666,35 @@ function M:getChapterImgList(chapter)
     local origin = chapter.origin
     local down_chapters_index = chapters_index
 
+    local ZipUtil = require("Legado.Helper.ZipUtil")
+    if ZipUtil.isArchiverAvailable() then
+        local cache_chapter = self:getCacheChapterFilePath(chapter, true)
+        local cbz_path = cache_chapter and cache_chapter.cacheFilePath
+        if cbz_path and cbz_path:match("%.cbz$") and util.fileExists(cbz_path) then
+            local reader = ZipUtil.Reader:new()
+            if reader and reader.open and reader:open(cbz_path) then
+                local image_meta = require("Legado.Helper.image_meta")
+                local img_entries = {}
+                reader:iterate(function(entry)
+                    if entry.mode ~= "directory" and image_meta.get_image_ext(entry.path) then
+                        table.insert(img_entries, entry.path)
+                    end
+                end)
+                if #img_entries > 0 then
+                    table.sort(img_entries)
+                    local img_sources = {}
+                    for _, entry_name in ipairs(img_entries) do
+                        table.insert(img_sources, string.format("cbz://%s#%s", cbz_path, entry_name))
+                    end
+                    if self.dbManager and type(self.dbManager.updateIsRead) == "function" and chapter.isRead ~= true then
+                        self.dbManager:updateIsRead(chapter, true, true)
+                    end
+                    return img_sources
+                end
+            end
+        end
+    end
+
     return self:HandleResponse(self:pGetChapterContent({
         bookUrl = bookUrl,
         chapters_index = down_chapters_index,
@@ -672,7 +704,7 @@ function M:getChapterImgList(chapter)
         if H.is_str(data) then
             local img_sources = self:getPorxyPicUrls(bookUrl, data)
             if H.is_tbl(img_sources) and #img_sources > 0 then
-                if chapter.isRead ~= true then
+                if self.dbManager and type(self.dbManager.updateIsRead) == "function" and chapter.isRead ~= true then
                     self.dbManager:updateIsRead(chapter, true, true)
                 end
                 return img_sources

@@ -5,11 +5,30 @@
 local M = {}
 
 -- "img"：RenderImage 兜底路径的通用扩展名（sniff 不识别的冷门格式，如 JPEG2000）
-M.IMAGE_EXTENSIONS = { "jpg", "jpeg", "png", "webp", "bmp", "tiff", "gif", "img" }
+M.IMAGE_EXTENSIONS = { "jpg", "jpeg", "png", "webp", "bmp", "tiff", "gif", "svg", "img" }
+
+M.IMAGE_EXTENSIONS_MAP = {
+    jpg = true, jpeg = true, png = true,
+    webp = true, bmp = true, tiff = true,
+    gif = true, svg = true, img = true,
+}
 
 M.FORMAT_EXTENSION = {
     jpg = "jpg", png = "png", webp = "webp",
     bmp = "bmp", tiff = "tiff", gif = "gif",
+    svg = "svg",
+}
+
+M.MIME_TYPES = {
+    jpg = "image/jpeg",
+    jpeg = "image/jpeg",
+    png = "image/png",
+    webp = "image/webp",
+    gif = "image/gif",
+    bmp = "image/bmp",
+    tiff = "image/tiff",
+    svg = "image/svg+xml",
+    img = "application/octet-stream",
 }
 
 -- 尺寸安全：单边 ≤50000、总像素 ≤5 千万（50000×50000=2.5G 像素不应被接受）
@@ -280,13 +299,23 @@ function M.is_valid_image(data)
 end
 
 function M.is_image_extension(ext)
-    if type(ext) ~= "string" then return false end
-    if ext:sub(1, 1) == "." then return false end -- 不接受带点扩展名
-    ext = ext:lower()
-    for _, e in ipairs(M.IMAGE_EXTENSIONS) do
-        if e == ext then return true end
+    if type(ext) ~= "string" or ext:sub(1, 1) == "." then return false end
+    return M.IMAGE_EXTENSIONS_MAP[ext:lower()] == true
+end
+
+function M.get_image_ext(filename_or_path)
+    if type(filename_or_path) ~= "string" then return nil end
+    local ext = filename_or_path:match("%.([^.]+)$")
+    if ext and M.is_image_extension(ext) then
+        return ext:lower()
     end
-    return false
+    return nil
+end
+
+function M.get_mime_type(ext)
+    if type(ext) ~= "string" then return "image/jpeg" end
+    ext = ext:gsub("^%.", ""):lower()
+    return M.MIME_TYPES[ext] or "image/jpeg"
 end
 
 function M.get_extension(format)

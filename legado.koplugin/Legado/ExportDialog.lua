@@ -56,18 +56,7 @@ function CbzExporter:package()
     end
 
     local function get_image_ext(filename)
-        local extension = filename:match("%.(%w+)$")
-        if extension then
-            local valid_extensions = {
-                jpg = true, jpeg = true, png = true, 
-                gif = true, webp = true, bmp = true, tiff = true,
-                img = true,
-            }
-            if valid_extensions[extension:lower()] then
-                return extension
-            end
-        end
-        return nil
+        return image_meta.get_image_ext(filename)
     end
 
     local cbz

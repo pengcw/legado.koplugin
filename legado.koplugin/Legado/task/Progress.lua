@@ -304,4 +304,111 @@ end
 -- Returns { close(), unschedule(), reportProgress(progress) }.
 M.showSpinner = show_progress_info
 
+-- E-ink 圆角交互卡片组件 (供视图内嵌或独立浮层复用)
+function M.createCardWidget(options)
+    options = options or {}
+    local TextWidget = require("ui/widget/textwidget")
+    local VerticalGroup = require("ui/widget/verticalgroup")
+    local FrameContainer = require("ui/widget/container/framecontainer")
+    local Font = require("ui/font")
+    local Size = require("ui/size")
+    local Blitbuffer = require("ffi/blitbuffer")
+
+    local items = {}
+    if options.title and options.title ~= "" then
+        table.insert(items, TextWidget:new{
+            text = tostring(options.title),
+            face = Font:getFace("tfont", options.title_size or 22),
+            bold = (options.title_bold ~= false),
+            padding = Size.padding.default,
+        })
+    end
+
+    if options.subtitle and options.subtitle ~= "" then
+        table.insert(items, TextWidget:new{
+            text = tostring(options.subtitle),
+            face = Font:getFace("cfont", options.subtitle_size or 18),
+            padding = Size.padding.small,
+        })
+    end
+
+    if options.detail and options.detail ~= "" then
+        table.insert(items, TextWidget:new{
+            text = tostring(options.detail),
+            face = Font:getFace("smallffont", options.detail_size or 14),
+            padding = Size.padding.small,
+        })
+    end
+
+    if options.action_text and options.action_text ~= "" then
+        table.insert(items, TextWidget:new{
+            text = tostring(options.action_text),
+            face = Font:getFace("cfont", options.action_size or 16),
+            bold = true,
+            padding = Size.padding.large,
+        })
+    end
+
+    local vgroup = VerticalGroup:new{
+        align = options.align or "center",
+    }
+    for _, it in ipairs(items) do
+        table.insert(vgroup, it)
+    end
+
+    local card = FrameContainer:new{
+        radius = options.radius or 12,
+        padding = options.padding or Size.padding.large,
+        margin = options.margin or 0,
+        bordersize = options.bordersize or 2,
+        background = options.background or Blitbuffer.COLOR_WHITE,
+        vgroup,
+    }
+    return card
+end
+
+function M.showCard(options)
+    options = options or {}
+    local InputContainer = require("ui/widget/container/inputcontainer")
+    local CenterContainer = require("ui/widget/container/centercontainer")
+    local Geom = require("ui/geometry")
+    local card_wg = M.createCardWidget(options)
+
+    local screen_w = Screen:getWidth()
+    local screen_h = Screen:getHeight()
+
+    local dialog = InputContainer:new{
+        dimen = Geom:new{
+            w = screen_w,
+            h = screen_h,
+        },
+        CenterContainer:new{
+            dimen = Geom:new{
+                w = screen_w,
+                h = screen_h,
+            },
+            card_wg,
+        },
+    }
+
+    dialog.onTap = function(self_d, _, ges)
+        if options.dismissable ~= false then
+            UIManager:close(self_d)
+            if H.is_func(options.on_dismiss) then options.on_dismiss() end
+            return true
+        end
+        if H.is_func(options.on_tap) then
+            return options.on_tap(self_d, ges)
+        end
+        return true
+    end
+
+    dialog.close = function(self_d)
+        UIManager:close(self_d)
+    end
+
+    UIManager:show(dialog)
+    return dialog
+end
+
 return M

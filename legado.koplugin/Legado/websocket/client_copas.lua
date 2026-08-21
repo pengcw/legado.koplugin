@@ -1,7 +1,7 @@
 -- vendored lipp/lua-websockets client_copas;
 -- verify 默认 none（KOReader luasec 无 CA，实测证书校验失败）；ws.verify 可覆盖
 local socket = require'socket'
-local sync = require'Legado/websocket.sync'
+local sync = require'Legado.websocket.sync'
 local logger = require"logger"
 
 local dns_cache = {}
