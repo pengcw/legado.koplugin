@@ -414,6 +414,11 @@ end
 
 ZipUtil.Reader = Reader
 
+function ZipUtil.isArchiverAvailable()
+    local ok, Archiver = pcall(require, "ffi.archiver")
+    return ok and type(Archiver) == "table" and type(Archiver.Reader) == "table"
+end
+
 -- ==========================================
 -- ComicInfo.xml for CBZ (appended at the end of the zip)
 -- bookinfo optional: { name, author, kind, intro }; missing fields left empty

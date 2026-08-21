@@ -210,34 +210,9 @@ function EpubExporter:init(options)
 
     -- 获取封面文件扩展名和 MIME 类型
     if self.cover_path then
-        local ext = self.cover_path:match("%.([^.]+)$")
-        if ext then
-            ext = ext:lower()
-            self.cover_ext = ext
-            -- 设置 MIME 类型
-            if ext == "jpg" or ext == "jpeg" then
-                self.cover_mime = "image/jpeg"
-            elseif ext == "png" then
-                self.cover_mime = "image/png"
-            elseif ext == "gif" then
-                self.cover_mime = "image/gif"
-            elseif ext == "webp" then
-                self.cover_mime = "image/webp"
-            elseif ext == "bmp" then
-                self.cover_mime = "image/bmp"
-            elseif ext == "tiff" then
-                self.cover_mime = "image/tiff"
-            elseif ext == "img" then
-                -- 兜底格式（如 JPEG2000）：无唯一 MIME，用通用类型，KOreader 按内容嗅探
-                self.cover_mime = "application/octet-stream"
-            else
-                self.cover_mime = "image/jpeg"
-                self.cover_ext = "jpg"
-            end
-        else
-            self.cover_ext = "jpg"
-            self.cover_mime = "image/jpeg"
-        end
+        local ext = image_meta.get_image_ext(self.cover_path) or "jpg"
+        self.cover_ext = ext
+        self.cover_mime = image_meta.get_mime_type(ext)
     end
 
     return self
@@ -546,8 +521,7 @@ function EpubExporter:packageEpub()
                 -- 移除首字下沉的 span 标签和内联样式
                 chapter_content = chapter_content:gsub('<p%s+style="text%-indent:%s*0em;"><span%s+class="duokan%-dropcaps%-two">(.)</span>', '<p>%1')
             end
-        elseif cache_ext == "png" or cache_ext == "jpg" or cache_ext == "jpeg" or 
-                    cache_ext == "webp" or cache_ext == "bmp" or cache_ext == "tiff" or cache_ext == "img" then
+        elseif image_meta.is_image_extension(cache_ext) then
             -- 章节可能是单图片
             local img_data = util.readFromFile(cache_file_path, "rb")
             if img_data then
