@@ -342,6 +342,7 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
         error("CreateCBZ write mimetype err: " .. tostring(mimetype_err))
     end
 
+    local downloaded_entries = {}
     local succeeded = 0
     local strict = (opts.allow_failed == false)
     local function abort(msg)
@@ -352,7 +353,7 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
     end
 
     -- On failure: return false and continue by default; strict mode errors out.
-    local function process_one(i, img_src)
+    local function download_one(i, img_src)
         if type(check_running_callback) == "function" and check_running_callback() then
             abort("Other threads downloading, cancelled")
         end
@@ -390,14 +391,12 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
             logger.warn("CreateCBZ: invalid entry name skipped:", img_name)
             return false
         end
-        local add_ok, add_err = writer:add(img_name, imgdata, true)
-        if not add_ok then
-            if strict then abort(string.format("CreateCBZ zip add err: %s (%s)", img_name, tostring(add_err))) end
-            logger.warn("CreateCBZ: zip add failed, skipped:", img_name, add_err)
-            return false
-        end
-        succeeded = succeeded + 1
-        Probe.done("Chapter", "图片落盘", img_name, t_img_start, "200 OK", Probe.format_bytes(#imgdata), string.format("进度 %d/%d", succeeded, total_items))
+
+        downloaded_entries[i] = {
+            name = img_name,
+            data = imgdata,
+            t_start = t_img_start,
+        }
         return true
     end
 
@@ -415,7 +414,7 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
                     next_idx = next_idx + 1
                     if cur_i > total_items then break end
 
-                    local ok, res = pcall(process_one, cur_i, img_sources[cur_i])
+                    local ok, res = pcall(download_one, cur_i, img_sources[cur_i])
                     if not ok then
                         has_aborted = true
                         abort_err = res
@@ -435,7 +434,21 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
         end
     else
         for i, img_src in ipairs(img_sources) do
-            process_one(i, img_src)
+            download_one(i, img_src)
+        end
+    end
+
+    for i = 1, total_items do
+        local entry = downloaded_entries[i]
+        if entry and entry.data then
+            local add_ok, add_err = writer:add(entry.name, entry.data, true)
+            if not add_ok then
+                if strict then abort(string.format("CreateCBZ zip add err: %s (%s)", entry.name, tostring(add_err))) end
+                logger.warn("CreateCBZ: zip add failed, skipped:", entry.name, add_err)
+            else
+                succeeded = succeeded + 1
+                Probe.done("Chapter", "图片落盘", entry.name, entry.t_start, "200 OK", Probe.format_bytes(#entry.data), string.format("进度 %d/%d", succeeded, total_items))
+            end
         end
     end
 

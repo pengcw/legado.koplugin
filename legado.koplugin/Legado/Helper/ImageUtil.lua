@@ -5,7 +5,7 @@ local H = require("Legado/Helper")
 local FS = require("Legado.Helper.FS")
 local Env = require("Legado.Helper.Env")
 local httpReq = require("Legado.Helper.Http")
-local IMG = require("Legado.Helper.image_meta")
+local image_meta = require("Legado.Helper.image_meta")
 
 local LEGADO_ERR_PREFIX = '{"isSuccess":false'
 local function detect_server_error(data)
@@ -138,7 +138,7 @@ function M.findCustomCoverFileInDir(cover_path_no_ext)
         return nil
     end
     if not util.pathExists(dir) then return nil end
-    local extensions = IMG.IMAGE_EXTENSIONS
+    local extensions = image_meta.IMAGE_EXTENSIONS
     for _, ext in ipairs(extensions) do
         local cover_full_path = string.format("%s.%s", cover_path_no_ext, ext)
         if util.fileExists(cover_full_path) then
@@ -210,7 +210,7 @@ function M.download_cover(book_cache_id, img_src, is_force, opts)
         return nil, nil
     end
 
-    local extensions = IMG.IMAGE_EXTENSIONS
+    local extensions = image_meta.IMAGE_EXTENSIONS
     for _, old_ext in ipairs(extensions) do
         local old_path = string.format("%s.%s", cover_path_no_ext, old_ext)
         if util.fileExists(old_path) then util.removeFile(old_path) end
@@ -262,7 +262,7 @@ function M.get_url_extension(url)
     path = socket_url.unescape(path):gsub("/+$", "")
 
     local filename = path:match("([^/]+)$") or ""
-    local ext = IMG.get_image_ext(filename)
+    local ext = image_meta.get_image_ext(filename)
     return ext or "", filename
 end
 
@@ -297,8 +297,8 @@ function M.download_image(url, opts)
     -- 合法性校验
     -- （如 JPEG2000 等 mupdf 支持的冷门格式）交给 RenderImage 全解码兜底，
     -- 能解码即视为合法图片——renderimage 避免误杀 sniff 覆盖外的合法图。
-    local ext = IMG.sniff_format(data)
-    if not IMG.is_valid_image(data) then
+    local ext = image_meta.sniff_format(data)
+    if not image_meta.is_valid_image(data) then
         local srv_err = detect_server_error(data)
         if srv_err then
             logger.warn("download_image: 服务器错误响应 ->", srv_err, "url=", tostring(url))

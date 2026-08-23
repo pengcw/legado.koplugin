@@ -5,20 +5,14 @@ local MessageQueue = require("ui/message/messagequeue")
 
 require("ffi/zeromq_h")
 
-local zmq
-pcall(function()
-    zmq = ffi.loadlib("zmq", "5")
-end)
+local zmq, czmq
+pcall(function() zmq = ffi.loadlib("zmq", "5") end)
+pcall(function() czmq = ffi.loadlib("czmq", "4") end)
 
-local czmq
-pcall(function()
-    czmq = ffi.loadlib("czmq", "4")
-end)
-
+-- 安卓被裁减, 无导出函数
 pcall(ffi.cdef, [[
 int zmq_setsockopt(void *, int, const void *, size_t);
 zmsg_t *zmsg_recv(void *);
-bool zpoller_expired(zpoller_t *);
 bool zpoller_terminated(zpoller_t *);
 ]])
 
@@ -41,14 +35,19 @@ local M = MessageQueue:extend{
     receiveCallback = nil,
     started = false,
     stopped = false,
-    clients = nil
+    clients = nil,
+    last_purge_time = 0,
 }
+
+local function is_null(ptr)
+    return ptr == nil or ptr == ffi.NULL
+end
 
 function M.is_available()
     return czmq ~= nil and zmq ~= nil
 end
 
--- 安卓未导出
+-- 安卓其实 zmq_setsockopt 这个也没有
 local function set_socket_linger(sock, linger_ms)
     if not (sock and czmq and zmq) then return end
     pcall(function()
@@ -84,22 +83,18 @@ local function safe_destroy_socket(sock)
 end
 
 function M:start()
-    if self.started then
-        return true
-    end
-
+    if self.started then return true end
     if not self.endpoint then
-        error("[IpcMessageQueue] endpoint missing")
+        error("[IpcMessage] endpoint missing")
     end
-
     if not self.is_available() then
-        error("[IpcMessageQueue] czmq/zmq unavailable")
+        error("[IpcMessage] czmq/zmq unavailable")
     end
 
     local socket_type = self.is_server and ZMQ_ROUTER or ZMQ_DEALER
     self.socket = czmq.zsock_new(socket_type)
-    if self.socket == nil then
-        error("[IpcMessageQueue] create socket failed")
+    if is_null(self.socket)then
+        error("[IpcMessage] create socket failed")
     end
     set_socket_linger(self.socket, 250)
 
@@ -134,13 +129,13 @@ function M:start()
     end
     if rc < 0 then
         self:stop()
-        error("[IpcMessageQueue] connect/bind failed " .. self.endpoint)
+        error("[IpcMessage] connect/bind failed " .. self.endpoint)
     end
 
     self.poller = czmq.zpoller_new(self.socket, nil)
-    if not self.poller then
+    if is_null(self.poller) then
         self:stop()
-        error("[IpcMessageQueue] poller create failed")
+        error("[IpcMessage] poller create failed")
     end
 
     self.started = true
@@ -169,14 +164,10 @@ function M:stop()
 end
 
 function M:send(data, target_id)
-    if not self.socket then
-        return false, "closed"
-    end
+    if is_null(self.socket) then return false, "closed" end
     data = tostring(data or "")
     local msg = czmq.zmsg_new()
-    if not msg then
-        return false, "alloc_failed"
-    end
+    if not msg then return false, "alloc_failed" end
 
     if self.is_server then
         if not target_id then
@@ -189,91 +180,115 @@ function M:send(data, target_id)
 
     czmq.zmsg_addmem(msg, data, #data)
     local rc = czmq.zmsg_send(zmsg_ptr_t(msg), self.socket)
-    return rc == 0
+    if rc ~= 0 then return false, "send_failed" end
+    return true
 end
 
-M.czmq = czmq
-M.zmq = zmq
-
 function M:wait(timeout_ms)
-    if not (self.poller and czmq) then return nil end
+    if is_null(self.socket) or is_null(self.poller) then return end
     local which = czmq.zpoller_wait(self.poller, timeout_ms or 0)
     if which == nil then
         local is_term = false
         pcall(function()
-            if czmq.zpoller_terminated(self.poller) then
-                is_term = true
-            end
+            if czmq.zpoller_terminated(self.poller) then is_term = true end
         end)
-        if is_term then
-            self:stop()
-        end
+        if is_term then self:stop() end
     end
     return which
 end
 
-function M:recv()
-    if not (self.socket and czmq) then return nil end
-    local msg = czmq.zmsg_recv(self.socket)
-    if msg == nil then return nil end
-    local id = nil
-    if self.is_server then
-        local id_frame = czmq.zmsg_pop(msg)
-        if id_frame ~= nil then
-            local id_sz = czmq.zframe_size(id_frame)
-            if id_sz > 0 then
-                id = ffi.string(czmq.zframe_data(id_frame), id_sz)
-            end
-            czmq.zframe_destroy(zframe_ptr_t(id_frame))
-        end
-        if id and self.clients then
-            self.clients[id] = socket.gettime()
-        end
-    end
+local zmsg_recv_fn = nil
+local zframe_more_fn = nil
+if czmq then
+    pcall(function() zmsg_recv_fn = czmq.zmsg_recv end)
+    pcall(function() zframe_more_fn = czmq.zframe_more end) -- 新增
+end
 
-    local body_frame = czmq.zmsg_pop(msg)
-    local body = nil
-    if body_frame ~= nil then
-        local body_sz = czmq.zframe_size(body_frame)
-        if body_sz > 0 then
-            body = ffi.string(czmq.zframe_data(body_frame), body_sz)
-        else
-            body = ""
-        end
-        czmq.zframe_destroy(zframe_ptr_t(body_frame))
+local function frame_to_string(frame)
+    if frame == nil then return nil end
+    local size = czmq.zframe_size(frame)
+    if size == nil then return nil end
+    if size == 0 then return "" end
+    local data = czmq.zframe_data(frame)
+    if data == nil then return nil end
+    return ffi.string(data, size)
+end
+
+local function destroy_frame(frame)
+    if frame ~= nil then
+        pcall(function()
+            czmq.zframe_destroy(zframe_ptr_t(frame))
+        end)
     end
-    czmq.zmsg_destroy(zmsg_ptr_t(msg))
+end
+
+function M:recv()
+    if is_null(self.socket) or czmq == nil then return nil end
+    local id = nil
+    local body = nil
+    -- 优先使用 zmsg_recv
+    if zmsg_recv_fn then
+        local msg = zmsg_recv_fn(self.socket)
+        if msg == nil then return nil end
+        if self.is_server then
+            local id_frame = czmq.zmsg_pop(msg)
+            if id_frame ~= nil then
+                id = frame_to_string(id_frame)
+                destroy_frame(id_frame)
+            end
+        end
+
+        local body_frame = czmq.zmsg_pop(msg)
+        if body_frame ~= nil then
+            body = frame_to_string(body_frame)
+            destroy_frame(body_frame)
+        end
+        czmq.zmsg_destroy(zmsg_ptr_t(msg))
+    -- fallback：逐帧接收
+    else
+        if self.is_server then
+            local id_frame = czmq.zframe_recv(self.socket)
+            if id_frame == nil then return nil end
+            id = frame_to_string(id_frame)
+            destroy_frame(id_frame)
+        end
+        local body_frame = czmq.zframe_recv(self.socket)
+        if body_frame == nil then return nil end
+        body = frame_to_string(body_frame)
+        destroy_frame(body_frame)
+    end
+    if body == nil then return nil end
+    if id ~= nil and self.clients then
+        self.clients[id] = socket.gettime()
+    end
     return body, id
 end
 
 function M:waitEvent(timeout, max_events)
-    if not self.socket or not self.poller then
-        return
+    if is_null(self.socket) or is_null(self.poller) then return end
+    if self.is_server and self.clients then
+        local now = socket.gettime()
+        if now - (self.last_purge_time or 0) > 60 then
+            self:purgeClients(300)
+            self.last_purge_time = now
+        end
     end
+
     local to = timeout or 0
     local limit = max_events or 256
     local events = 0
-
     while events < limit do
-        if not self.socket or not self.poller then
-            break
-        end
+        if is_null(self.socket) or is_null(self.poller) then break end
         local which = self:wait(events == 0 and to or 0)
-        if which == nil then
-            break
-        end
-
+        if which == nil then break end
         local body, id = self:recv()
         if body ~= nil and self.receiveCallback then
-            pcall(self.receiveCallback, {
-                id = id,
-                data = body,
-            })
+            local ok, err = pcall(self.receiveCallback, { id = id, data = body })
+            if not ok and logger and logger.err then
+                logger.err("[IpcMessage] receiveCallback error: " .. tostring(err))
+            end
         end
-
-        if not self.socket or not self.poller then
-            break
-        end
+        if is_null(self.socket) or is_null(self.poller) then break end
         events = events + 1
     end
 end
@@ -287,5 +302,18 @@ function M:getClients()
     end
     return res
 end
+
+function M:purgeClients(timeout_sec)
+    if not self.is_server or not self.clients then return end
+    local now = socket.gettime()
+    for id, last_time in pairs(self.clients) do
+        if (now - last_time) > (timeout_sec or 300) then
+            self.clients[id] = nil
+        end
+    end
+end
+
+M.czmq = czmq
+M.zmq = zmq
 
 return M

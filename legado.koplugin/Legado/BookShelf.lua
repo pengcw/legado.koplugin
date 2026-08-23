@@ -168,12 +168,12 @@ local function init_book_shelf(parent)
             has_reload_btn = true,
             buttons = {
                 {
-                    text = "云端书籍链接",
+                    text = "同步至书库目录",
                     callback = function()
                         UIManager:nextTick(function()
                             self.parent_ref:addBkShortcut(bookinfo, true)
                         end)
-                        MessageBox:notice("云端书籍链接已保存至 Home 目录")
+                        MessageBox:notice("已在书库生成快捷书籍")
                     end,
                 }, {
                     text = pin_top_text,

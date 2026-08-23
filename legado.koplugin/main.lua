@@ -116,7 +116,7 @@ end
 
 function Legado:isCachePath(file_path, instance)
     if not (file_path and instance) then instance = self.ui end
-    return Env.is_legado_path(file_path, instance)
+    return Env.is_legado_book(file_path, instance)
 end
 
 function Legado:isBrowserBook(file_path, instance)

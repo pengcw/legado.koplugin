@@ -1,5 +1,5 @@
 local logger = require("logger")
-local IMG = require("Legado.Helper.image_meta")
+local image_meta = require("Legado.Helper.image_meta")
 
 --- Common timeout values
 -- Large content 块超时 总超时
@@ -294,7 +294,7 @@ local function pGetUrlContent(options, is_create)
     if contentType then
         extension = get_extension_from_mimetype(contentType)
         if not extension and (contentType:match("^%s*image/") or is_pic) then
-            extension = IMG.sniff_format(content)
+            extension = image_meta.sniff_format(content)
         end
     end
     

@@ -1,4 +1,5 @@
 -- Legado/BookBrowser.lua
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local util = require("util")
 local FileManager = require("apps/filemanager/filemanager")
@@ -60,14 +61,17 @@ local function init_book_links(parent)
         local function get_book_id(fullpath)
             local ok, lnk_conf = pcall(Backend.getLuaConfig, Backend, fullpath)
             if ok and H.is_tbl(lnk_conf) and lnk_conf.readSetting then
-                return lnk_conf:readSetting("book_cache_id")
+                local bid = lnk_conf:readSetting("book_cache_id")
+                if bid then return bid end
             end
             local doc_settings = DocSettings:open(fullpath)
             return doc_settings:readSetting("book_cache_id")
         end
 
         util.findFiles(browser_homedir, function(fullpath, name)
-            if not is_valid_book_file(fullpath, name) then goto continue end
+            local is_html = is_valid_book_file(fullpath, name)
+            local is_epub = util.fileExists(fullpath) and name:match("%.epub$") ~= nil
+            if not (is_html or is_epub) then goto continue end
 
             local book_cache_id = get_book_id(fullpath)
             if not book_cache_id then
@@ -79,6 +83,20 @@ local function init_book_links(parent)
             if not (H.is_tbl(bookinfo) and bookinfo.name) then
                 self:deleteFile(fullpath, true)
                 goto continue
+            end
+
+            local ReadingFlow = require("Legado.ReadingFlow")
+            if is_html and ReadingFlow:isSkeletonEnabled(bookinfo) then
+                -- 平滑升级：先建后删
+                local epub_name = FS.getSafeFilename(string.format("%s-%s.epub", bookinfo.name, bookinfo.author or "未知作者"))
+                local epub_path = FS.joinPath(browser_homedir, epub_name)
+                local ok_path = Backend:ensureVirtualBookEpub(bookinfo, nil, epub_path)
+                if ok_path and util.fileExists(ok_path) then
+                    self:bind_provider(ok_path)
+                    self:refreshLnkMetadata(epub_name, ok_path, bookinfo)
+                    self:deleteFile(fullpath, true)
+                    goto continue
+                end
             end
 
             self:refreshLnkMetadata(nil, fullpath, bookinfo)
@@ -103,9 +121,34 @@ local function init_book_links(parent)
     end
 
     function book_links:addBookShortcut(bookinfo)
-        local home_dir = self.parent:getBrowserHomeDir()
-        if not (home_dir and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id and bookinfo.coverUrl) then
+        local home_dir = self.parent:getBrowserHomeDir() or Env.getLinksDir()
+        if not (home_dir and H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id) then
             return
+        end
+
+        local ReadingFlow = require("Legado.ReadingFlow")
+        local is_skeleton = ReadingFlow:isSkeletonEnabled(bookinfo)
+
+        if is_skeleton then
+            local epub_name = FS.getSafeFilename(string.format("%s-%s.epub", bookinfo.name, bookinfo.author or "未知作者"))
+            local epub_path = FS.joinPath(home_dir, epub_name)
+            if util.fileExists(epub_path) then
+                local attr = lfs.attributes(epub_path)
+                if attr and attr.size > 1024 then
+                    return epub_path, epub_name
+                end
+            end
+            local ok_path = Backend:ensureVirtualBookEpub(bookinfo, nil, epub_path)
+            if ok_path and util.fileExists(ok_path) then
+                self:bind_provider(ok_path)
+                self:refreshLnkMetadata(epub_name, ok_path, bookinfo)
+                if bookinfo.coverUrl and not Backend:get_default_cover_cache(bookinfo.cache_id) and NetworkMgr:isConnected() then
+                    Backend:launchProcess(function()
+                        return Backend:download_cover_img(bookinfo.cache_id, bookinfo.coverUrl)
+                    end)
+                end
+                return ok_path, epub_name
+            end
         end
 
         local book_cache_id = bookinfo.cache_id
@@ -135,6 +178,7 @@ local function init_book_links(parent)
                 end
             end)
         end
+        return book_lnk_path, book_lnk_name
     end
 
     function book_links:bind_provider(file)

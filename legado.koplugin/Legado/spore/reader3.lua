@@ -378,20 +378,12 @@ function M:exploreBook(options, callback)
     }, 'exploreBook')
 end
 
-local function resolve_host_sync(host)
-    if host:match("^%d+%.%d+%.%d+%.%d+$") then return host end
-    local socket = require("socket")
-    local ok, ip = pcall(socket.dns.toip, host)
-    if ok and ip and ip ~= "" then
-        return ip
-    end
-    return host
-end
 
+-- 同步 SSE 流拉取：底层复用 SSEClientCopas（copas 异步 socket），
+-- 此处以 copas.sleep 轮询事件队列的方式呈现"同步阻塞"语义给调用方。
+-- on_event_sync 返回值驱动流结局：true=提前结束 / "RETRY_LOGIN"=重登录 / 其他非空串=错误
 local function fetch_sse_stream_sync(req_url, timeout_sec, ctx, on_event_sync)
-    local socket = require("socket")
-    local ssl = require("ssl")
-    local socket_url = require("socket.url")
+    local copas = require("Legado.vendor.copas")
     local SSEClientCopas = require("Legado.Helper.SSEClientCopas")
 
     local max_time = timeout_sec or 120
@@ -405,160 +397,99 @@ local function fetch_sse_stream_sync(req_url, timeout_sec, ctx, on_event_sync)
         Probe.done("Spore", "SSE_STREAM", req_url, t_start, "200 OK", "stream finished")
     end
 
-    local parsed = socket_url.parse(req_url)
-    if not (parsed and parsed.host) then
-        probe_fail("非法URL")
-        return false, "非法URL"
+    local last_status = nil
+    local finish_err = nil
+    local result = nil
+    local ev_queue = {}
+
+    local ok_open, handle = pcall(SSEClientCopas.open, {
+        url = req_url,
+        timeout = max_time,
+        headers = {
+            ["Connection"] = "close",
+            ["User-Agent"] = "KOReader-Legado",
+        },
+        on_status = function(code)
+            last_status = code
+        end,
+        on_event = function(evt_name, data_str)
+            ev_queue[#ev_queue + 1] = { evt_name, data_str }
+        end,
+        on_close = function(err)
+            finish_err = err
+        end,
+    })
+    if not ok_open then
+        probe_fail(tostring(handle))
+        return false, tostring(handle)
     end
-    local is_https = parsed.scheme == "https"
-    local host = parsed.host
-    local port = tonumber(parsed.port) or (is_https and 443 or 80)
-    local req_path = (parsed.path or "/") .. (parsed.query and ("?" .. parsed.query) or "")
 
-    local connect_ip = resolve_host_sync(host)
-
-    local sock = socket.tcp()
-    sock:settimeout(5)
-    local ok_c, cerr = sock:connect(connect_ip, port)
-    if not ok_c then
-        sock:close()
-        local msg = "连接服务器失败(" .. tostring(connect_ip) .. ":" .. tostring(port) .. "): " .. tostring(cerr)
-        probe_fail(msg)
-        return false, msg
-    end
-
-    if is_https then
-        local ok_w, sock_w = pcall(function()
-            local s = ssl.wrap(sock, {
-                mode = "client",
-                protocol = "any",
-                options = { "all", "no_sslv2", "no_sslv3", "no_tlsv1" },
-                verify = "none",
-            })
-            if s.sni then
-                pcall(s.sni, s, host)
+    local q_head = 1
+    local function drain_queue()
+        while q_head <= #ev_queue do
+            local ev = ev_queue[q_head]
+            ev_queue[q_head] = nil
+            q_head = q_head + 1
+            local res = on_event_sync(ev[1], ev[2])
+            if res == true then
+                result = true
+                return true
+            elseif res == "RETRY_LOGIN" then
+                result = "RETRY_LOGIN"
+                return true
+            elseif type(res) == "string" and res ~= "" then
+                result = res
+                return true
             end
-            local hs_to = math.min(60, math.max(1, max_time - (socket.gettime() - start_time)))
-            s:settimeout(hs_to)
-            local ok_hs, err_hs = s:dohandshake()
-            if not ok_hs then
-                error(tostring(err_hs or "dohandshake failed"))
-            end
-            return s
-        end)
-        if not ok_w then
-            pcall(function() sock:close() end)
-            local msg = "TLS握手失败: " .. tostring(sock_w)
-            probe_fail(msg)
-            return false, msg
         end
-        sock = sock_w
+        q_head = 1
+        return false
     end
 
-    local req = string.format(
-        "GET %s HTTP/1.1\r\nHost: %s\r\nAccept: text/event-stream\r\nConnection: close\r\nUser-Agent: KOReader-Legado\r\n\r\n",
-        req_path, host
-    )
-    local ok_s, serr = sock:send(req)
-    if not ok_s then
-        sock:close()
-        local msg = "发送请求失败: " .. tostring(serr)
-        probe_fail(msg)
-        return false, msg
-    end
-
-    sock:settimeout(0.5)
-    local http_code = nil
-    local is_chunked = false
-    local start_time = socket.gettime()
-
-    while socket.gettime() - start_time < max_time do
+    local cancelled = false
+    while not handle:is_done() do
         if ctx and ctx.is_cancelled() then
-            sock:close()
-            probe_fail("已取消")
-            return false, "已取消"
-        end
-        local line, rerr = sock:receive("*l")
-        if line then
-            if not http_code then
-                http_code = line:match("^HTTP/%d%.%d%s+(%d%d%d)")
-            end
-            local lk, lv = line:match("^([^:]+):%s*(.*)$")
-            if lk then
-                lk = lk:lower()
-                if lk == "transfer-encoding" and lv:lower():find("chunked", 1, true) then
-                    is_chunked = true
-                end
-            end
-            if line == "" then break end
-        elseif rerr ~= "timeout" and rerr ~= "wantread" and rerr ~= "wantwrite" then
-            sock:close()
-            local msg = "读取响应头失败: " .. tostring(rerr)
-            probe_fail(msg)
-            return false, msg
-        end
-    end
-
-    if not http_code then
-        sock:close()
-        probe_fail("读取响应头超时")
-        return false, "读取响应头超时"
-    end
-
-    if http_code == "401" then
-        sock:close()
-        probe_fail("RETRY_LOGIN (401)")
-        return false, "RETRY_LOGIN"
-    elseif http_code ~= "200" then
-        sock:close()
-        local msg = "HTTP状态码异常: " .. tostring(http_code)
-        probe_fail(msg)
-        return false, msg
-    end
-
-    local decoder = is_chunked and SSEClientCopas._parsers.chunked_decoder() or nil
-    local sse = SSEClientCopas._parsers.sse_parser()
-
-    while socket.gettime() - start_time < max_time do
-        if ctx and ctx.is_cancelled() then
-            sock:close()
-            probe_fail("已取消")
-            return false, "已取消"
-        end
-        local raw, rerr, partial = sock:receive(8192)
-        local chunk_data = raw or partial
-        if chunk_data and #chunk_data > 0 then
-            local decoded = chunk_data
-            if decoder then
-                decoder.decode(chunk_data)
-                decoded = decoder.get_output()
-            end
-            if decoded ~= "" then
-                local events = sse.push(decoded)
-                for _, evt in ipairs(events) do
-                    local res = on_event_sync(evt[1], evt[2])
-                    if res == true then
-                        sock:close()
-                        probe_done()
-                        return true
-                    elseif res == "RETRY_LOGIN" then
-                        sock:close()
-                        probe_fail("RETRY_LOGIN")
-                        return false, "RETRY_LOGIN"
-                    elseif type(res) == "string" and res ~= "" then
-                        sock:close()
-                        probe_fail(res)
-                        return false, res
-                    end
-                end
-            end
-        end
-        if rerr == "closed" then break end
-        if rerr ~= "timeout" and rerr ~= "wantread" and rerr ~= "wantwrite" and not raw and not partial then
+            cancelled = true
+            handle:cancel()
             break
         end
+        if drain_queue() then
+            handle:cancel()
+            break
+        end
+        copas.sleep(0.01)
     end
-    sock:close()
+    if not result and not cancelled then
+        drain_queue() -- 流结束后可能还有积压事件
+    end
+    if cancelled then
+        probe_fail("已取消")
+        return false, "已取消"
+    end
+
+    if result then
+        if result == true then
+            probe_done()
+            return true
+        end
+        probe_fail(result)
+        return false, result
+    end
+
+    if last_status == 401 then
+        probe_fail("RETRY_LOGIN (401)")
+        return false, "RETRY_LOGIN"
+    elseif last_status and last_status ~= 200 then
+        local msg = "HTTP状态码异常: " .. tostring(last_status)
+        probe_fail(msg)
+        return false, msg
+    end
+
+    if finish_err then
+        probe_fail(finish_err)
+        return false, finish_err
+    end
+
     probe_done()
     return true
 end

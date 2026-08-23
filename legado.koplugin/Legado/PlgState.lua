@@ -3,6 +3,7 @@ local M = {
     _displayed_chapter = nil,
     _chapter_direction = nil,
     _readerui_is_showing = nil,
+    _reading_mode = nil,
     
     last_page_turn_time = nil,
     last_reader_ready_time = nil,
@@ -79,6 +80,24 @@ function M:readerUiVisible(is_showing)
         M._readerui_is_showing = is_showing
     end
     return M._readerui_is_showing
+end
+
+---会话级阅读模式: full_book" (整本模式) / "chapter_mode" (分章模式) / nil (未在阅读)
+function M:readingMode(mode)
+    if is_str(mode) then
+        if mode == "full_book" or mode == "chapter_mode" then
+            M._reading_mode = mode
+        elseif mode == "nil" then
+            M._reading_mode = nil
+        end
+    elseif mode == false then
+        M._reading_mode = nil
+    end
+    return M._reading_mode
+end
+
+function M:isFullBookMode()
+    return M._reading_mode == "full_book"
 end
 
 function M:sharedMetaData(dir, meta_data)
