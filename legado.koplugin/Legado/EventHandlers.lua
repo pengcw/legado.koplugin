@@ -14,6 +14,7 @@ local TaskProg = require("Legado.task.Progress")
 local Patcher = require("Legado.patches")
 local PlgState = require("Legado/PlgState")
 local Env = require("Legado.Helper.Env")
+local Probe = require("Legado.Helper.Probe")
 
 local Handlers = {}
 
@@ -126,6 +127,7 @@ function Handlers:register(parent_ref)
     end
 
     function parent_ref:onSuspend()
+        PlgState:readingMode(nil)
         Backend:closeDbManager()
     end
 
@@ -190,17 +192,19 @@ function Handlers:register(parent_ref)
                                 switch_sync_reading(Backend:getSettings())
                             end,
                         }, {
-                            text = "自动云端书籍链接",
-                            help_text = "在文件管理器内显示书籍",
+                            text = "分章模式",
+                            help_text = "开启后使用传统单章 HTML 模式，默认关闭（整本 EPUB 模式）",
                             checked_func = function()
-                                return Backend:getSettings().disable_browser ~= true
+                                return Backend:getSettings().chapter_mode == true
                             end,
-                            callback = function()
+                            callback = function(menu_def)
                                 local settings = Backend:getSettings()
-                                local ok_msg = settings.disable_browser and "设置已开启" or "设置已关闭，请手动删除目录"
-                                settings.disable_browser = not settings.disable_browser or nil
+                                local will_enable = (settings.chapter_mode ~= true)
+                                settings.chapter_mode = will_enable and true or nil
                                 Backend:HandleResponse(Backend:saveSettings(settings), function()
-                                    MessageBox:notice(ok_msg)
+                                    local msg = will_enable and "已开启分章模式（传统模式）" or "已开启整本模式（主力模式）"
+                                    MessageBox:notice(msg)
+                                    if menu_def and menu_def.updateItems then menu_def:updateItems() end
                                 end, function(err_msg)
                                     MessageBox:error("设置失败:", err_msg)
                                 end)
@@ -485,16 +489,26 @@ function Handlers:register(parent_ref)
                             bookinfo = self.ui.doc_settings.doc_props
                         end
                         if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.title)) then
-                            local shared_data = Backend:sharedChapterMetadata(dir)
+                                        local shared_data = Backend:sharedChapterMetadata(dir)
                             if H.is_tbl(shared_data) and H.is_tbl(shared_data.data) and H.is_tbl(shared_data.data.bookinfo) then
                                 bookinfo = shared_data.data.bookinfo
                             end
                         end
                         if H.is_tbl(bookinfo) and H.is_str(bookinfo.title) then
                             local book_name = bookinfo.title
-                            local book_lnk_name = Env.getLinkName(book_name, bookinfo.authors)
-                            if H.is_str(book_lnk_name) then
-                                target_file = FS.joinPath(links_dir, book_lnk_name)
+                            local book_author = bookinfo.authors or bookinfo.author or "未知作者"
+                            local epub_name = FS.getSafeFilename(string.format("%s-%s.epub", book_name, book_author))
+                            local epub_path = FS.joinPath(links_dir, epub_name)
+                            if util.fileExists(epub_path) then
+                                target_file = epub_path
+                            else
+                                local book_lnk_name = Env.getLinkName(book_name, book_author)
+                                if H.is_str(book_lnk_name) then
+                                    local lnk_path = FS.joinPath(links_dir, book_lnk_name)
+                                    if util.fileExists(lnk_path) then
+                                        target_file = lnk_path
+                                    end
+                                end
                             end
                         end
                     end
@@ -502,10 +516,10 @@ function Handlers:register(parent_ref)
                 self.ui:onClose()
                 self.ui:showFileManager(target_file)
             end
-            menu_items.table_of_contents.callback = function()
-                if self.ui and self.ui.handleEvent then
+            if menu_items.table_of_contents then
+                menu_items.table_of_contents.callback = function()
+                    if not (self.ui and self.ui.handleEvent) then return end
                     self.ui:handleEvent(Event:new("ShowLegadoToc"))
-                    -- self.ui.toc:onShowToc()
                 end
             end  
 
@@ -576,42 +590,40 @@ function Handlers:register(parent_ref)
                             MessageBox:error("上传进度失败: 没有获取到当前章节")
                         end
                     end,
+                }, {
+                    text = "返回书架",
+                    separator = true,
+                    callback = function()
+                        local library_obj = LibraryView:getInstance()
+                        if library_obj then
+                            library_obj:fetchAndShow()
+                        end
+                    end,
                 }},
             }
         end
 
         function parent_ref:onRefreshLegadoChapter()
-            local library_obj = LibraryView:getInstance()
-            if not library_obj then
-                logger.warn("RefreshLegadoChapter LibraryView instance not loaded")
-                return true
-            end
             if PlgState:readerUiVisible() ~= true then
                 MessageBox:error("操作失败: 仅支持 Legado 章节")
                 return true
             end
-            local reading_chapter = PlgState:readingChapter()
-            if reading_chapter then
-                reading_chapter.isDownLoaded = true
-                Backend:HandleResponse(Backend:ChangeChapterCache(reading_chapter), function(data)
-                    MessageBox:notice("刷新成功")
-                        UIManager:nextTick(function()
-                            library_obj:loadAndRenderChapter(reading_chapter)
-                        end)
-                    end, function(err_msg)
-                        MessageBox:error('操作失败:', tostring(err_msg))
-                end)
-            else
-                MessageBox:error("操作失败: 没有获取到当前章节")
-            end
-            return true
+            local ReadingFlow = require("Legado.ReadingFlow")
+            return ReadingFlow:refreshCurrentChapter({
+                on_success = function()
+                    MessageBox:notice("本章刷新成功")
+                end,
+                on_error = function(err_msg)
+                    MessageBox:error("刷新失败: " .. tostring(err_msg))
+                end
+            })
         end
 
         function parent_ref:onDocSettingsLoad(doc_settings, document)
             if not (doc_settings and doc_settings.data and document) then
                 return
             end
-            if parent_ref:isCachePath(document.file) then
+            if Env.is_legado_chapter_cache(document.file) then
 
                 local directory, file_name = util.splitFilePathName(document.file)
                 local _, extension = util.splitFileNameSuffix(file_name or "")
@@ -660,7 +672,7 @@ function Handlers:register(parent_ref)
             if not (self.ui and self.ui.doc_settings) then return end
             local filepath = self.ui.document and self.ui.document.file or self.ui.doc_settings:readSetting("doc_path")
             
-            if parent_ref:isCachePath(filepath) then
+            if Env.is_legado_chapter_cache(filepath) then
                 local directory, file_name = util.splitFilePathName(filepath)
                 if not parent_ref:isCachePath(directory) then return end
                 
@@ -717,8 +729,11 @@ function Handlers:register(parent_ref)
             
             if not parent_ref:isCachePath(nil, self.ui) then
                 PlgState:readerUiVisible(false)
+                PlgState:readingMode(nil)
                 return
             elseif self.ui.link and self.ui.document then
+                local is_epub = (self.ui.document.file and self.ui.document.file:match("%.epub$") ~= nil)
+                PlgState:readingMode(is_epub and "full_book" or "chapter_mode")
                 Patcher.readui_runtime(self.ui)
                 if Backend:enforceRateLimit(PlgState.last_reader_ready_time, 80) then return end
                 PlgState.last_reader_ready_time = time.now()
@@ -771,7 +786,9 @@ function Handlers:register(parent_ref)
                     end
                 end
 
-                make_pages_continuous(chapter_direction)
+                if Env.is_legado_chapter_cache(nil, self.ui) then
+                    make_pages_continuous(chapter_direction)
+                end
             end
         end
 
@@ -786,7 +803,7 @@ function Handlers:register(parent_ref)
             end
 
             self.eventListener.onStartOfBook = function()
-                if parent_ref:isCachePath(nil, self.ui) then
+                if Env.is_legado_chapter_cache(nil, self.ui) then
                     local library_obj = LibraryView:getInstance()
                     if library_obj then
                         if Backend:enforceRateLimit(PlgState.last_page_turn_time, 80) then return true end
@@ -811,8 +828,59 @@ function Handlers:register(parent_ref)
                 end
             end
 
+            self.eventListener.onPageUpdate = function(_, pageno)
+                if not Env.is_legado_full_book(nil, self.ui) then return end
+                if not pageno or not self.ui or not self.ui.toc then return end
+
+                local ok_toc, toc_idx = pcall(function()
+                    if self.ui.toc.getTocIndexByPage then
+                        return self.ui.toc:getTocIndexByPage(pageno)
+                    end
+                end)
+                if not ok_toc or not toc_idx then return end
+
+                local current_reading = PlgState:readingChapter()
+                local new_ch_idx = toc_idx - 1
+
+                if not current_reading or current_reading.chapters_index ~= new_ch_idx then
+                    local book_cache_id = (current_reading and current_reading.book_cache_id)
+                    if not book_cache_id and self.ui.document and self.ui.document.file then
+                        local DocSettings = require("docsettings")
+                        local ds = DocSettings:open(self.ui.document.file)
+                        book_cache_id = ds and ds:readSetting("book_cache_id")
+                    end
+                    local chapters = (book_cache_id and Backend:getBookChapterPlusCache(book_cache_id)) or {}
+                    local bookinfo = (book_cache_id and Backend:getBookInfoCache(book_cache_id)) or {}
+                    local new_chapter = chapters[toc_idx] or {
+                        book_cache_id = book_cache_id,
+                        chapters_index = new_ch_idx,
+                        name = (current_reading and current_reading.name) or bookinfo.name,
+                        title = string.format("第%d章", new_ch_idx + 1),
+                        bookUrl = (current_reading and current_reading.bookUrl) or bookinfo.bookUrl,
+                        author = (current_reading and current_reading.author) or bookinfo.author,
+                    }
+                    if not new_chapter.name and bookinfo.name then
+                        new_chapter.name = bookinfo.name
+                    end
+                    if not new_chapter.bookUrl and bookinfo.bookUrl then
+                        new_chapter.bookUrl = bookinfo.bookUrl
+                    end
+                    if not new_chapter.author and bookinfo.author then
+                        new_chapter.author = bookinfo.author
+                    end
+
+                    Probe.done("Page", "跨章翻页", string.format("第%s章 -> 第%d章 (页码: %s)", tostring((current_reading and current_reading.chapters_index or 0) + 1), new_ch_idx + 1, tostring(pageno)))
+
+                    PlgState:readingChapter(new_chapter)
+
+                    UIManager:nextTick(function()
+                        Backend:after_reader_chapter_show(new_chapter)
+                    end)
+                end
+            end
+
             self.eventListener.onEndOfBook = function()
-                if parent_ref:isCachePath(nil, self.ui) then
+                if Env.is_legado_chapter_cache(nil, self.ui) then
                     local library_obj = LibraryView:getInstance()
                     if library_obj then
                         if Backend:enforceRateLimit(PlgState.last_page_turn_time, 80) then return true end

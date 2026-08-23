@@ -52,8 +52,12 @@ function ChapterListing:init()
         self:openMenu()
     end
 
-    Menu.init(self)
-    
+    logger.info("[ChapterListing] init start, cache_id=", tostring(self.bookinfo and self.bookinfo.cache_id))
+    local ok_menu, err_menu = pcall(Menu.init, self)
+    if not ok_menu then
+        logger.warn("[ChapterListing] Menu.init failed:", err_menu)
+    end
+
     if Device:hasKeys() then
         self.refresh_menu_key = "Home"
         if Device:hasKeyboard() then
@@ -68,27 +72,48 @@ function ChapterListing:init()
     end
 
     self:refreshItems(nil, true)
+    logger.info("[ChapterListing] init done")
 end
 
 function ChapterListing:refreshItems(no_recalculate_dimen, go_last_read)
 
     local book_cache_id = self.bookinfo.cache_id
-    local chapter_cache_data = Backend:getAllChaptersByUI(book_cache_id)
+    logger.info("[ChapterListing] refreshItems: cache_id=", tostring(book_cache_id))
 
-    if H.is_tbl(chapter_cache_data) and #chapter_cache_data > 0 then
-        self.item_table = self:generateItemTableFromChapters(chapter_cache_data)
-        self.multilines_show_more_text = false
-        self.items_per_page = nil
-        self.single_line = true
-    else
+    local ok, err = pcall(function()
+        local chapter_cache_data = Backend:getAllChaptersByUI(book_cache_id)
+        logger.info("[ChapterListing] getAllChaptersByUI -> #", tostring(chapter_cache_data and #chapter_cache_data or -1))
+
+        if H.is_tbl(chapter_cache_data) and #chapter_cache_data > 0 then
+            self.item_table = self:generateItemTableFromChapters(chapter_cache_data)
+            self.multilines_show_more_text = false
+            self.items_per_page = nil
+            self.single_line = true
+        else
+            self.item_table = self:generateEmptyViewItemTable()
+            self.multilines_show_more_text = true
+            self.items_per_page = 1
+            self.single_line = false
+        end
+        Menu.updateItems(self, nil, no_recalculate_dimen)
+        logger.info("[ChapterListing] updateItems ok")
+        if go_last_read then
+            self:gotoLastReadChapter()
+            logger.info("[ChapterListing] gotoLastReadChapter ok")
+        end
+    end)
+
+    if not ok then
+        logger.warn("[ChapterListing] refreshItems FAILED:", err)
+        -- 降级为空目录，避免崩溃
         self.item_table = self:generateEmptyViewItemTable()
         self.multilines_show_more_text = true
         self.items_per_page = 1
         self.single_line = false
-    end
-    Menu.updateItems(self, nil, no_recalculate_dimen)
-    if go_last_read then
-        self:gotoLastReadChapter()
+        local ok2, err2 = pcall(Menu.updateItems, self, nil, no_recalculate_dimen)
+        if not ok2 then
+            logger.warn("[ChapterListing] fallback updateItems failed:", err2)
+        end
     end
 end
 
@@ -110,13 +135,20 @@ function ChapterListing:generateItemTableFromChapters(chapters)
 
     for _, chapter in ipairs(chapters) do
 
+        local title = chapter.title
+        if type(title) ~= "string" or title == "" then
+            title = tostring(chapter.chapters_index or "")
+        end
+        -- 渲染前清洗非法 UTF-8/控制字符，避免 freetype 层 native 崩溃
+        title = util.fixUtf8(title, "?")
+
         local mandatory = (chapter.chapters_index == last_read_chapter and Icons.FA_THUMB_TACK or '') ..
                               (chapter.isRead and Icons.FA_CHECK_CIRCLE or "") ..
                               (chapter.isDownLoaded ~= true and Icons.FA_DOWNLOAD or "")
 
         table.insert(item_table, {
             chapters_index = chapter.chapters_index,
-            text = chapter.title or tostring(chapter.chapters_index),
+            text = title,
             mandatory = mandatory ~= "" and mandatory or "  "
         })
     end
@@ -167,8 +199,8 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
         return
     end
 
-    local items_per_page = G_reader_settings:readSetting("toc_items_per_page") or self.toc_items_per_page_default
-    local items_font_size = G_reader_settings:readSetting("toc_items_font_size") or Menu.getItemFontSize(items_per_page)
+    local items_per_page = tonumber(G_reader_settings:readSetting("toc_items_per_page")) or self.toc_items_per_page_default
+    local items_font_size = tonumber(G_reader_settings:readSetting("toc_items_font_size")) or Menu.getItemFontSize(items_per_page)
     local items_with_dots = G_reader_settings:nilOrTrue("toc_items_with_dots")
 
     local is_stream_image_mode = false
@@ -179,19 +211,34 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
         end
     end
 
-    local chapter_listing = ChapterListing:new{
-        bookinfo = bookinfo,
-        on_return_callback = onReturnCallBack,
-        on_show_chapter_callback = showChapterCallBack,
+    local subtitle = string.format("%s (%s)%s",
+        tostring(bookinfo.name or ""),
+        tostring(bookinfo.author or ""),
+        is_stream_image_mode and "[流式]" or "")
+    subtitle = util.fixUtf8(subtitle, "?")
+    logger.info("[ChapterListing] fetchAndShow: cache_id=", tostring(bookinfo.cache_id),
+        " name=", tostring(bookinfo.name), " author=", tostring(bookinfo.author), " ext=", tostring(bookinfo.cacheExt))
 
-        title = "目录",
-        with_dots = items_with_dots,
-        items_per_page = items_per_page,
-        items_font_size = items_font_size,
-        subtitle = string.format("%s (%s)%s", bookinfo.name, bookinfo.author, is_stream_image_mode and "[流式]" or "")
-    }
-    if visible == true then
-        UIManager:show(chapter_listing)
+    local chapter_listing
+    local ok_new, err_new = pcall(function()
+        chapter_listing = ChapterListing:new{
+            bookinfo = bookinfo,
+            on_return_callback = onReturnCallBack,
+            on_show_chapter_callback = showChapterCallBack,
+
+            title = "目录",
+            with_dots = items_with_dots,
+            items_per_page = items_per_page,
+            items_font_size = items_font_size,
+            subtitle = subtitle
+        }
+        if visible == true then
+            UIManager:show(chapter_listing)
+        end
+    end)
+    if not ok_new then
+        logger.warn("[ChapterListing] fetchAndShow new/show failed:", err_new)
+        return nil
     end
     return chapter_listing
 end

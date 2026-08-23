@@ -220,6 +220,7 @@ function M.open(opts)
 
     local on_event = opts.on_event or function() end
     local on_close = opts.on_close or function() end
+    local on_status = opts.on_status or function() end
     local timeout = opts.timeout or 60
     local connect_timeout = opts.connect_timeout or 8
     local custom_headers = opts.headers or {}
@@ -239,6 +240,7 @@ function M.open(opts)
 
     local done = false
     local err_result = nil
+    local event_result = nil
     local raw_sock = nil
     local wrapped_sock = nil
 
@@ -274,6 +276,7 @@ function M.open(opts)
             finish("已取消")
         end
     end
+    function handle:get_result() return event_result end -- on_event 返回非 nil 中止流时的返回值（供回调式调用方；reader3 走队列模式未用）
 
     local decoder = chunked_decoder()
     local sse = sse_parser()
@@ -309,6 +312,10 @@ function M.open(opts)
                 return
             end
             raw_sock = sec_sock
+            -- SNI（部分 HTTPS 服务器缺少 SNI 会握手失败）
+            if sec_sock.sni then
+                pcall(sec_sock.sni, sec_sock, host)
+            end
             local ok_h, herr = sec_sock:dohandshake()
             if not ok_h then
                 finish("TLS 握手失败：" .. tostring(herr))
@@ -345,6 +352,9 @@ function M.open(opts)
         end
 
         local status_code = tonumber(status_line:match("^HTTP/%d+%.%d+%s+(%d+)"))
+        if status_code then
+            pcall(on_status, status_code, status_line)
+        end
         if not status_code or status_code < 200 or status_code >= 300 then
             finish("HTTP 响应状态码异常: " .. tostring(status_line))
             return
@@ -397,9 +407,13 @@ function M.open(opts)
                         return
                     end
                     for _, evt in ipairs(events) do
-                        local ok_ev, err_ev = pcall(on_event, evt[1], evt[2])
+                        local ok_ev, ev_ret = pcall(on_event, evt[1], evt[2])
                         if not ok_ev then
-                            logger.warn("[SSEClientCopas] on_event 回调异常: " .. tostring(err_ev))
+                            logger.warn("[SSEClientCopas] on_event 回调异常: " .. tostring(ev_ret))
+                        elseif ev_ret ~= nil then
+                            event_result = ev_ret
+                            finish(nil)
+                            return
                         end
                     end
                 end

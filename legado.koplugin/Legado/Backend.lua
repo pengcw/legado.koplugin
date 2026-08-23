@@ -1,3 +1,4 @@
+local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local NetworkMgr = require("ui/network/manager")
 local ffiUtil = require("ffi/util")
@@ -145,7 +146,7 @@ function M:promptServiceUnreachable()
                 -- 无结果短冷却 10s（用户可能忘了开服务，开完想立即重扫）
                 require("Legado/PlgState").service_guard_cooldown_until = time.now() + time.s(10)
                 local scope = type(result) == "table" and result.net and result.net.cidr or nil
-                return require("Legado/MessageBox"):notice(string.format("未在 %s 网段发现开源阅读服务",
+                return self:_show_notice(string.format("未在 %s 网段发现开源阅读服务",
                     scope and tostring(scope) or "局域网"))
             end
             local result_dialog
@@ -154,11 +155,11 @@ function M:promptServiceUnreachable()
                 table.insert(buttons, {{ text = addr, callback = function()
                     UIManager:close(result_dialog)
                     self:HandleResponse(self:updateActiveServerAddress(addr), function()
-                        require("Legado/MessageBox"):notice("已切换至 " .. addr)
+                        self:_show_notice("已切换至 " .. addr)
                         local LibraryView = require("Legado/LibraryView")
                         if LibraryView.instance then LibraryView.instance:onRefreshLibrary() end
                     end, function(switch_err)
-                        require("Legado/MessageBox"):error("切换失败：", tostring(switch_err))
+                        self:_show_notice("切换失败：" .. tostring(switch_err))
                     end)
                 end }})
             end
@@ -382,7 +383,9 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
 
     return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
         local status, err = safe_call(function()
-            return self.dbManager:upsertChapters(book_cache_id, response.data)
+            local res = self.dbManager:upsertChapters(book_cache_id, response.data)
+            pcall(function() self:syncVirtualBookNewChapters(book_cache_id, bookinfo.name or bookinfo.title) end)
+            return res
         end)
         if not status then
             dbg.log('refreshChaptersCache数据写入', tostring(err))
@@ -519,6 +522,27 @@ function M:_pDownloadChapter(chapter, download_opts)
         error(err_msg)
     end
 
+    local raw_body = response.body
+    local is_empty = false
+    if H.is_str(raw_body) then
+        local trimmed = raw_body:gsub("^%s+", ""):gsub("%s+$", "")
+        if #trimmed == 0 then
+            is_empty = true
+        end
+    elseif H.is_tbl(raw_body) then
+        if #raw_body == 0 then
+            is_empty = true
+        end
+    else
+        is_empty = true
+    end
+
+    if is_empty then
+        local err_msg = "源站返回正文内容为空"
+        Probe.fail("Chapter", "章节内容为空", format_chapter_desc(chapter), t_dl_start, err_msg)
+        error(err_msg)
+    end
+
     local filePath = Env.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
     local opts = {
         getPorxyPicUrls = function(url, txt) return self:getPorxyPicUrls(url, txt) end,
@@ -606,6 +630,32 @@ function M:getCacheChapterFilePath(chapter, not_write_db)
     end
 
     return chapter
+end
+
+function M:clearChapterCache(book_cache_id, chapters_index)
+    if not book_cache_id or chapters_index == nil then return false end
+    local chapter = { book_cache_id = book_cache_id, chapters_index = chapters_index }
+    local ch_cache = self:getCacheChapterFilePath(chapter, true)
+    local cacheFilePath = ch_cache and ch_cache.cacheFilePath
+    if cacheFilePath and util.fileExists(cacheFilePath) then
+        pcall(function()
+            require("docsettings"):open(cacheFilePath):purge()
+        end)
+        pcall(util.removeFile, cacheFilePath)
+    end
+    if self.dbManager and type(self.dbManager.dynamicUpdateChapters) == "function" then
+        pcall(function()
+            self.dbManager:dynamicUpdateChapters(chapter, {
+                content = '_NULL',
+                cacheFilePath = '_NULL',
+            })
+        end)
+    elseif self.dbManager and type(self.dbManager.updateCacheFilePath) == "function" then
+        pcall(function()
+            self.dbManager:updateCacheFilePath(chapter, false)
+        end)
+    end
+    return true
 end
 
 function M:findNextChaptersNotDownLoad(current_chapter, count)
@@ -1359,8 +1409,22 @@ function M:isTaskRunning(target)
 end
 
 function M:_pPreloadReadAheadV2(chapter, count)
-    local tasks = self:findNextChaptersNotDownLoad(chapter, count)
-    if not tasks or #tasks == 0 then
+    -- 首先检查当前正在阅读的 chapter 本身是否已下载缓存！
+    -- 若当前章节尚未下载（如快速翻页跳入占位页），必须将当前章节置于下载任务的第一优先级（self-healing）！
+    local tasks = {}
+    local cur_cache = self:getCacheChapterFilePath(chapter, true)
+    if not (cur_cache and cur_cache.cacheFilePath and util.fileExists(cur_cache.cacheFilePath)) then
+        table.insert(tasks, chapter)
+    end
+
+    local next_tasks = self:findNextChaptersNotDownLoad(chapter, count) or {}
+    for _, t in ipairs(next_tasks) do
+        if t.chapters_index ~= chapter.chapters_index then
+            table.insert(tasks, t)
+        end
+    end
+
+    if #tasks == 0 then
         Probe.done("Preload", "全部已缓存跳过", format_chapter_desc(chapter), nil, "CACHE_HIT")
         return
     end
@@ -1401,14 +1465,62 @@ function M:_pPreloadReadAheadV2(chapter, count)
     task._target_idx = tasks[1] and tasks[1].chapters_index
     PlgState._preload_task = task
 
+    local pending_updates = {}
+    local book_cache_id = tasks[1] and tasks[1].book_cache_id
+    local book_name = tasks[1] and tasks[1].name
+
+    local function flush_pending_updates(reason)
+        if next(pending_updates) == nil then return end
+        local batch_map = pending_updates
+        pending_updates = {}
+        pcall(function()
+            self:syncChaptersToVirtualBook(book_cache_id, batch_map, book_name)
+        end)
+    end
+
+    local success_count = 0
     task:on("chapter_done", function(data)
+        success_count = success_count + 1
         pcall(function() self.dbManager:updateCacheFilePath(data.chapter, data.cacheFilePath) end)
         pcall(function() TaskLock.setLock(self.dbManager, data.chapter, false) end)
+        if data.cacheFilePath and util.fileExists(data.cacheFilePath) and data.chapter.cacheExt ~= "cbz" then
+            local raw = util.readFromFile(data.cacheFilePath)
+            if raw and raw ~= "" then
+                local cur_reading = PlgState:readingChapter()
+                -- 1. 当前在读章穿透直连 (Fast-Path)：若读者停留在该章占位页，立即单独注水并原地重载呈现正文
+                if cur_reading and cur_reading.book_cache_id == data.chapter.book_cache_id and cur_reading.chapters_index == data.chapter.chapters_index then
+                    pcall(function()
+                        self:syncChapterToVirtualBook(data.chapter.book_cache_id, data.chapter.chapters_index, raw, data.chapter.name)
+                    end)
+                    UIManager:nextTick(function()
+                        self:refreshDocumentInPlace()
+                    end)
+                else
+                    -- 2. 未来预读章进入微批缓冲池 (Adaptive Micro-Batching)
+                    pending_updates[data.chapter.chapters_index] = raw
+                    local pending_count = 0
+                    for _ in pairs(pending_updates) do pending_count = pending_count + 1 end
+                    if pending_count >= 3 then
+                        flush_pending_updates("batch_threshold_3")
+                    end
+                end
+            end
+        end
         Probe.done("Chapter", "章节入库", format_chapter_desc(data.chapter), data.t_start, "200 OK", Probe.format_bytes(data.size), data.progress)
     end)
 
     task:on("chapter_failed", function(data)
         pcall(function() TaskLock.setLock(self.dbManager, data.chapter, false) end)
+        local cur_reading = PlgState:readingChapter()
+        local is_cur = cur_reading and data.chapter and (cur_reading.chapters_index == data.chapter.chapters_index)
+        local reason = tostring(data.err or ""):find("源站返回正文内容为空") and "源站正文为空" or "下载失败"
+        if is_cur then
+            local msg = string.format("《%s》%s，请尝试换源或刷新", tostring(data.chapter.title or "当前章节"), reason)
+            Probe.done("Chapter", "提示正文异常", format_chapter_desc(data.chapter), data.t_start, "NOTICE_POPUP", msg)
+            self:_show_notice(msg)
+        else
+            Probe.done("Chapter", "后台失败静默", format_chapter_desc(data.chapter), data.t_start, "SILENT_SKIP", string.format("当前在读: %s", tostring(cur_reading and cur_reading.chapters_index or "-")))
+        end
     end)
 
     local function cleanup()
@@ -1418,14 +1530,45 @@ function M:_pPreloadReadAheadV2(chapter, count)
 
     task:on("finish", function()
         cleanup()
-        Probe.done("Preload", "预读批处理完成", format_chapter_desc(chapter), t_batch_start, "SUCCESS", string.format("%d/%d loaded", #tasks, #tasks))
+        flush_pending_updates("batch_finish")
+        -- 仅当真正有新章节注水入 EPUB 时，才执行后台静默热重载
+        if success_count > 0 then
+            local cur_reading = PlgState:readingChapter()
+            local active_in_batch = false
+            if cur_reading then
+                for _, t in ipairs(tasks) do
+                    if t.chapters_index == cur_reading.chapters_index then
+                        active_in_batch = true
+                        break
+                    end
+                end
+            end
+            if active_in_batch then
+                pcall(function() self:refreshDocumentInPlace() end)
+            else
+                if self._idle_reload_timer then
+                    UIManager:unschedule(self._idle_reload_timer)
+                    self._idle_reload_timer = nil
+                end
+                self._idle_reload_timer = function()
+                    self._idle_reload_timer = nil
+                    pcall(function() self:refreshDocumentInPlace() end)
+                end
+                UIManager:scheduleIn(4, self._idle_reload_timer)
+            end
+            Probe.done("Preload", "预读批处理完成", format_chapter_desc(chapter), t_batch_start, "SUCCESS", string.format("%d/%d loaded", success_count, #tasks))
+        else
+            Probe.fail("Preload", "预读批处理未下载任何章节", format_chapter_desc(chapter), t_batch_start, string.format("0/%d succeeded", #tasks))
+        end
     end)
     task:on("error", function(err)
         cleanup()
+        flush_pending_updates("batch_error")
         Probe.fail("Preload", "预读批处理失败", format_chapter_desc(chapter), t_batch_start, tostring(err))
     end)
     task:on("cancel", function(reason)
         cleanup()
+        flush_pending_updates("batch_cancel")
         Probe.retry("Preload", "预读批处理取消", format_chapter_desc(chapter), t_batch_start, tostring(reason or "cancelled"))
     end)
 end
@@ -1512,8 +1655,15 @@ function M:after_reader_chapter_show(chapter)
             end
         end
     end
+    if cache_file_path == nil then
+        local ch_cache = self:getCacheChapterFilePath(chapter, true)
+        if ch_cache and ch_cache.cacheFilePath and util.fileExists(ch_cache.cacheFilePath) then
+            chapter.cacheFilePath = ch_cache.cacheFilePath
+            cache_file_path = ch_cache.cacheFilePath
+        end
+    end
     chapter.isRead = true
-    chapter.isDownLoaded = true
+    chapter.isDownLoaded = (cache_file_path ~= nil and util.fileExists(cache_file_path)) or false
 end
 
 function M:downloadChapter(chapter)
@@ -1663,7 +1813,11 @@ function M:saveWebConfig(conf_name, web_config)
 end
 
 function M:getSettings()
-    local settings = self.settings_data.data
+    if not self.settings_data then
+        local LuaSettings = require("luasettings")
+        self.settings_data = LuaSettings:open(Env.getUserSettingsPath())
+    end
+    local settings = self.settings_data.data or {}
     if not H.is_str(settings.server_address) then
         settings.server_address = ""
     end
@@ -1745,6 +1899,324 @@ function M:backupDbWithPreCheck()
     return true
 end
 
+function M:getVirtualBookEpubPath(book_cache_id, book_name)
+    if not book_cache_id then return nil end
+    return Env.getVirtualBookEpubPath(book_cache_id, book_name)
+end
+
+function M:ensureVirtualBookEpub(bookinfo, target_chapter_idx, custom_output_path)
+    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
+        return nil, "invalid bookinfo"
+    end
+    local book_cache_id = bookinfo.cache_id
+    local epub_path = custom_output_path or self:getVirtualBookEpubPath(book_cache_id, bookinfo.name or bookinfo.title)
+    if not epub_path then
+        return nil, "cannot resolve epub path"
+    end
+
+    local SkeletonEpub = require("Legado.Helper.SkeletonEpub")
+
+    -- 如果已存在且版本匹配，则直接返回
+    local SKELETON_SCHEMA_VERSION = SkeletonEpub.SKELETON_SCHEMA_VERSION or 3
+    if util.fileExists(epub_path) then
+        local attr = lfs.attributes(epub_path)
+        if attr and attr.size > 1024 then
+            local DocSettings = require("docsettings")
+            local ds = DocSettings:open(epub_path)
+            local ver = ds and ds:readSetting("virtual_book_schema_version")
+            if ver and ver >= SKELETON_SCHEMA_VERSION then
+                return epub_path
+            end
+        end
+    end
+
+    -- 否则快速构建骨架
+    local chapters
+    if self.dbManager and type(self.dbManager.getAllChapters) == "function" then
+        chapters = self.dbManager:getAllChapters(book_cache_id)
+    elseif self.dbManager and type(self.dbManager.getChapters) == "function" then
+        chapters = self.dbManager:getChapters(book_cache_id)
+    else
+        chapters = self:getBookChapterPlusCache(book_cache_id)
+    end
+    if not H.is_tbl(chapters) or #chapters == 0 then
+        local cache_info = self:getCacheInfo(book_cache_id)
+        if cache_info and cache_info.chapters then
+            chapters = cache_info.chapters
+        end
+    end
+    if not H.is_tbl(chapters) or #chapters == 0 then
+        return nil, "no chapters found for book"
+    end
+
+    local cover_path = bookinfo.cover_path or self:get_default_cover_cache(book_cache_id)
+    if not cover_path then
+        local ImageUtil = require("Legado.Helper.ImageUtil")
+        cover_path = ImageUtil.get_default_cover_cache(book_cache_id)
+    end
+
+    local toc = {}
+    local chapters_content = {}
+    for i, ch in ipairs(chapters) do
+        local ch_idx = ch.chapters_index or (i - 1)
+        table.insert(toc, {
+            index = ch_idx,
+            title = ch.title or ch.name or string.format("第%d章", ch_idx + 1),
+        })
+        local ch_cache = self:getCacheChapterFilePath(ch, true)
+        local cache_file = (ch_cache and ch_cache.cacheFilePath) or ch.cacheFilePath
+        if cache_file and util.fileExists(cache_file) then
+            local data = util.readFromFile(cache_file)
+            if data and data ~= "" and not SkeletonEpub.isPlaceholderHtml(data) then
+                chapters_content[ch_idx] = data
+            end
+        end
+    end
+
+    local ok_build, err_build = SkeletonEpub.buildSkeleton({
+        bookinfo = {
+            title = bookinfo.name or bookinfo.title or "未知书名",
+            author = bookinfo.author or "未知作者",
+            cache_id = book_cache_id,
+        },
+        toc = toc,
+        chapters_content = chapters_content,
+        cover_path = cover_path,
+        output_path = epub_path,
+    })
+
+    if not ok_build then
+        return nil, err_build
+    end
+    return epub_path
+end
+
+function M:syncVirtualBookNewChapters(book_cache_id, book_name)
+    if not book_cache_id then return false end
+    local epub_path = self:getVirtualBookEpubPath(book_cache_id, book_name)
+    if not (epub_path and util.fileExists(epub_path)) then return false end
+
+    local chapters
+    if self.dbManager and type(self.dbManager.getAllChapters) == "function" then
+        chapters = self.dbManager:getAllChapters(book_cache_id)
+    elseif self.dbManager and type(self.dbManager.getChapters) == "function" then
+        chapters = self.dbManager:getChapters(book_cache_id)
+    else
+        chapters = self:getBookChapterPlusCache(book_cache_id)
+    end
+    if not (H.is_tbl(chapters) and #chapters > 0) then return false end
+
+    local DocSettings = require("docsettings")
+    local ds = DocSettings:open(epub_path)
+    local epub_ch_count = ds and ds:readSetting("virtual_book_chapters_count")
+    if not epub_ch_count then
+        epub_ch_count = #chapters
+        if ds then ds:saveSetting("virtual_book_chapters_count", epub_ch_count) end
+        return false
+    end
+
+    if #chapters > epub_ch_count then
+        local SkeletonEpub = require("Legado.Helper.SkeletonEpub")
+        local new_toc = {}
+        local new_contents = {}
+        for i = epub_ch_count + 1, #chapters do
+            local ch = chapters[i]
+            local ch_idx = ch.chapters_index or (i - 1)
+            table.insert(new_toc, {
+                index = ch_idx,
+                title = ch.title or ch.name or string.format("第%d章", ch_idx + 1),
+            })
+            local ch_cache = self:getCacheChapterFilePath(ch, true)
+            local cache_file = (ch_cache and ch_cache.cacheFilePath) or ch.cacheFilePath
+            if cache_file and util.fileExists(cache_file) then
+                local data = util.readFromFile(cache_file)
+                if data and data ~= "" and not SkeletonEpub.isPlaceholderHtml(data) then
+                    new_contents[ch_idx] = data
+                end
+            end
+        end
+
+        if #new_toc > 0 then
+            local ok, err = SkeletonEpub.appendChapters(epub_path, new_toc, new_contents)
+            if ok then
+                if ds then ds:saveSetting("virtual_book_chapters_count", #chapters) end
+                local ok_r, ReaderUI = pcall(require, "apps/reader/readerui")
+                if ok_r and ReaderUI and ReaderUI.instance and ReaderUI.instance.document and ReaderUI.instance.document.file == epub_path then
+                    self:refreshDocumentInPlace(ReaderUI.instance)
+                end
+                return true
+            else
+                logger.warn("syncVirtualBookNewChapters append failed: " .. tostring(err))
+            end
+        end
+    end
+    return false
+end
+
+function M:refreshDocumentInPlace(ui)
+    local ok_r, ReaderUI = pcall(require, "apps/reader/readerui")
+    ui = ui or (ok_r and ReaderUI and ReaderUI.instance)
+    if not (ui and ui.document and ui.document._document) then
+        return false, "no active credocument"
+    end
+    local doc = ui.document
+    local t_start = Probe.start("DOM", "原地热重载", doc.file)
+    -- 记录重载前进度：章节占位→正文的 DOM 变化会使旧 xpointer 失效（crengine 静默解析回第 1 页），
+    -- 此时按阅读百分比兜底恢复，避免跳回首页
+    local old_pos = doc._document:getCurrentPos()
+    local old_height = doc._document:getFullHeight()
+    local old_page = doc._document:getCurrentPage()
+    local old_percent = (old_pos and old_height and old_height > 0) and (old_pos / old_height) or nil
+    -- 章节级锚点：从当前 xpointer 提取 DocFragment 前缀，构造章节头锚点。
+    -- 占位页与正文页的章节根节点 <div class="legado-ch"><h2>…</h2> 结构一致，
+    -- 章节被更新（占位→正文）后旧 xpointer 失效，但该锚点仍有效，可精确回到章节头。
+    local cur_chapter_xp
+    do
+        local cur_xp = doc._document:getXPointer()
+        local frag_prefix = cur_xp and cur_xp:match("^(/body/DocFragment%[%d+%])")
+        if frag_prefix then
+            cur_chapter_xp = frag_prefix .. "/body/div/h2"
+        end
+    end
+    local ok, err = pcall(function()
+        -- 临时静音 crengine 进度条回调，防止顶部弹出进度条并引起卡顿
+        if doc.setCallback then
+            doc:setCallback(nil)
+        end
+        doc._loaded = false
+        if doc.resetCallCache then
+            doc:resetCallCache()
+        elseif doc.setupCallCache then
+            doc:setupCallCache()
+        end
+        local ok_load = doc._document:loadDocument(doc.file, false)
+        if ok_load then
+            doc._loaded = true
+            doc._document:renderDocument()
+            doc.info.doc_height = doc._document:getFullHeight()
+
+            -- 1. 驱动 ReaderRolling 锁定当前视口并通知整页重绘
+            if ui.rolling and ui.rolling.onUpdatePos then
+                ui.rolling:onUpdatePos(true)
+            elseif ui.rolling and ui.rolling.onRedrawCurrentView then
+                ui.rolling:onRedrawCurrentView()
+            elseif ui.paging and ui.paging.onRedrawCurrentPage then
+                ui.paging:onRedrawCurrentPage()
+            else
+                local Event = require("ui/event")
+                ui:handleEvent(Event:new("DocumentRerendered"))
+                local UIManager = require("ui/uimanager")
+                if ui.view and ui.view.dialog then
+                    UIManager:setDirty(ui.view.dialog, "partial")
+                end
+            end
+
+            -- 2. xpointer 失效兜底：重载后仍落在第 1 页而原本不在（占位→正文 DOM 变化导致旧 xpointer 解析回第 1 页），
+            --    按阅读百分比恢复，避免跳回首页
+            if old_percent and old_page and old_page > 1 then
+                local new_page = doc._document:getCurrentPage()
+                if new_page and new_page <= 1 then
+                    logger.warn("refreshDocumentInPlace: xpointer lost after reload (page %s -> 1), restoring by percent %.2f",
+                        tostring(old_page), old_percent * 100)
+                    pcall(function()
+                        -- 章节锚点优先；锚点不存在或定位后仍在第 1 页（锚点无效）时降级百分比兜底
+                        local restored = false
+                        if cur_chapter_xp then
+                            local ok_a = pcall(function()
+                                -- onGotoXPointer 内部会同步 self.xpointer
+                                if ui.rolling and ui.rolling.onGotoXPointer then
+                                    ui.rolling:onGotoXPointer(cur_chapter_xp)
+                                elseif doc._document.gotoXPointer then
+                                    doc._document:gotoXPointer(cur_chapter_xp)
+                                end
+                            end)
+                            if ok_a then
+                                local p_after = doc._document:getCurrentPage()
+                                restored = not (p_after and p_after <= 1)
+                            end
+                        end
+                        if not restored then
+                            -- 百分比兜底（onGotoPercent 公开入口，内部同步 self.xpointer）
+                            if ui.rolling and ui.rolling.onGotoPercent then
+                                ui.rolling:onGotoPercent(old_percent * 100)
+                            elseif doc._document.gotoPos then
+                                -- 非 rolling（paging）文档不可达（虚拟书必为 EPUB），防御性兜底
+                                local new_height = doc._document:getFullHeight()
+                                if new_height and new_height > 0 then
+                                    doc._document:gotoPos(math.floor(old_percent * new_height))
+                                end
+                            end
+                        end
+                        -- 触发重绘（onUpdatePos 因 hash 未变不会重定位，仅重绘，幂等）
+                        if ui.rolling and ui.rolling.onUpdatePos then
+                            ui.rolling:onUpdatePos()
+                        elseif ui.rolling and ui.rolling.onRedrawCurrentView then
+                            ui.rolling:onRedrawCurrentView()
+                        end
+                    end)
+                end
+            end
+
+            -- 3. 同步更新底部状态栏（刷新总页数与章节进度）
+            if ui.view and ui.view.footer and ui.view.footer.onUpdateFooter then
+                pcall(function()
+                    ui.view.footer:onUpdateFooter(ui.view.footer_visible)
+                end)
+            end
+
+            Probe.done("DOM", "原地重载完成", string.format("页数: %s, 高度: %s", tostring(doc:getPageCount()), tostring(doc.info.doc_height)), t_start)
+        else
+            Probe.fail("DOM", "原地重载失败", doc.file, t_start, "loadDocument failed")
+        end
+    end)
+    return ok, err
+end
+
+function M:syncChaptersToVirtualBook(book_cache_id, chapters_map, book_name)
+    if not book_cache_id or not chapters_map or next(chapters_map) == nil then return false end
+    local epub_path = self:getVirtualBookEpubPath(book_cache_id, book_name)
+    if not epub_path or not util.fileExists(epub_path) then return false end
+
+    local count = 0
+    for _ in pairs(chapters_map) do count = count + 1 end
+
+    local t_inject_start = Probe.start("Inject", "批量注水", string.format("共%d章 (book_id: %s)", count, tostring(book_cache_id)))
+    local SkeletonEpub = require("Legado.Helper.SkeletonEpub")
+    local ok, err = SkeletonEpub.updateChapters(epub_path, chapters_map)
+    if ok then
+        Probe.done("Inject", "批量注水完成", string.format("共%d章 (book_id: %s)", count, tostring(book_cache_id)), t_inject_start, "200 OK")
+    else
+        Probe.fail("Inject", "批量注水失败", string.format("共%d章 (book_id: %s)", count, tostring(book_cache_id)), t_inject_start, tostring(err))
+    end
+    return ok, err
+end
+
+function M:syncChapterToVirtualBook(book_cache_id, chapter_idx, raw_content, book_name)
+    return self:syncChaptersToVirtualBook(book_cache_id, { [chapter_idx] = raw_content }, book_name)
+end
+
+--- 针对支持 PR #2477 (LVContainerTransform / loadEpubWithEntryTransform) 的前向兼容钩子
+function M:createEpubTransformHook(book_cache_id)
+    local SkeletonEpub = require("Legado.Helper.SkeletonEpub")
+    return {
+        transformEntry = function(self_t, path)
+            local ch_idx = SkeletonEpub.parseChapterIndexFromEntryPath(path)
+            if ch_idx and self.dbManager then
+                local ch = self.dbManager:findChapterByIndex(book_cache_id, ch_idx)
+                local ch_cache = ch and self:getCacheChapterFilePath(ch, true)
+                local cache_file = (ch_cache and ch_cache.cacheFilePath) or (ch and ch.cacheFilePath)
+                if cache_file and util.fileExists(cache_file) then
+                    local raw = util.readFromFile(cache_file)
+                    if raw and raw ~= "" and not SkeletonEpub.isPlaceholderHtml(raw) then
+                        return SkeletonEpub.formatChapterXhtml(ch_idx, ch.title or ch.name, raw)
+                    end
+                end
+            end
+            return nil
+        end
+    }
+end
+
 function M:enforceRateLimit(last_time, limit_ms)
     if last_time and time.since(last_time) < time.ms(limit_ms) then
         return true
@@ -1753,7 +2225,7 @@ function M:enforceRateLimit(last_time, limit_ms)
 end
 function M:onExitClean()
     dbg.v('Backend call onExitClean')
-
+    self._is_exiting = true
     PlgState:cancelPreload("backend_exit_clean")
     self:closeDbManager()
     collectgarbage()

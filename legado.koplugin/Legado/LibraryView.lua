@@ -52,7 +52,10 @@ end
 
 function LibraryView:isDisableBrowserMode()
     local settings = Backend:getSettings()
-    return settings and settings.disable_browser == true
+    if settings and settings.chapter_mode == true then
+        return settings.disable_browser == true
+    end
+    return false
 end
 
 function LibraryView:browserViewHasLnk()
@@ -141,10 +144,10 @@ function LibraryView:openBrowserMenu(file)
             end
         end
     }}, {{
-        text = "清空云端书籍链接",
+        text = "清空书库快捷书籍",
         callback = function()
             UIManager:close(dialog)
-            MessageBox:confirm("是否清除所有云端书籍链接?", function(result)
+            MessageBox:confirm("是否清除书库目录下所有已同步的快捷书籍?", function(result)
                 if result then
                     local browser_homedir = self:getBrowserHomeDir(true)
                     if self:deleteFile(browser_homedir) then
@@ -154,10 +157,11 @@ function LibraryView:openBrowserMenu(file)
             end, { ok_text = "清除", cancel_text = "取消" })
         end
     }, {
-        text = "修复云端书籍链接",
+        text = "修复与升级书库书籍",
         callback = function()
             UIManager:close(dialog)
             self.book_links:verifyBooksMetadata()
+            MessageBox:notice("已完成书库书籍校验与升级")
         end
     }},}
 
@@ -286,7 +290,7 @@ function LibraryView:loadAndRenderChapter(chapter)
                 MessageBox:error("需要网络连接")
                 return
             end
-             self:afterCloseReaderUi(function()
+            self:afterCloseReaderUi(function()
                 local ex_chapter = chapter
                 self.stream_view = require("Legado/StreamImageView"):fetchAndShow({
                     chapter = ex_chapter,
@@ -296,80 +300,17 @@ function LibraryView:loadAndRenderChapter(chapter)
                     end,
                 })   
             end)
-            return 
+            return
         end
     end
 
-    local cache_chapter = Backend:getCacheChapterFilePath(chapter)
-
-    if (H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath)) then
-        self:showReaderUI(cache_chapter)
-    else
-        Backend:closeDbManager()
-        return TaskProg.loading("正在下载正文 ", function()
-            return Backend:downloadChapter(chapter)
-        end, function(state, response)
-            if state == true then
-                Backend:HandleResponse(response, function(data)
-                    -- 同步下载, 图片章节打包 kind=="cbz"
-                    if H.is_tbl(data) and data.kind == "cbz" then
-                        local pending = data
-                        local cbz_writer = require("Legado.task.QueueCbz"):new()
-                        local total_imgs = #pending.img_sources
-                        local progress_bar
-                        if total_imgs > 2 then
-                            progress_bar = TaskProg.showBar("正在下载章节图片...", {
-                                title = "漫画章节下载",
-                                max = total_imgs,
-                            })
-                        else
-                            progress_bar = TaskProg.showSpinner("正在下载章节图片")
-                        end
-                        local started, start_err = cbz_writer:from_urls_async({
-                            output = pending.filePath,
-                            images = pending.img_sources,
-                            opts = {
-                                max_workers = tonumber(Backend.settings_data.data.download_threads) or 4,
-                                comic_info = { name = pending.chapter.title or "" }
-                            },
-                            on_progress = function(completed)
-                                if progress_bar and progress_bar.reportProgress then
-                                    progress_bar:reportProgress(completed)
-                                end
-                            end,
-                            on_finish = function(aborted, result)
-                                if result and result.success then
-                                    pending.chapter.cacheFilePath = pending.filePath
-                                    if progress_bar then progress_bar:close() end
-                                    UIManager:nextTick(function()
-                                            self:showReaderUI(pending.chapter)
-                                    end)
-                                else
-                                    if progress_bar then progress_bar:close() end
-                                    MessageBox:error('章节打包失败')
-                                end
-                            end,
-                        })
-                        if not started then
-                            if progress_bar then progress_bar:close() end
-                            MessageBox:error('章节打包启动失败: ' .. tostring(start_err))
-                        end
-                        return
-                    end
-                    if not H.is_tbl(data) or not H.is_str(data.cacheFilePath) then
-                        MessageBox:error('下载失败')
-                        return
-                    end
-                    self:showReaderUI(data)
-                end, function(err_msg)
-                    MessageBox:notice("请检查并刷新书架")
-                    MessageBox:error(err_msg or '错误')
-                end)
-            else
-                MessageBox:error(tostring(response or '下载正文失败'))
-            end
-        end)
-    end
+    local ReadingFlow = require("Legado.ReadingFlow")
+    return ReadingFlow:openBook(chapter, {
+        parent_view = self,
+        on_error = function(err_msg)
+            MessageBox:error(err_msg or "开书失败")
+        end
+    })
 end
 
 function LibraryView:ReaderUIEventCallback(chapter_direction, ui)
@@ -430,11 +371,33 @@ function LibraryView:showReaderUI(chapter)
     if toc_obj and UIManager:isWidgetShown(toc_obj) then
         UIManager:close(toc_obj)
     end
+    local function navigate_to_target_chapter()
+        if ReaderUI.instance and ReaderUI.instance.document then
+            local toc = ReaderUI.instance.document:getToc()
+            local target_idx = (chapter.chapters_index or 0) + 1
+            if toc and toc[target_idx] then
+                if toc[target_idx].xpointer then
+                    ReaderUI.instance:handleEvent(Event:new("GotoXPointer", toc[target_idx].xpointer, toc[target_idx].xpointer))
+                elseif toc[target_idx].page then
+                    ReaderUI.instance:handleEvent(Event:new("GotoPage", toc[target_idx].page))
+                end
+            end
+        end
+    end
+
     if ReaderUI.instance then
+        if ReaderUI.instance.document and ReaderUI.instance.document.file == book_path then
+            -- 已经在阅读当前虚拟 EPUB，通过底层引擎原地重载并刷新界面（不重启 ReaderUI）
+            Backend:refreshDocumentInPlace(ReaderUI.instance)
+            UIManager:nextTick(navigate_to_target_chapter)
+            return
+        end
         ReaderUI.instance:switchDocument(book_path, true)
+        UIManager:nextTick(navigate_to_target_chapter)
     else
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
         ReaderUI:showReader(book_path, nil, true)
+        UIManager:nextTick(navigate_to_target_chapter)
     end
 end
 

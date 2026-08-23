@@ -36,7 +36,7 @@ M.readui_runtime = function(read_ui)
             -- local beginning_page = self.ui.document:getNextPage(0)
             -- old_pos cannot be equal to 1, otherwise it won't work in scroll mode.
             local new_pos = scroll_mode and self.current_pos or self.current_page
-            if diff < 0 and old_pos == new_pos and Env.is_legado_path(nil, self.ui) then
+            if diff < 0 and old_pos == new_pos and Env.is_legado_chapter_cache(nil, self.ui) then
                 self.ui:handleEvent(Event:new("StartOfBook"))
             end
             return true
@@ -51,7 +51,7 @@ M.readui_runtime = function(read_ui)
             local old_pos = self:getTopPage()
             orig_paging_onGotoViewRel(self, diff)
             local new_pos = self:getTopPage()
-            if diff < 0 and old_pos == 1 and old_pos == new_pos and Env.is_legado_path(nil, self.ui) then
+            if diff < 0 and old_pos == 1 and old_pos == new_pos and Env.is_legado_chapter_cache(nil, self.ui) then
                 self.ui:handleEvent(Event:new("StartOfBook"))
             end
             return true

@@ -13,6 +13,7 @@ local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local ZipUtil = require("Legado.Helper.ZipUtil")
+local image_meta = require("Legado.Helper.image_meta")
 
 local CbzExporter = {
     bookinfo = nil,

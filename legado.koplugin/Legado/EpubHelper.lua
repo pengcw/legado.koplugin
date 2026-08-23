@@ -4,6 +4,7 @@ local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local logger = require("logger")
 local ZipWrite = require("Legado.Helper.ZipUtil").Writer
+local image_meta = require("Legado.Helper.image_meta")
 
 --[[
     EpubHelper - EPUB 工具集
@@ -135,6 +136,9 @@ local function split_title_advanced(title)
 
     return "", title
 end
+
+M.split_title_advanced = split_title_advanced
+M.split_title = split_title_advanced
 
 -- ============================================================
 -- 章节缓存相关函数（用于 Backend.lua）
