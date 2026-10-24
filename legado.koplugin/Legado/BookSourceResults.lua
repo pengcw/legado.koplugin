@@ -8,20 +8,21 @@ local Screen = Device.screen
 
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
+local LocalExtension = require("Legado.LocalExtension")
 local MessageBox = require("Legado/MessageBox")
 local H = require("Legado/Helper")
 local TaskProg = require("Legado.task.Progress")
 local PlgState = require("Legado/PlgState")
 local logger = require("logger")
 local utf8c = require("Legado.Helper.utf8proc")
+local Probe = require("Legado.Helper.Probe")
 
 local M = {
     results = {},
     last_read_chapter = nil,
-    
+
     bookinfo = nil,
     search_text = nil,
-    -- call_mode: "CHANGE_SOURCE" / "SEARCH" / "AUTO_CHANGE_SOURCE" / "EXPLORE"
     call_mode = nil,
     is_single_source_search = nil,
 
@@ -50,7 +51,7 @@ function M:getApiMoreRresults()
     if self.is_loading then return end
     if not self.has_more_api_results then return end
     if self.call_mode == "SEARCH" then
-        self:handleMultiSourceSearch(self.search_text, true)  
+        self:handleMultiSourceSearch(self.search_text, true)
     elseif self.call_mode == "CHANGE_SOURCE" then
         self:handleAvailableBookSource(self.bookinfo, true)
     elseif self.call_mode == "EXPLORE" then
@@ -79,7 +80,6 @@ function M:menuCenterShow(menuObj)
     return menu_container
 end
 
--- 圆角和is_popout(默认true)互斥
 function M:createMenu(opts)
     opts = opts or {}
     local disable_close_gestures = opts.disable_close_gestures ~= false
@@ -97,7 +97,11 @@ function M:createMenu(opts)
         items_per_page = opts.items_per_page,
         onMenuSelect = opts.onMenuSelect,
         close_callback = opts.close_callback,
+        title_bar_left_icon = opts.title_bar_left_icon,
     }
+    if H.is_func(opts.onLeftButtonTap) then
+        menu.onLeftButtonTap = opts.onLeftButtonTap
+    end
     if disable_close_gestures then
         menu.onTapCloseAllMenus = function(self_m, _, ges_ev)
             if ges_ev.pos:notIntersectWith(self_m.dimen) then
@@ -139,9 +143,11 @@ local function truncate_utf8(s, n)
     return utf8c.sub(s, 1, n)
 end
 
--- 统一分页批次状态：has_more 落账 + 标题三态。加载中=请求在进行（入口处置），
--- 完成后 has_more→“（还有更多）”，结束→正常/中止；EXPLORE 仅落账标题保持常态。
--- "没有更多了" 是 reader3 服务端的正常结束信号，按正常完成处理（不显示中止）
+local function is_cancel_message(msg)
+    return msg == "已取消" or msg == "user_cancelled" or msg == "cancelled"
+        or (type(msg) == "string" and msg:lower():find("cancel", 1, true) ~= nil)
+end
+
 function M:updateBatchState(mode, success, has_more, msg)
     local is_normal_end = msg == "没有更多了"
     if is_normal_end then has_more = nil end
@@ -167,11 +173,11 @@ function M:updateBatchState(mode, success, has_more, msg)
 end
 
 function M:attachCancelToMenu(cancel_func)
-    if not (self.results_menu and cancel_func) then return end
+    if not self.results_menu then return end
     local orig_close = self.results_menu.close_callback
     self.results_menu.close_callback = function()
         self:hideLoadingSpinner()
-        if cancel_func then cancel_func() end
+        if H.is_func(cancel_func) then cancel_func() end
         if orig_close then orig_close() end
     end
 end
@@ -197,6 +203,7 @@ end
 function M:withLoading(label, task_func, on_success, on_error)
     on_success = H.is_func(on_success) and on_success or function() end
     on_error = H.is_func(on_error) and on_error or function() end
+    if Backend:_isLocal() then Backend:closeDbManager() end
     TaskProg.loading(label, task_func, function(state, response)
         if state == true then
             Backend:HandleResponse(response, on_success, on_error)
@@ -214,6 +221,10 @@ function M:modifySuccessCallback(is_close_menu)
 end
 
 function M:onCloseMenu()
+    self._multi_search_request_id = (self._multi_search_request_id or 0) + 1
+    self._available_source_request_id = (self._available_source_request_id or 0) + 1
+    self._multi_search_cancel = nil
+    self._available_source_cancel = nil
     self.results = nil
     self.bookinfo = nil
     self.last_index = nil
@@ -223,7 +234,7 @@ function M:onCloseMenu()
     self.explore_url = nil
     self.explore_page = nil
     self.selected_source = nil
-    
+
     if self.results_menu and self.results_menu._container then
         UIManager:close(self.results_menu._container)
         self.results_menu._container = nil
@@ -259,16 +270,16 @@ function M:createBookSourceMenu(option)
         results_menu.key_events.FocusRight = nil
         results_menu.key_events.Right = {{ "Right" }}
     end
-    
+
     results_menu.onGotoPage = function(menu_self, new_page)
         return self:onMenuGotoPage(menu_self, new_page)
     end
 
-    results_menu.onMenuHold = results_menu.onMenuSelect  
-    
+    results_menu.onMenuHold = results_menu.onMenuSelect
+
     self.results_menu = results_menu
     self.results_menu._container = self:menuCenterShow(results_menu)
-    
+
     if option.show_parent then
         self.results_menu._container.show_parent = option.show_parent
     end
@@ -302,12 +313,11 @@ function M:generateItemTableFromResults(append_data)
             text = item_table_txt
         })
     end
-    
-    -- 结果有更多时追加"加载更多"按钮
+
     if self.has_more_api_results == true then
         table.insert(item_table, {
             source_index = 0,
-            text = Icons.FA_ARROW_DOWN .. " 点击加载更多 ..."
+            text = Icons.FA_ARROW_DOWN .. " 加载更多"
         })
     end
 
@@ -329,11 +339,13 @@ function M:changeSourceDialog(bookinfo, onReturnCallback)
 end
 
 function M:showBookInfo(bookinfo)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and bookinfo.name ~= "") then 
+    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and bookinfo.name ~= "") then
         return MessageBox:error("书籍信息错误")
     end
 
-    local button_text = (self.call_mode == "SEARCH" or self.call_mode == "EXPLORE") and '添加' or '换源'
+    local download_book = Backend:isDownloadBook(bookinfo)
+    local button_text = download_book and '下载整本'
+        or ((self.call_mode == "SEARCH" or self.call_mode == "EXPLORE") and '添加' or '换源')
 
     local BookDetailsDialog = require("Legado/BookDetailsDialog")
     local dialog = BookDetailsDialog:new{
@@ -342,7 +354,9 @@ function M:showBookInfo(bookinfo)
             {
                 text = button_text,
                 callback = function()
-                    if self.call_mode == "SEARCH" or self.call_mode == "EXPLORE" then
+                    if download_book then
+                        LocalExtension.downloadBook(bookinfo)
+                    elseif self.call_mode == "SEARCH" or self.call_mode == "EXPLORE" then
                         self:addBookToLibrary(bookinfo)
                     else
                         self:changeBookSource(bookinfo)
@@ -354,66 +368,31 @@ function M:showBookInfo(bookinfo)
     UIManager:show(dialog)
 end
 
-function M:changeBookSource(new_bookinfo)
-    if not (H.is_tbl(new_bookinfo) and H.is_str(new_bookinfo.bookUrl) and H.is_str(new_bookinfo.origin)) then
-        return MessageBox:error("换源参数错误")
-    end
-
-    self:withLoading("正在换源 ", function()
-        return Backend:changeBookSource({
-            bookUrl = self.bookinfo.bookUrl,
-            newUrl = new_bookinfo.bookUrl,
-            bookSourceUrl = new_bookinfo.origin,
-            name = self.bookinfo.name,
-            author = self.bookinfo.author,
-        })
-    end, function(_)
-        MessageBox:notice('换源成功')
-        self:modifySuccessCallback(true)
-    end, function(err_msg)
-        MessageBox:notice(err_msg or '换源失败')
-    end)
-end
-
-function M:addBookToLibrary(bookinfo)
-    if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name)) then
-        return MessageBox:error("添加书籍参数错误")
-    end
-    self:withLoading("正在保存书籍 ", function()
-        return Backend:saveBook(bookinfo)
-    end, function(_)
-        MessageBox:notice('已加入书架')
-        self:modifySuccessCallback(true)
-    end, function(err_msg)
-        MessageBox:notice(err_msg or '保存失败')
-    end)
-end
-
 local function validateInput(text)
     return type(text) == 'string' and text:gsub("%s+", "") ~= ""
 end
 
 function M:searchBookDialog(onReturnCallback, def_input)
+    if not Backend:canUseBookDiscovery() then
+        return MessageBox:notice("本地接管解析模式下不支持添加书籍、搜索和探索")
+    end
+
     local inputText
     local dialog
-
     self:init()
-
     local last_search_input = PlgState.last_search_input
     if last_search_input and not def_input then
         def_input = last_search_input
     end
-    
     self.call_mode = "SEARCH"
     self.on_success_callback = onReturnCallback
-
     dialog = MessageBox:input(
         "请键入要搜索的书籍或作者名称：\n(多源搜索可使用 '=书名' 语法精确匹配)", nil, {
-            title = '添加书籍',
+            title = '搜书',
             input_hint = "如：剑来",
             input = def_input,
             buttons = {{{
-                text = "书源发现",
+                text = "发现",
                 callback = function()
                     UIManager:close(dialog)
                     self:exploreBookDialog()
@@ -423,7 +402,6 @@ function M:searchBookDialog(onReturnCallback, def_input)
                 callback = function()
                     inputText = dialog:getInputText()
                     inputText = util.trim(inputText)
-
                     if not validateInput(inputText) then
                         return MessageBox:notice("请输入有效书籍或作者名称")
                     end
@@ -440,7 +418,6 @@ function M:searchBookDialog(onReturnCallback, def_input)
                 callback = function()
                     inputText = dialog:getInputText()
                     inputText = util.trim(inputText)
-
                     if not validateInput(inputText) then
                         return MessageBox:notice("请输入有效书籍或作者名称")
                     end
@@ -468,10 +445,13 @@ function M:handleSingleSourceSearch(searchText)
         local book_source_name = item.name
         self:withLoading(string.format("%s 查询中 ", item.text or ""), function()
             return Backend:searchBookSingle({
-                search_text = searchText, 
+                search_text = searchText,
                 book_source_url = book_source_url,
             })
         end, function(data)
+            if not (H.is_tbl(data) or H.is_str(data)) then
+                return MessageBox:notice('服务器返回数据错误')
+            end
             if #data == 0 or not H.is_tbl(data[1]) then
                 return MessageBox:notice('未找到相关书籍')
             end
@@ -480,7 +460,7 @@ function M:handleSingleSourceSearch(searchText)
             self.is_single_source_search = true
             self:createBookSourceMenu({
                 title = string.format('单源搜索 [%s]', book_source_name),
-                subtitle = string.format("key: %s", searchText),
+                subtitle = string.format("关键词：%s", searchText),
                 show_parent = sourceMenu.show_parent,
             })
         end, function(err_msg)
@@ -490,13 +470,22 @@ function M:handleSingleSourceSearch(searchText)
 end
 
 function M:handleMultiSourceSearch(search_text, is_more_call)
-    -- 续搜防重入：加载中重复触发（下一页/item 加载更多）直接忽略
     if is_more_call and self.is_loading then return end
     if not (H.is_str(search_text) and search_text ~= "") then
         MessageBox:notice("参数错误")
         return
     end
-    
+
+    if not is_more_call then
+        self._multi_search_request_id = (self._multi_search_request_id or 0) + 1
+        local previous_cancel = self._multi_search_cancel
+        self._multi_search_cancel = nil
+        if H.is_func(previous_cancel) then previous_cancel() end
+    elseif not self._multi_search_request_id then
+        self._multi_search_request_id = 1
+    end
+    local request_id = self._multi_search_request_id
+
     self.call_mode = "SEARCH"
     self.search_text = search_text
     self.is_loading = true
@@ -510,33 +499,37 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
     end
 
     self:showLoadingSpinner(string.format("正在搜索[%s]", search_text))
+    local t_search_start = Probe.start("Source", "多源搜索", search_text, string.format("(last_index: %s, is_more: %s)", tostring(self.last_index), tostring(is_more_call or false)))
     if not is_more_call then
         self:createBookSourceMenu({
             title = '多源搜索 (加载中...)',
-            subtitle = string.format("key: %s", search_text),
+            subtitle = string.format("关键词：%s", search_text),
         })
     else
-        -- 续搜
         self:updateMenuTitle('多源搜索 (加载中...)')
     end
-    -- forceRePaint：否则会被后续计算阻塞不刷新
     UIManager:forceRePaint()
 
     local cancel_func
+    local finished = false
 
     cancel_func = Backend:searchBookMulti({
         search_text = search_text,
         last_index = self.last_index
     }, function(chunk)
+        if request_id ~= self._multi_search_request_id then return end
         self:hideLoadingSpinner()
+        Probe.event("Source", "搜索分片推流", string.format("chunk_size=%d total=%d last_index=%s", #(chunk or {}), #(self.results or {}), tostring(self.last_index or "-")))
         if self.results_menu and UIManager:isWidgetShown(self.results_menu._container) then
             self:refreshItems(false, chunk)
         end
     end, function(success, msg, last_index)
+        if request_id ~= self._multi_search_request_id then return end
+        finished = true
         self.is_loading = false
+        if self._multi_search_cancel == cancel_func then self._multi_search_cancel = nil end
         cancel_func = nil
         self:hideLoadingSpinner()
-        -- reader3 SSE 续搜推进 lastIndex；其他端第三参 nil → 永不触发
         local has_more
         if success and H.is_num(last_index) and last_index >= 0 and self.last_index ~= last_index then
             self.last_index = last_index
@@ -548,29 +541,48 @@ function M:handleMultiSourceSearch(search_text, is_more_call)
         if self.results_menu and UIManager:isWidgetShown(self.results_menu._container) then
             self:refreshItems(false)
         end
-        local is_cancel = clean_msg == "已取消" or clean_msg == "user_cancelled" or clean_msg == "cancelled"
-            or (type(clean_msg) == "string" and clean_msg:find("cancel"))
+        local is_cancel = is_cancel_message(clean_msg)
+        if success then
+            Probe.done("Source", "多源搜索", search_text, t_search_start, "200 OK", string.format("%d items", #(self.results or {})), string.format("has_more=%s", tostring(has_more or false)))
+        elseif is_cancel then
+            Probe.retry("Source", "多源搜索取消", search_text, t_search_start, clean_msg or "cancelled")
+        else
+            Probe.fail("Source", "多源搜索", search_text, t_search_start, clean_msg or "搜索失败")
+        end
         if not success and not is_cancel and clean_msg ~= "没有更多了" then
             MessageBox:notice(clean_msg or "搜索失败")
+        elseif success and clean_msg then
+            MessageBox:notice(clean_msg)
         elseif success and self.results and #self.results == 0 then
             MessageBox:notice('未找到相关书籍')
         end
     end)
-    self:attachCancelToMenu(cancel_func)
+    if not finished then self._multi_search_cancel = cancel_func end
+    self:attachCancelToMenu(function()
+        if request_id == self._multi_search_request_id then
+            self._multi_search_request_id = request_id + 1
+            self._multi_search_cancel = nil
+        end
+        if H.is_func(cancel_func) then cancel_func() end
+    end)
 end
 
 function M:handleAvailableBookSource(bookinfo, is_more_call)
-    -- 续搜防重入
     if is_more_call and self.is_loading then return end
 
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl)) then
         return MessageBox:error('参数错误')
     end
 
+    self._available_source_request_id = (self._available_source_request_id or 0) + 1
+    local request_id = self._available_source_request_id
+    local previous_cancel = self._available_source_cancel
+    self._available_source_cancel = nil
+    if H.is_func(previous_cancel) then previous_cancel() end
+
     self.call_mode = "CHANGE_SOURCE"
     self.bookinfo = bookinfo
     self.is_loading = true
-
     if not is_more_call then
         self.results = {}
         self.last_index = -1
@@ -588,30 +600,53 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
     }
 
     self:showLoadingSpinner(string.format("搜索[%s]可用书源", bookinfo.name))
+    local t_source_start = Probe.start("Source", "检索可用书源", bookinfo.name, string.format("(author: %s, origin: %s, is_more: %s)", tostring(bookinfo.author or "-"), tostring(bookinfo.origin or bookinfo.originName or "-"), tostring(is_more_call or false)))
     if not is_more_call then
         self:createBookSourceMenu({
-            title = '换源 (加载中...)',
+            title = '正在查找书源…',
             subtitle = string.format("%s (%s)", bookinfo.name, bookinfo.author),
         })
     else
-        self:updateMenuTitle('换源 (加载中...)')
+        self:updateMenuTitle('正在查找书源…')
     end
     UIManager:forceRePaint()
 
     local cancel_func
+    local finished = false
 
     cancel_func = Backend:getAvailableBookSource(options, function(success, data, msg, last_index)
+        if request_id ~= self._available_source_request_id then return end
+        finished = true
         self.is_loading = false
+        if self._available_source_cancel == cancel_func then self._available_source_cancel = nil end
         cancel_func = nil
         self:hideLoadingSpinner()
+
+        local Error = require("Legado.Helper.Error")
+        local clean_msg = msg ~= nil and Error.extract_message(msg)
+            or (not success and Error.extract_message(data) or nil)
         if not success then
-            self:updateBatchState("CHANGE_SOURCE", false, nil, msg or data or "加载失败")
-            return MessageBox:error(msg or data or '加载失败')
+            if is_cancel_message(clean_msg) then
+                Probe.retry("Source", "检索可用书源取消", bookinfo.name, t_source_start, clean_msg or "cancelled")
+                return
+            end
+            self:updateBatchState("CHANGE_SOURCE", false, nil, clean_msg or "加载失败")
+            Probe.fail("Source", "检索可用书源", bookinfo.name, t_source_start, clean_msg or "加载失败")
+            return MessageBox:error(clean_msg or '加载失败')
         end
         if not (H.is_tbl(data) and H.is_tbl(data.list)) then
+            Probe.fail("Source", "检索可用书源", bookinfo.name, t_source_start, "返回书源数据结构异常")
             return MessageBox:notice('返回书源错误')
         end
         if #data.list == 0 and not is_more_call then
+            if data.partial then
+                self:updateBatchState("CHANGE_SOURCE", true, nil, clean_msg)
+                self:updateMenuTitle("换源（部分结果）")
+                Probe.done("Source", "检索可用书源", bookinfo.name, t_source_start, "206 PARTIAL", "0 sources", clean_msg)
+                return MessageBox:notice(clean_msg and ("当前范围未找到可用源；" .. clean_msg)
+                    or "仅搜索部分书源，未找到可用源")
+            end
+            Probe.done("Source", "检索可用书源", bookinfo.name, t_source_start, "404 NOT_FOUND", "0 sources")
             return MessageBox:error('没有找到可用源')
         end
 
@@ -624,83 +659,154 @@ function M:handleAvailableBookSource(bookinfo, is_more_call)
         if is_more_call ~= true then
             self.results = data.list
         else
-            if H.is_tbl(data) and H.is_tbl(data.list) then
-                for _, item in ipairs(data.list) do
-                    table.insert(self.results, item)
-                end
+            for _, item in ipairs(data.list) do
+                table.insert(self.results, item)
             end
         end
-        self:updateBatchState("CHANGE_SOURCE", true, has_more, msg or data)
-        -- 重新生成列表（菜单创建时 item_table 为空）
+        self:updateBatchState("CHANGE_SOURCE", true, has_more, clean_msg or data)
+        if data.partial then self:updateMenuTitle("换源（部分结果）") end
+        Probe.done("Source", "检索可用书源", bookinfo.name, t_source_start,
+            data.partial and "206 PARTIAL" or "200 OK",
+            string.format("%d sources", #(self.results or {})),
+            data.partial and tostring(clean_msg or "搜索范围受限") or string.format("has_more=%s", tostring(has_more or false)))
         if self.results_menu and UIManager:isWidgetShown(self.results_menu._container) then
             self:refreshItems(false)
         end
     end, function(chunk)
+        if request_id ~= self._available_source_request_id then return end
         self:hideLoadingSpinner()
         if self.results_menu and UIManager:isWidgetShown(self.results_menu._container) then
             self:refreshItems(false, chunk)
         end
+        Probe.event("Source", "书源分片推流", string.format("chunk_size=%d total=%d", #(chunk or {}), #(self.results or {})))
     end)
 
-    self:attachCancelToMenu(cancel_func)
-    if cancel_func then
-        self._available_source_cancel = cancel_func
-    end
+    if not finished then self._available_source_cancel = cancel_func end
+    self:attachCancelToMenu(function()
+        if request_id == self._available_source_request_id then
+            self._available_source_request_id = request_id + 1
+            self._available_source_cancel = nil
+        end
+        if H.is_func(cancel_func) then cancel_func() end
+    end)
 end
 
 function M:autoChangeSource(bookinfo, _)
     if not H.is_tbl(bookinfo) or not H.is_str(bookinfo.bookUrl) then
         return MessageBox:error('参数错误')
     end
+    local t_auto_start = Probe.start("Source", "自动换源", bookinfo.name, string.format("(origin: %s)", tostring(bookinfo.origin or bookinfo.originName or "-")))
     self:withLoading("正在换源 ", function()
         return Backend:autoChangeBookSource(bookinfo)
-    end, function(_)
+    end, function()
+        Probe.done("Source", "自动换源", bookinfo.name, t_auto_start, "200 OK")
         MessageBox:notice('更换成功')
         self:modifySuccessCallback(true)
     end, function(err_msg)
+        Probe.fail("Source", "自动换源", bookinfo.name, t_auto_start, tostring(err_msg))
         MessageBox:error(err_msg or '操作失败')
     end)
 end
 
-function M:selectBookSource(selectCallback)
-    self:withLoading("获取源列表 ", function()
-        return Backend:getBookSourcesList()
+function M:selectBookSource(selectCallback, options)
+    options = options or {}
+    self:init()
+    Backend:closeDbManager()
+    self:withLoading(options.loading_text or "获取源列表 ", function()
+        return Backend:getBookSourcesListCached()
     end, function(data)
         if not H.is_tbl(data) then
             return MessageBox:notice('返回源数据错误')
         end
         if #data == 0 then
-            return MessageBox:error('没有可用源')
+            return MessageBox:error(options.empty_text or '没有可用源')
         end
+
+        Backend:BookSourcesAndRulesAsync()
 
                 local source_list_menu_table = {}
                 local source_list_container
                 local with_explore_url = self.call_mode == "EXPLORE"
 
                 for _, v in ipairs(data) do
-                    -- reader3 无 enabled 字段
                     if H.is_tbl(v) and H.is_str(v.bookSourceName) and H.is_str(v.bookSourceUrl) and (not v.enabled or v.enabled == true) then
                         if with_explore_url and (not v.enabledExplore and not v.exploreUrl) then
                             goto continue
                         end
+                        local group = (H.is_str(v.bookSourceGroup) and v.bookSourceGroup ~= "") and string.format(" [%s]", v.bookSourceGroup) or ""
+                        local login_tag = (options.sort_has_login and v.hasLogin) and " [登录]" or ""
                         table.insert(source_list_menu_table, {
-                            text = string.format("%s [%s]", v.bookSourceName, v.bookSourceGroup or ""),
+                            text = string.format("%s%s%s", v.bookSourceName, group, login_tag),
                             url = v.bookSourceUrl,
                             name = v.bookSourceName,
+                            bookSourceUrl = v.bookSourceUrl,
+                            bookSourceName = v.bookSourceName,
+                            bookSourceGroup = H.is_str(v.bookSourceGroup) and v.bookSourceGroup or nil,
+                            hasLogin = v.hasLogin and true or false,
+                            _orig_idx = #source_list_menu_table + 1,
                         })
                         ::continue::
                     end
+                end
+
+                if options.sort_has_login then
+                    table.sort(source_list_menu_table, function(a, b)
+                        local a_login = a.hasLogin and 1 or 0
+                        local b_login = b.hasLogin and 1 or 0
+                        if a_login ~= b_login then
+                            return a_login > b_login
+                        end
+                        return (a._orig_idx or 0) < (b._orig_idx or 0)
+                    end)
                 end
 
                 if #source_list_menu_table == 0 and with_explore_url then
                     return MessageBox:notice("没有找到支持探索功能的书源")
                 end
 
-                source_list_container = self:menuCenterShow(self:createMenu{
-                    title = "请指定要操作的源",
-                    subtitle = string.format("key: %s", self.search_text or ""),
+                local all_source_items = source_list_menu_table
+                local active_search_query = ""
+                local source_list_menu
+                local function applySourceFilter(query)
+                    active_search_query = type(query) == "string" and util.trim(query) or ""
+                    local normalized_query = string.lower(active_search_query)
+                    local filtered_items = {}
+
+                    for _, item in ipairs(all_source_items) do
+                        local matches = normalized_query == ""
+                            or string.find(string.lower(item.bookSourceName), normalized_query, 1, true)
+                            or string.find(string.lower(item.bookSourceUrl), normalized_query, 1, true)
+                            or (item.bookSourceGroup
+                                and string.find(string.lower(item.bookSourceGroup), normalized_query, 1, true))
+                        if matches then
+                            table.insert(filtered_items, item)
+                        end
+                    end
+
+                    source_list_menu:switchItemTable(nil, filtered_items, nil)
+                    if #filtered_items == 0 then
+                        MessageBox:notice("没有匹配的书源")
+                    end
+                end
+
+                local default_subtitle = Backend:_isLocal() and "点击选择书源" or string.format("关键词：%s", self.search_text or "")
+                source_list_menu = self:createMenu{
+                    title = options.title or "选择书源",
+                    subtitle = options.subtitle or default_subtitle,
                     item_table = source_list_menu_table,
                     items_per_page = 15,
+                    title_bar_left_icon = options.title_bar_left_icon == nil and "appbar.search" or options.title_bar_left_icon,
+                    onLeftButtonTap = options.onLeftButtonTap or function()
+                        MessageBox:input("请输入书源名称、URL 或分组：", function(query)
+                            if query ~= nil then
+                                applySourceFilter(query)
+                            end
+                        end, {
+                            title = "筛选书源",
+                            input_hint = "名称、URL 或分组",
+                            input = active_search_query,
+                        })
+                    end,
                     onMenuSelect = function(menu_self, item)
                         if H.is_func(selectCallback) then
                             selectCallback(item, menu_self)
@@ -710,11 +816,93 @@ function M:selectBookSource(selectCallback)
                         UIManager:close(source_list_container)
                         source_list_container = nil
                     end
-                })
+                }
+                source_list_menu.onLeftButtonHold = options.onLeftButtonHold or function()
+                    local started, err = Backend:BookSourcesAndRulesAsync(true)
+                    if started == false then
+                        return MessageBox:notice(tostring(err or "当前模式不支持刷新书源"))
+                    end
+                    MessageBox:notice("已加入书源刷新任务")
+                end
+                if options.onMenuHold then
+                    source_list_menu.onMenuHold = options.onMenuHold
+                end
+                source_list_container = self:menuCenterShow(source_list_menu)
 
     end, function(err_msg)
         MessageBox:notice('列表请求失败:', tostring(err_msg))
     end)
+end
+
+function M:showSourceContextMenu(item)
+    if not item then return end
+    local ButtonDialog = require("ui/widget/buttondialog")
+    local dialog
+    local source_name = item.bookSourceName or item.name or "当前书源"
+    local source_actions = {
+        {
+            text = "测试",
+            callback = function()
+                UIManager:close(dialog)
+                LocalExtension.testSource(item)
+            end,
+        },
+    }
+    local has_login = item.hasLogin
+    if has_login == nil and Backend.dbManager
+            and type(Backend.dbManager.getBookSourceByUrl) == "function" then
+        local source = Backend.dbManager:getBookSourceByUrl(Backend:getCurrentBookShelfId(), item.bookSourceUrl or item.url)
+        has_login = require("Legado.Helper.BookSourceLogin").hasLogin(source)
+    end
+    if has_login == true then
+        source_actions[#source_actions + 1] = {
+            text = "登录",
+            callback = function()
+                UIManager:close(dialog)
+                LocalExtension.showSourceLogin(item)
+            end,
+        }
+    end
+    local function clear_source(action, label)
+        UIManager:close(dialog)
+        TaskProg.loading("正在" .. label, function()
+            return Backend:loginBookSource({bookSourceUrl = item.bookSourceUrl or item.url, action = action})
+        end, function(state, response)
+            if state ~= true then return end
+            Backend:HandleResponse(response, function(result)
+                MessageBox:notice(result.message)
+            end, function(err)
+                MessageBox:error(label .. "失败", tostring(err))
+            end)
+        end, nil, true)
+    end
+    local buttons = {}
+    for _, action in ipairs(source_actions) do buttons[#buttons + 1] = {action} end
+    buttons[#buttons + 1] = {{text = "清除cache", callback = function() clear_source("clear_cache", "清除cache") end}}
+    buttons[#buttons + 1] = {{text = "清除cookie", callback = function() clear_source("logout", "清除cookie") end}}
+    buttons[#buttons + 1] = {{text = "取消", callback = function() UIManager:close(dialog) end}}
+    dialog = ButtonDialog:new{
+        title = "书源操作：" .. source_name,
+        buttons = buttons,
+    }
+    UIManager:show(dialog)
+end
+
+function M:openLocalBookSourceSettings()
+    if not Backend:_isLocal() then
+        return MessageBox:notice("远程模式请在阅读 App 内登录书源")
+    end
+    self:selectBookSource(function(item)
+        if item then
+            self:showSourceContextMenu(item)
+        end
+    end, {
+        title = "本地书源设置",
+        subtitle = "点击设置",
+        loading_text = "获取书源列表 ",
+        empty_text = "本地没有可用书源",
+        sort_has_login = true,
+    })
 end
 
 function M:changeBookSource(bookinfo)
@@ -722,21 +910,30 @@ function M:changeBookSource(bookinfo)
         MessageBox:notice('参数错误')
         return
     end
-    -- fix legado app 只支持 save
-    local new_bookinfo = self.bookinfo
-    new_bookinfo.bookSourceUrl = bookinfo.origin
-    new_bookinfo.newUrl = bookinfo.bookUrl
+    local new_bookinfo = {
+        bookUrl = self.bookinfo.bookUrl,
+        newUrl = bookinfo.bookUrl,
+        bookSourceUrl = bookinfo.origin,
+        name = self.bookinfo.name,
+        author = self.bookinfo.author,
+        originName = bookinfo.originName,
+    }
 
     if not (self.call_mode ~= "SEARCH" and H.is_str(self.bookinfo.bookUrl) and H.is_str(bookinfo.bookUrl) and H.is_str(bookinfo.origin)) then
         MessageBox:notice('参数错误')
         return
     end
+    local target_source_name = bookinfo.originName or bookinfo.origin or "未知源"
+    local t_change_start = Probe.start("Source", "执行换源", self.bookinfo.name, string.format("-> 新源: %s", target_source_name))
     Backend:closeDbManager()
     self:withLoading("更换中 ", function()
         return Backend:changeBookSource(new_bookinfo)
-    end, function(_)
+    end, function()
+        Probe.done("Source", "执行换源", self.bookinfo.name, t_change_start, "200 OK", nil, string.format("新源: %s", target_source_name))
         MessageBox:notice('换源成功')
+        self:modifySuccessCallback(true)
     end, function(err_msg)
+        Probe.fail("Source", "执行换源", self.bookinfo.name, t_change_start, tostring(err_msg))
         MessageBox:error(err_msg or '操作失败')
     end)
 end
@@ -745,13 +942,18 @@ function M:addBookToLibrary(bookinfo)
     if self.call_mode ~= "SEARCH" and self.call_mode ~= "EXPLORE" then
         return MessageBox:notice('参数错误')
     end
+    local book_name = (H.is_tbl(bookinfo) and bookinfo.name) or "未知书籍"
+    local source_name = (H.is_tbl(bookinfo) and (bookinfo.originName or bookinfo.origin)) or "-"
+    local t_add_start = Probe.start("Source", "书籍入库", book_name, string.format("(source: %s, url: %s)", source_name, tostring(bookinfo.bookUrl or "-")))
     Backend:closeDbManager()
     self:withLoading("添加中 ", function()
         return Backend:addBookToLibrary(bookinfo)
-    end, function(_)
+    end, function()
+        Probe.done("Source", "书籍入库", book_name, t_add_start, "200 OK", nil, string.format("源: %s", source_name))
         MessageBox:notice('添加成功')
         self:modifySuccessCallback(true)
     end, function(err_msg)
+        Probe.fail("Source", "书籍入库", book_name, t_add_start, tostring(err_msg))
         MessageBox:error(err_msg or '操作失败')
     end)
 end
@@ -761,7 +963,7 @@ function M:exploreBookDialog(onReturnCallback)
     self.on_success_callback = onReturnCallback
     self.call_mode = "EXPLORE"
     self.search_text = "书源探索"
-    
+
     self:selectBookSource(function(item, _)
         if not (H.is_tbl(item) and H.is_str(item.url)) then return end
 
@@ -790,20 +992,20 @@ function M:selectExploreCategory(source)
         local json = require("json")
         local success, categories = pcall(json.decode, explore_url, json.decode.simple)
         if not (success and H.is_tbl(categories)) then
-            
+
             categories = {}
             local normalized = explore_url
                 :gsub("&&", "\n")
                 :gsub("\r", "\n")
                 :gsub("\n+", "\n")
 
-            for title, url in normalized:gmatch("([^%c]+)::%s*([^\n]+)") do
-                title = title:match("^%s*(.-)%s*$")
-                url = url:match("^%s*(.-)%s*$")
+            for raw_title, raw_url in normalized:gmatch("([^%c]+)::%s*([^\n]+)") do
+                local title = raw_title:match("^%s*(.-)%s*$")
+                local url = raw_url:match("^%s*(.-)%s*$")
                 table.insert(categories, { title = title, url = url })
             end
         end
-    
+
         if not (H.is_tbl(categories) and #categories > 0) then
             return MessageBox:error("此源没有有效探索配置")
         end
@@ -816,7 +1018,7 @@ function M:selectExploreCategory(source)
 
         for i, category in ipairs(categories) do
             if H.is_str(category.title) and category.title ~= "" then
-                
+
                 is_title_line = not (H.is_str(category.url) and category.url ~= "")
                 if not is_title_line then
                     table.insert(row, {
@@ -837,7 +1039,7 @@ function M:selectExploreCategory(source)
                         callback = function() end,
                         enabled = false,
                     }})
-                end   
+                end
             end
         end
 
@@ -847,7 +1049,7 @@ function M:selectExploreCategory(source)
 
         local Font = require("ui/font")
         category_dialog = require("ui/widget/buttondialog"):new{
-            title = string.format("探索 - %s", bookSourceName or ""),
+            title = string.format("发现 · %s", bookSourceName or ""),
             title_align = "center",
             title_face = Font:getFace("smallffont"),
             info_face = Font:getFace("ffont"),
@@ -877,13 +1079,13 @@ function M:handleExploreBook(source_info, url, is_more_call)
     end
 
     self.explore_page = is_more_call and (self.explore_page + 1) or 1
-    
+
     local options = {
         bookSourceUrl = source_info.bookSourceUrl,
         ruleFindUrl = url,
         page = self.explore_page,
     }
-  
+
     self:withLoading("正在加载书籍...", function()
        return Backend:exploreBook(options)
     end, function(data)
@@ -894,20 +1096,18 @@ function M:handleExploreBook(source_info, url, is_more_call)
            return MessageBox:notice('没有更多书籍')
         end
         self:updateBatchState("EXPLORE", true, #data > 0, nil)
-        
-        -- /exploreBook 返回标准 bookinfo, 不需要添加 origin originName
+
         if is_more_call ~= true then
             self.results = data
             self.explore_url = url
             self:createBookSourceMenu({
-                title = string.format("探索 - %s", source_info.bookSourceName or ""),
+                title = string.format("发现 · %s", source_info.bookSourceName or ""),
                 subtitle = url,
             })
         else
             self:refreshItems(false, data)
         end
     end, function(err_msg)
-        -- 统一终止信号（"没有更多了"关闭 has_more）
         self:updateBatchState("EXPLORE", true, self.has_more_api_results, err_msg)
         MessageBox:notice(err_msg or '加载失败')
     end)

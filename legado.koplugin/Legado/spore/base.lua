@@ -10,6 +10,7 @@ local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local load_script = require("Legado.Helper.Loader").load_script
 local errHandler = require("Legado.Helper.Error")
+local Probe = require("Legado.Helper.Probe")
 
 local M = {
     name = "base",
@@ -71,19 +72,19 @@ function M:init()
     local _spec, err_msg = load_script("Legado.spore." .. spec_name)
     if not _spec then
         logger.err("LegadoSpec loading failed", err_msg)
-        return 
+        return
     end
     local is_debug = false
     if is_debug then
         Spore.debug = {
             write = function(def, ...)
                 logger.info(table.concat({...}))
-            end  
+            end
         }
     end
     self.client = Spore.new_from_lua(_spec, { base_url = self.settings.server_address .. '/' })
     self._need_login = H.is_func(self.client.login) and (self.settings.reader3_un or "") ~= ""
-    
+
     if self._need_login then
         self.tokenManager = AuthToken:new(self:getTokenKey())
         package.loaded["Spore.Middleware.Legado3Auth"] = require("Legado.spore.Middleware.Legado3Auth")
@@ -138,39 +139,43 @@ function M:resetAndEnableMiddlewares(includeAuth)
     self.client:enable("Format.UrlEncoded")
     self.client:enable("Format.JSON")
     self.client:enable("FixJSON")
-    self.client:enable("UserAgent", { 
-        useragent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" 
+    self.client:enable("UserAgent", {
+        useragent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     })
 end
-
-local Probe = require("Legado.Helper.Probe")
 
 function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
     local server_address = self.settings and self.settings.server_address or ""
     logName = logName or 'handleResponse'
     opts = opts or {}
-  
+
     local timeouts = opts.timeouts
     if not H.is_tbl(timeouts) or not H.is_num(timeouts[1]) or not H.is_num(timeouts[2]) then
         timeouts = {8, 12}
     end
-  
-    local full_url = string.format("%s/%s", tostring(server_address), tostring(logName))
-    local retry_tag = isRetry and " (retry)" or ""
-    local t_start = Probe.start("Spore", logName, full_url, string.format("(timeout: block=%ds, total=%ds)%s", timeouts[1], timeouts[2], retry_tag))
+
+    local function full_url()
+        return string.format("%s/%s", tostring(server_address), tostring(logName))
+    end
+    local t_start = Probe.start("Spore", logName, full_url, function()
+        return string.format("(timeout: block=%ds, total=%ds)%s",
+            timeouts[1], timeouts[2], isRetry and " (retry)" or "")
+    end)
 
     self:resetAndEnableMiddlewares(true)
-  
+
     socketutil:set_timeout(timeouts[1], timeouts[2])
+    local spore_probe_token = Probe.spore_enter(logName)
     local status, res = errHandler.pcall(requestFunc)
+    Probe.spore_leave(spore_probe_token, status and "return" or "error")
     socketutil:reset_timeout()
-  
+
     if not (status and H.is_tbl(res) and H.is_tbl(res.body)) then
         local err_msg = errHandler.map_message(res)
         Probe.fail("Spore", logName, full_url, t_start, err_msg)
         return nil, string.format("Web 服务: %s", err_msg)
     end
-  
+
     if isRetry ~= true and res.body.isSuccess == false and self:isNeedLogin(res.body) then
         if self.tokenManager then
             self.tokenManager:clear()
@@ -182,9 +187,11 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
 
     if res.body.isSuccess == true then
         if not res.body.data then res.body.data = {} end
-        Probe.done("Spore", logName, full_url, t_start, "200 OK", Probe.format_summary(res.body.data))
+        Probe.done("Spore", logName, full_url, t_start, "200 OK", function()
+            return Probe.format_summary(res.body.data)
+        end)
         if H.is_func(callback) then
-            return callback(res.body) 
+            return callback(res.body)
         end
         return res.body.data
     else
@@ -194,84 +201,240 @@ function M:handleResponse(requestFunc, callback, opts, logName, isRetry)
     end
 end
 
-function M:unimplementedMethod(methodName)
-    return nil, (methodName or "该功能") .. " 暂不支持"
+function M:unimplementedMethod(methodName, callback, custom_msg)
+    local msg = custom_msg or "当前服务端不支持此功能"
+    local resp = {
+        isSuccess = false,
+        state = false,
+        error = msg,
+        message = msg,
+        type = "ERROR",
+        data = nil,
+    }
+    if type(callback) == "function" then
+        callback(resp)
+    end
+    return nil, msg, resp
+end
+
+local BOOK_FIELD_ALIASES = {
+    name            = { "name", "bookName", "book_name", "title" },
+    bookUrl         = { "bookUrl", "bookURL", "book_url", "url", "bookUrlNew" },
+    author          = { "author", "authors", "authorName", "author_name" },
+    origin          = { "origin", "sourceUrl", "source_url", "bookSourceUrl", "from" },
+    originName      = { "originName", "origin_name", "sourceName", "source_name", "bookSourceName" },
+    intro           = { "intro", "description", "desc", "summary", "introText" },
+    coverUrl        = { "coverUrl", "coverURL", "cover_url", "cover", "img", "picUrl", "thumbnail" },
+    wordCount       = { "wordCount", "word_count", "words", "totalWords" },
+    kind            = { "kind", "category", "typeName", "bookType", "class" },
+    totalChapterNum = { "totalChapterNum", "total_chapter_num", "chapterCount", "totalChapters" },
+    lastChapter     = { "lastChapter", "last_chapter", "latestChapter", "newChapter" },
+    updateTime      = { "updateTime", "update_time", "updatedAt", "lastUpdateTime", "lastUpdate" },
+    status          = { "status", "bookStatus", "serializeStatus" },
+    btype           = { "btype", "bookTypeId", "type" },
+}
+
+function M:_norm_book_fields(book)
+    if type(book) ~= "table" then return book end
+    for target, aliases in pairs(BOOK_FIELD_ALIASES) do
+        if book[target] == nil then
+            for _, alias in ipairs(aliases) do
+                if book[alias] ~= nil then
+                    book[target] = book[alias]
+                    break
+                end
+            end
+        end
+    end
+    return book
+end
+
+function M:_norm_paged(raw)
+    if type(raw) ~= "table" then return raw end
+    if type(raw.list) == "table" then
+        if not H.is_num(raw.lastIndex) then raw.lastIndex = -1 end
+        for i, book in ipairs(raw.list) do
+            raw.list[i] = self:_norm_book_fields(book)
+        end
+        return raw
+    end
+    for i, book in ipairs(raw) do
+        raw[i] = self:_norm_book_fields(book)
+    end
+    return { list = raw, lastIndex = -1 }
+end
+
+function M:_norm_paged_raw(raw)
+    if type(raw) ~= "table" then return raw end
+    if type(raw.list) == "table" then
+        if not H.is_num(raw.lastIndex) then raw.lastIndex = -1 end
+        return raw
+    end
+    return { list = raw[1] ~= nil and raw or {}, lastIndex = -1 }
+end
+
+function M:_norm_explore(raw)
+    if type(raw) ~= "table" then return raw end
+    raw.bookSourceUrl = raw.bookSourceUrl or raw.BookSourceUrl or ""
+    return raw
+end
+
+function M:_norm_content(raw)
+    if type(raw) == "table" and type(raw.text) == "string" then
+        return raw.text
+    end
+    return raw
+end
+
+function M:_norm_book_list(raw)
+    if type(raw) ~= "table" then return raw end
+    if type(raw.list) == "table" then
+        for i, book in ipairs(raw.list) do
+            raw.list[i] = self:_norm_book_fields(book)
+        end
+        return raw.list
+    end
+    for i, book in ipairs(raw) do
+        raw[i] = self:_norm_book_fields(book)
+    end
+    return raw
+end
+
+function M:_norm_book(raw)
+    if type(raw) ~= "table" then return raw end
+    local book
+    if type(raw.bookinfo) == "table" then
+        book = raw.bookinfo[1] or raw.bookinfo
+    elseif type(raw.data) == "table" then
+        book = raw.data[1] or raw.data
+    else
+        book = raw
+    end
+    if type(book) ~= "table" or next(book) == nil then
+        return nil
+    end
+    return self:_norm_book_fields(book)
+end
+
+local NORM_MAP = {
+    searchBookMulti          = "_norm_paged",
+    getAvailableBookSource   = "_norm_paged_raw",
+    exploreBook              = "_norm_book_list",
+    searchBookSingle         = "_norm_book_list",
+    getBookshelf             = "_norm_book_list",
+    getBookSourcesExploreUrl = "_norm_explore",
+    getBookContent           = "_norm_content",
+    refreshBookContent       = "_norm_content",
+    autoChangeBookSource     = "_norm_book",
+    changeBookSource         = "_norm_book",
+    saveBook                 = "_norm_book",
+}
+
+function M:_normalize_output(logName, data)
+    local norm = NORM_MAP[logName]
+    if not norm then return data end
+    local normalizer = self[norm]
+    if type(normalizer) ~= "function" then
+        logger.err("NORM_MAP 配置错误: " .. tostring(logName) .. " -> " .. tostring(norm))
+        return data
+    end
+    return normalizer(self, data)
+end
+
+function M:supports(method)
+    if type(self[method]) ~= "function" then return false end
+    local base_impl = M[method]
+    if type(base_impl) ~= "function" then return true end
+    if self[method] == M.unimplementedMethod then return false end
+    return self[method] ~= base_impl
 end
 
 function M:getBookshelf(callback)
-    return self:unimplementedMethod("getBookshelf")
+    return self:unimplementedMethod("getBookshelf", callback)
 end
 
 function M:saveBook(bookinfo, callback)
-    return self:unimplementedMethod("saveBook")
+    return self:unimplementedMethod("saveBook", callback)
 end
 
-function M:deleteBook(bookinfo)
-    return self:unimplementedMethod("deleteBook")
+function M:deleteBook(bookinfo, callback)
+    return self:unimplementedMethod("deleteBook", callback)
 end
 
 function M:getChapterList(bookinfo, callback)
-    return self:unimplementedMethod("getChapterList")
+    return self:unimplementedMethod("getChapterList", callback)
 end
 
 function M:getBookContent(chapter, callback)
-    return self:unimplementedMethod("getBookContent")
+    return self:unimplementedMethod("getBookContent", callback)
 end
 
 function M:refreshBookContent(chapter, callback)
-    return self:unimplementedMethod("refreshBookContent")
+    return self:unimplementedMethod("refreshBookContent", callback)
 end
 
 function M:saveBookProgress(chapter, callback)
-    return self:unimplementedMethod("saveBookProgress")
+    return self:unimplementedMethod("saveBookProgress", callback)
 end
 
 function M:getProxyCoverUrl(coverUrl)
     return coverUrl
 end
 
-function M:getProxyImageUrl(bookUrl, img_src)
-    return img_src
+function M:getProxyImageUrl(...)
+    return select(2, ...)
 end
 
 function M:getProxyEpubUrl(bookUrl, htmlUrl)
     return htmlUrl
 end
 
-function M:getAvailableBookSource(options, callback)
-    return self:unimplementedMethod("getAvailableBookSource")
+function M:getAvailableBookSource(options, on_finish, on_chunk)
+    local msg = "当前服务端不支持此功能"
+    if type(on_finish) == "function" then
+        on_finish(false, nil, msg, -1)
+    end
+    return nil, msg
 end
 
 function M:changeBookSource(new_book_source, callback)
-    return self:unimplementedMethod("changeBookSource")
+    return self:unimplementedMethod("changeBookSource", callback)
 end
 
 function M:searchBookMulti(options, callback)
-    return self:unimplementedMethod("searchBookMulti")
+    return self:unimplementedMethod("searchBookMulti", callback)
 end
 
 function M:searchBookSingle(options, callback)
-    return self:unimplementedMethod("searchBookSingle")
+    return self:unimplementedMethod("searchBookSingle", callback)
 end
 
 function M:autoChangeBookSource(bookinfo, callback)
-    return self:unimplementedMethod("autoChangeBookSource")
+    return self:unimplementedMethod("autoChangeBookSource", callback)
 end
 
-function M:getChaptersList(bookinfo)
-    return self:unimplementedMethod("getChaptersList")
+function M:getChaptersList(bookinfo, callback)
+    return self:unimplementedMethod("getChaptersList", callback)
 end
 
 function M:getBookSourcesList(callback)
-    return self:unimplementedMethod("getBookSourcesList")
+    return self:unimplementedMethod("getBookSourcesList", callback)
+end
+
+function M:getReplaceRules(callback)
+    return self:unimplementedMethod("getReplaceRules", callback)
+end
+
+function M:getTxtTocRules(callback)
+    return self:unimplementedMethod("getTxtTocRules", callback)
 end
 
 function M:exploreBook(options, callback)
-    return self:unimplementedMethod("exploreBook")
+    return self:unimplementedMethod("exploreBook", callback)
 end
 
 function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
-    return self:unimplementedMethod("getBookSourcesExploreUrl")
+    return self:unimplementedMethod("getBookSourcesExploreUrl", callback)
 end
 
 return M

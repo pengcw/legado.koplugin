@@ -3,7 +3,6 @@ local socket_url = require("socket.url")
 
 local M = {}
 
---- server_type: 1=legado, 2=reader3, 3=qread
 function M.check(url, server_type, user, pwd)
     if not (H.is_num(server_type) and (server_type == 1  or server_type == 2 or server_type == 3)) then
         return nil, '服务器类型必须是1、2或3'

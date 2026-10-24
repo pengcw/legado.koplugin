@@ -6,7 +6,7 @@ return {
         login = {
             path = "/login",
             method = "POST",
-            required_params = {"username", "password", "model"}, 
+            required_params = {"username", "password", "model"},
             payload = {"username", "password", "model"},
             form_payload = true,
             expected_status = {200}
@@ -14,7 +14,7 @@ return {
         getBookshelfPage = {
             path = "/getBookshelfPage",
             method = "POST",
-            required_params = {"oldmd5"}, 
+            required_params = {"oldmd5"},
             payload = {"oldmd5"},
             form_payload = true,
             expected_status = {200}
@@ -56,8 +56,7 @@ return {
         getBookSourcesPage = {
             path = "/getBookSourcesPage",
             method = "POST",
-            -- is md5
-            required_params = {"oldmd5"}, 
+            required_params = {"oldmd5"},
             payload = {"oldmd5"},
             form_payload = true,
             expected_status = {200}
@@ -68,6 +67,12 @@ return {
             required_params = {"md5", "page"},
             payload = {"md5", "page"},
             form_payload = true,
+            expected_status = {200}
+        },
+        getBookSourceJson = {
+            path = "/getbookSourcejson",
+            method = "POST",
+            required_payload = true,
             expected_status = {200}
         },
         refreshBook = {
@@ -98,7 +103,6 @@ return {
             path = "/getBookContent",
             method = "POST",
             required_params = {"index", "url", "bookSourceUrl"},
-            -- type 0 使用缓存 1 强制刷新
             optional_params = {"type"},
             payload = {"type", "index", "url", "bookSourceUrl"},
             form_payload = true,
@@ -107,7 +111,6 @@ return {
         getBookSources = {
             path = "/getBookSources",
             method = "POST",
-            -- 1 所有 0 已开启
             required_params = {"isall"},
             payload = {"isall"},
             form_payload = true,
@@ -122,7 +125,6 @@ return {
             form_payload = true,
             expected_status = {200}
         },
-        -- 查找书籍可用书源
         urlsaveBook = {
             path = "/urlsaveBook",
             method = "POST",
@@ -202,7 +204,6 @@ return {
         getBookSourcesExploreUrl = {
             path = "/getBookSourcesExploreUrl",
             method = "POST",
-            -- need = 1 刷新?
             required_params = {"bookSourceUrl"},
             payload = {"bookSourceUrl","need"},
             form_payload = true,

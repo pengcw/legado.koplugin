@@ -1,6 +1,3 @@
--- =================================================================================
--- Async Task Lib by v0.11.1
--- =================================================================================
 local UIManager = require("ui/uimanager")
 local coroutine = require("coroutine")
 local logger = require("logger")
@@ -40,7 +37,7 @@ function Channel:new(name, max_workers, on_finish, start_paused)
     obj.session_abort_hooks = {}
     obj.on_finish = on_finish
     obj.did_abort_current_drain = false
-    obj.cooldown_until = 0                 
+    obj.cooldown_until = 0
     obj._cooldown_timer_scheduled = false
     obj.is_paused = start_paused or false
     obj.created_at = socket.gettime()
@@ -78,7 +75,7 @@ function Channel:pushTask(task_func, callback, opts)
         delay = opts.delay,
         run_in_main = opts.run_in_main
     }
-    
+
     self.did_abort_current_drain = false
 
     if opts.insert_at_head then
@@ -92,12 +89,11 @@ function Channel:pushTask(task_func, callback, opts)
     end
 end
 
--- NetworkMgr:isConnected() not Work in task
 function Channel:_processNext()
     if #self.queue == 0 then return end
     if self.is_paused then return end
     local now = socket.gettime()
-    
+
     if self.cooldown_until > now then
         if not self._cooldown_timer_scheduled then
             self._cooldown_timer_scheduled = true
@@ -107,7 +103,7 @@ function Channel:_processNext()
                 self:_processNext()
             end)
         end
-        return 
+        return
     end
 
     self.active_workers = self.active_workers + 1
@@ -169,7 +165,7 @@ function Channel:_processNext()
         finished = true
         logger.dbg("Channel:_processNext - END", self.name)
         self.running_tasks[task.id] = nil
-        
+
         if task.delay and type(task.delay) == "number" and task.delay > 0 then
             self.cooldown_until = socket.gettime() + task.delay
         end
@@ -285,7 +281,6 @@ function Channel:executeBatch(params)
     local on_batch_end = params.on_batch_end
     local aggregate = params.aggregate or false
 
-
     if not task_func then return end
     self:clearTasks()
 
@@ -297,9 +292,9 @@ function Channel:executeBatch(params)
 
     local completed_count = 0
     local is_aborted = false
-    local results_map = (aggregate == true) and {} or nil 
+    local results_map = (aggregate == true) and {} or nil
     self.batch_counter = (self.batch_counter or 0) + 1
-    local batch_id = "batch_" .. self.batch_counter 
+    local batch_id = "batch_" .. self.batch_counter
 
     self.session_abort_hooks[batch_id] = function()
         if not is_aborted then
@@ -321,7 +316,6 @@ function Channel:executeBatch(params)
 
             local should_abort = false
             if on_item_end then
-                -- if on_item_end crashes, return nil here, convert to false without blocking subsequent tasks
                 local ok, req_abort = safe_call("on_item_end", on_item_end, i, item, success, result, retries_used)
                 should_abort = (ok and req_abort == true)
             end
@@ -554,7 +548,6 @@ function M.spawnProcess(job, callback, timeout, returns_simple_string)
         local subprocess_done = ffiUtil.isSubProcessDone(pid)
         local stuff_to_read = parent_read_fd and ffiUtil.getNonBlockingReadSize(parent_read_fd) ~= 0
         if subprocess_done or stuff_to_read then
-            -- Subprocess is gone or nearly gone
             local ok, r1, r2 = false, nil, nil
             if parent_read_fd then
                 local ret_str = ffiUtil.readAllFromFD(parent_read_fd) or ""

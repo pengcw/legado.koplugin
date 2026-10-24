@@ -17,7 +17,7 @@ local shared_codepoint
 do
     pcall(function()
         Utf8Proc_module = require("ffi/utf8proc")
-        
+
         local function find_lib(func)
             if type(func) ~= "function" then return nil end
             for i = 1, 30 do
@@ -29,12 +29,11 @@ do
             end
             return nil
         end
-        
-        -- 版本兼容,旧版本只有 lowercase
-        libutf8proc = find_lib(Utf8Proc_module.count) 
-                   or find_lib(Utf8Proc_module.lowercase_NFKC_Casefold) 
+
+        libutf8proc = find_lib(Utf8Proc_module.count)
+                   or find_lib(Utf8Proc_module.lowercase_NFKC_Casefold)
                    or find_lib(Utf8Proc_module.lowercase)
-                   
+
         if libutf8proc then
             libutf8proc_available = true
             shared_codepoint = ffi.new("utf8proc_int32_t[1]")
@@ -104,13 +103,11 @@ if not libutf8proc_available then
                     valid = false
                 end
             elseif byte >= 0xF0 and byte <= 0xF4 then
-                -- 标准 UTF-8 4 字节起始最大到 F4，F5-F7 不再按 4 字节处理
                 bytes = 4
                 if pos + 3 <= str_len then
                     local b2, b3, b4 = str:byte(pos + 1), str:byte(pos + 2), str:byte(pos + 3)
                     if b2 and b3 and b4 and b2 >= 0x80 and b2 <= 0xBF and b3 >= 0x80 and b3 <= 0xBF and b4 >= 0x80 and b4 <= 0xBF then
                         codepoint = (byte - 0xF0) * 262144 + (b2 - 0x80) * 4096 + (b3 - 0x80) * 64 + (b4 - 0x80)
-                        -- 超过 U+10FFFF 非法
                         if codepoint < 0x10000 or codepoint > 0x10FFFF then  valid = false end
                     else
                         valid = false
@@ -133,7 +130,6 @@ if not libutf8proc_available then
                 pos = reverse and start_pos or (start_pos + bytes - 1)
                 return ret_pos, codepoint, char
             end
-            -- 正常路径不会进入（bytes >= 1 时 start_pos+bytes-1 <= str_len 成立）
             pos = reverse and (start_pos - 1) or (start_pos + 1)
         end
     end
@@ -173,7 +169,6 @@ function M.utf8_chars(str, reverse)
             elseif bytes < 0 then
                if reverse then pos = pos - 1 else pos = pos + 1 end
             else
-                -- bytes == 0 扫描继续
                 if reverse then pos = pos - 1 else pos = pos + 1 end
             end
         end
@@ -186,7 +181,7 @@ function M.count(str)
     end
 
     if type(str) ~= "string" or str == "" then return 0, true end
-    
+
     if not libutf8proc_available then
         local count = 0
         for _ in native_utf8_chars(str) do
@@ -292,7 +287,7 @@ function M.utf8_trim(str)
                 break
             end
         end
-        
+
         local bytes = tonumber(libutf8proc.utf8proc_iterate(str_p + c_start - 1, str_len - c_start + 1, shared_codepoint))
         if bytes > 0 then
             if not UTF8_WHITESPACE_CODEPOINTS[tonumber(shared_codepoint[0])] then

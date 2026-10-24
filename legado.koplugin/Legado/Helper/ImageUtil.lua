@@ -26,7 +26,6 @@ end
 
 local M = {}
 
--- 排查用开关：置 true 时校验失败的原始数据落盘 invalid_covers/ 供分析
 local LOCAL_DEBUG_SAVE_INVALID = false
 
 local function debug_save_invalid(data, reason, url)
@@ -66,62 +65,92 @@ if not pcall(ffi.typeof, "z_stream") then
             unsigned long adler;
             unsigned long reserved;
         } z_stream;
-        int inflateInit2_(z_stream *strm, int windowBits, const char *version, int stream_size);
-        int inflate(z_stream *strm, int flush);
-        int inflateEnd(z_stream *strm);
     ]]
 end
+pcall(ffi.cdef, "const char *zlibVersion(void);")
+pcall(ffi.cdef, "int inflateInit2_(z_stream *strm, int windowBits, const char *version, int stream_size);")
+pcall(ffi.cdef, "int inflate(z_stream *strm, int flush);")
+pcall(ffi.cdef, "int inflateEnd(z_stream *strm);")
 local libz
 if pcall(ffi.typeof, "z_stream") then
-    local ok, lib = pcall(ffi.load, "z")
+    local ok, lib = pcall(function() return ffi.loadlib("z", 1) end)
+    if not (ok and lib) then
+        ok, lib = pcall(ffi.load, "z")
+    end
     libz = ok and lib or nil
 end
 
-function M.gunzip(data)
+local Z_NO_FLUSH = 0
+local Z_OK = 0
+local Z_STREAM_END = 1
+local GUNZIP_CHUNK_SIZE = 32 * 1024
+local MAX_GUNZIP_OUTPUT = 64 * 1024 * 1024
+
+local function get_zlib_version()
+    if not libz then return nil end
+    local ok, version = pcall(function()
+        return ffi.string(libz.zlibVersion())
+    end)
+    return ok and version or nil
+end
+
+function M.gunzip(data, options)
+    local max_output = options and options.max_output or MAX_GUNZIP_OUTPUT
+    if type(max_output) ~= "number" or max_output % 1 ~= 0
+        or max_output < 1 or max_output > MAX_GUNZIP_OUTPUT then
+        return nil, "invalid inflate output limit"
+    end
     if type(data) ~= "string" or data:sub(1, 2) ~= "\x1f\x8b" then
         return nil, "not gzip"
     end
     if not libz then return nil, "zlib unavailable" end
-    -- gzip 尾部 ISIZE（原始大小 mod 2^32）仅作初始缓冲大小提示。
-    -- qyd /proxypng 会在 gzip 流末尾追加额外字节（实测多 2B "{}"），
-    -- 导致尾部 ISIZE 读成巨大伪造值；此时不能直接拒绝（inflate 本身会忽略流外多余字节），
-    -- 回退到保守初始缓冲，由下方渐进扩容兜底。OOM 防护由 MAX_GUNZIP_OUT 封顶保证。
-    local MAX_GUNZIP_OUT = 64 * 1024 * 1024
-    local isize = 0
-    if #data >= 4 then
-        isize = string.byte(data, #data - 3)
-            + string.byte(data, #data - 2) * 256
-            + string.byte(data, #data - 1) * 65536
-            + string.byte(data, #data) * 16777216
+
+    local version = get_zlib_version()
+    if not version then return nil, "zlib version unavailable" end
+
+    local strm = ffi.new("z_stream")
+    strm.next_in = ffi.cast("const unsigned char*", data)
+    strm.avail_in = #data
+
+    local ret = libz.inflateInit2_(strm, 31, version, ffi.sizeof("z_stream"))
+    if ret ~= Z_OK then
+        return nil, "inflateInit2 failed: " .. tostring(ret)
     end
-    local out_size
-    if isize > 0 and isize <= MAX_GUNZIP_OUT then
-        out_size = math.max(isize + 64, #data * 8 + 64)
-    else
-        out_size = math.min(#data * 8 + 64, MAX_GUNZIP_OUT)
-    end
+
+    local chunks = {}
+    local total = 0
     while true do
-        local out = ffi.new("unsigned char[?]", out_size)
-        local strm = ffi.new("z_stream")
-        strm.next_in = ffi.cast("const unsigned char*", data)
-        strm.avail_in = #data
+        local out = ffi.new("unsigned char[?]", GUNZIP_CHUNK_SIZE)
         strm.next_out = out
-        strm.avail_out = out_size
-        local ret = libz.inflateInit2_(strm, 15 + 32, "1.2.11", ffi.sizeof("z_stream"))
-        if ret ~= 0 then return nil, "inflateInit2 failed" end
-        ret = libz.inflate(strm, 4) -- Z_FINISH
-        libz.inflateEnd(strm)
-        if ret == 1 then
-            return ffi.string(out, strm.total_out)
+        strm.avail_out = GUNZIP_CHUNK_SIZE
+
+        ret = libz.inflate(strm, Z_NO_FLUSH)
+        local produced = GUNZIP_CHUNK_SIZE - tonumber(strm.avail_out)
+        if produced > 0 then
+            total = total + produced
+            if total > max_output then
+                libz.inflateEnd(strm)
+                return nil, "inflate output too large"
+            end
+            chunks[#chunks + 1] = ffi.string(out, produced)
         end
-        if ret ~= -5 then -- -5 = Z_BUF_ERROR（缓冲不足，扩大重试）
-            return nil, "inflate failed: " .. tostring(strm.msg or ret)
+
+        if ret == Z_STREAM_END then
+            if options and options.strict and strm.avail_in ~= 0 then
+                libz.inflateEnd(strm)
+                return nil, "trailing gzip data"
+            end
+            break
         end
-        if out_size >= MAX_GUNZIP_OUT then
-            return nil, "inflate output too large"
+        if ret ~= Z_OK then
+            local err = strm.msg ~= nil and ffi.string(strm.msg) or tostring(ret)
+            libz.inflateEnd(strm)
+            return nil, "inflate failed: " .. err
         end
-        out_size = math.min(out_size * 2, MAX_GUNZIP_OUT)
     end
+
+    libz.inflateEnd(strm)
+    return table.concat(chunks)
 end
 
 local function save_processed(data, output_path)
@@ -156,7 +185,6 @@ function M.get_default_cover_cache(book_cache_id)
     return M.findCustomCoverFileInDir(cover_path_no_ext)
 end
 
--- Function called frequently; keep logs minimal
 function M.download_cover(book_cache_id, img_src, is_force, opts)
     if not (H.is_str(book_cache_id) and book_cache_id ~= ""
             and H.is_str(img_src) and img_src ~= "") then
@@ -266,8 +294,6 @@ function M.get_url_extension(url)
     return ext or "", filename
 end
 
--- success: data, ext | fail: nil, err
--- opts: timeout(总超时, 默认 60), headers
 function M.download_image(url, opts)
     if type(url) ~= "string" or url == "" then
         return nil, "invalid image url"
@@ -285,7 +311,6 @@ function M.download_image(url, opts)
     end
 
     local data = resp['data']
-    -- qread 服务器不遵守请求头, 会透传 gzip 压缩
     if data:sub(1, 2) == "\x1f\x8b" then
         local raw, gerr = M.gunzip(data)
         if not raw then
@@ -294,9 +319,6 @@ function M.download_image(url, opts)
         data = raw
     end
 
-    -- 合法性校验
-    -- （如 JPEG2000 等 mupdf 支持的冷门格式）交给 RenderImage 全解码兜底，
-    -- 能解码即视为合法图片——renderimage 避免误杀 sniff 覆盖外的合法图。
     local ext = image_meta.sniff_format(data)
     if not image_meta.is_valid_image(data) then
         local srv_err = detect_server_error(data)
@@ -306,11 +328,9 @@ function M.download_image(url, opts)
             return nil, "server error: " .. srv_err
         end
         if ext ~= nil then
-            -- 7 格式内结构损坏/尺寸异常：丢弃（不兜底，避免放行伪造魔数的垃圾）
             debug_save_invalid(data, "struct", url)
             return nil, "invalid image data"
         end
-        -- sniff 不识别：RenderImage 兜底验证
         local ok2, bb = pcall(function()
             local RenderImage = require("ui/renderimage")
             return RenderImage:renderImageData(data, #data)
@@ -319,7 +339,6 @@ function M.download_image(url, opts)
             debug_save_invalid(data, "mupdf", url)
             return nil, "invalid image data"
         end
-        -- mupdf 不返回格式信息，用通用图片扩展名（渲染按内容嗅探，不受扩展名影响）
         ext = "img"
     end
     return data, ext

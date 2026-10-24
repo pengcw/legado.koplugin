@@ -3,7 +3,7 @@ local logger = require("logger")
 local Screen = require("device").screen
 local util = require("util")
 local socket_url = require("socket.url")
-  local JSON = require("json")
+local JSON = require("json")
 local H = require("Legado/Helper")
 local BaseSpec = require("Legado.spore.base")
 local bookutil = require("Legado.spore.bookutil")
@@ -96,7 +96,6 @@ function M:getChapterList(bookinfo, callback)
   end
 
   local bookUrl = bookinfo.bookUrl
-  -- refresh=true：仅清除缓存场景强制绕过服务器目录缓存
   local refresh = bookinfo.refresh == true and 1 or 0
   return self:handleResponse(function()
         return self.client:getChapterList({
@@ -211,7 +210,6 @@ function M:getAvailableBookSource(options, on_finish, on_chunk)
     local name = options.name
     local author = options.author
 
-    -- 按 origin 去重（与 qread 一致，避免同源重复）
     local finish_sent = false
     local all_results = {}
     local seen_origin = {}
@@ -263,28 +261,55 @@ function M:getBookSourcesList(callback)
     }, 'getBookSourcesList')
 end
 
+local function decode_table_data(response, method_name)
+    local data = response and response.data
+    if type(data) == "string" then
+        local ok, decoded = pcall(JSON.decode, data)
+        if not ok then
+            return nil, "Invalid JSON in " .. method_name
+        end
+        data = decoded
+    end
+    if type(data) ~= "table" then
+        return nil, method_name .. " 返回数据格式异常"
+    end
+    return data
+end
+
 function M:getReplaceRules(callback)
     return self:handleResponse(function()
         return self.client:getReplaceRules({
             v = os.time()
         })
     end, function(response)
-        if response and response.isSuccess == true and type(response.data) == "string" then
-            local JSON = require("json")
-            local parsed, err = pcall(JSON.decode, response.data)
-            if parsed and type(err) == "table" then
-                if callback then callback({type="SUCCESS", body=err}) end
-                return err
-            else
-                if callback then callback({type="ERROR", message="Invalid JSON in getReplaceRules"}) end
-                return nil, "Invalid JSON in getReplaceRules"
-            end
+        local data, err_msg = decode_table_data(response, "getReplaceRules")
+        if not data then
+            if callback then callback({type="ERROR", message=err_msg}) end
+            return nil, err_msg
         end
-        if callback then callback(response) end
-        return response
+        if callback then callback({type="SUCCESS", body=data}) end
+        return data
     end, {
         timeouts = {20, 30},
     }, 'getReplaceRules')
+end
+
+function M:getTxtTocRules(callback)
+    return self:handleResponse(function()
+        return self.client:getTxtTocRules({
+            v = os.time()
+        })
+    end, function(response)
+        local data, err_msg = decode_table_data(response, "getTxtTocRules")
+        if not data then
+            if callback then callback({type="ERROR", message=err_msg}) end
+            return nil, err_msg
+        end
+        if callback then callback({type="SUCCESS", body=data}) end
+        return data
+    end, {
+        timeouts = {20, 30},
+    }, 'getTxtTocRules')
 end
 
 function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
@@ -365,7 +390,7 @@ function M:searchBookMulti(options, on_chunk, on_finish)
                         end
                     end
                     if #chunk > 0 then
-                        ctx.emit("chunk", chunk) -- 离散帧实时推流回主进程
+                        ctx.emit("chunk", chunk)
                     end
                 end
             end,
@@ -378,7 +403,6 @@ function M:searchBookMulti(options, on_chunk, on_finish)
             end,
         })
 
-        -- 协作等待，直到 WebSocket 关闭或收到取消信号
         while not ws_finished and not ws:is_done() do
             if ctx.is_cancelled() then
                 ws:cancel("task_cancelled")
@@ -513,8 +537,6 @@ function M:_searchBookSocket(search_text, filter, timeout)
   return result
 end
 
--- ⚠️ 后端仅对 index==0 的第一本书打印详细字段日志
--- ⚠️ Lua 模式是字节级的：多字节符号（┌└…）必须 plain find，不能进 [字符集]
 local BOOK_SOURCE_DEBUG_SYMBOLS = { "┌", "└", "︽", "⇒", "◇", "≡", "︾" }
 local BOOK_SOURCE_DEBUG_FIELD_MAP = {
     ["书名"] = "name",
@@ -544,7 +566,7 @@ function M:_bookSourceDebugNewState()
         books = {},
         current_book = nil,
         current_field = nil,
-        saw_activity = false, -- 是否收到过搜索日志（区分书源无响应）
+        saw_activity = false,
     }
 end
 
@@ -641,7 +663,6 @@ function M:searchBookSingle(options)
                 end
             end
         elseif socket.gettime() - idle_start > idle_timeout then
-            -- 请求发出后长时间无搜索日志：书源不存在/不可用（服务端仅 ping 保活）
             break
         end
     end

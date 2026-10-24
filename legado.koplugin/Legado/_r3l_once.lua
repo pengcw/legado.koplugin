@@ -6,19 +6,25 @@ local FS = require("Legado.Helper.FS")
 local socket_url = require("socket.url")
 local LuaSettings = require("luasettings")
 
+local function upgrade_database(dbManager)
+    if dbManager and dbManager._migrateDB then
+        return dbManager:_migrateDB()
+    end
+end
+
 return function()
+    local Backend = require("Legado/Backend")
+    local dbManager = assert(Backend.dbManager, "BookInfoDB is not initialized")
+
     local settings_data = LuaSettings:open(Env.getUserSettingsPath())
     local settings = settings_data.data
     local is_changed = false
 
-    -- <1.0.9 清空配置
     if settings.setting_url or settings_data.data.legado_server then
         settings = {}
         is_changed = true
     end
-    -- 1.0.9
     if not H.is_tbl(settings.web_configs) and H.is_str(settings.server_address) then
-        -- 转换当前配置到 web_configs
         settings.web_configs = {}
         local default_conf_name = "默认配置"
         settings.web_configs[default_conf_name] = {
@@ -31,7 +37,6 @@ return function()
          settings.current_conf_name = default_conf_name
          is_changed = true
     end
-    -- 1.1.1 去除 server_address_md5 并更改 bookShelfId 规则
     if H.is_tbl(settings.web_configs) and H.is_str(settings.server_address_md5) then
         local web_configs = settings.web_configs
         local updates_to_perform = {}
@@ -48,10 +53,6 @@ return function()
             end
         end
         if next(updates_to_perform) ~= nil then
-            local BookInfoDB = require("Legado/BookInfoDB")
-            local dbManager = BookInfoDB:new({
-                dbPath = Env.getTempDirectory() .. "/bookinfo.db"
-            })
             dbManager:transaction(function()
                 for old_id, new_id in pairs(updates_to_perform) do
                     dbManager:dynamicUpdate('books', {
@@ -61,7 +62,6 @@ return function()
                     })
                 end
             end)()
-            dbManager:closeDB()
         end
 
         if settings.server_address_md5 then
@@ -71,7 +71,6 @@ return function()
         logger.info("Database bookShelfId upgrade completed")
     end
 
-    -- 1.1.2 
     if H.is_str(settings.chapter_sorting_mode) or settings.stream_image_view then
         settings.chapter_sorting_mode = nil
         settings.stream_image_view = nil
@@ -82,8 +81,7 @@ return function()
         settings_data.data = settings
         settings_data:flush()
     end
-    
-    -- > 1.1.4
+
     local patches_dir = FS.joinPath(Env.getKoreaderDirectory(), 'patches')
     local patches_file_path = FS.joinPath(patches_dir, '2-legado_plugin_func.lua')
     local source_patches = FS.joinPath(Env.getPluginDirectory(), 'patches/2-legado_plugin_func.lua')
@@ -101,17 +99,38 @@ return function()
         util.removePath(plg_patches_dir)
     end
 
-    -- > 1.1.5: Clean up obsolete task.pid.lua & legacy task_pid DB table
     local old_task_pid = Env.getTempDirectory() .. '/task.pid.lua'
     if util.fileExists(old_task_pid) then
         util.removeFile(old_task_pid)
     end
-    pcall(function()
-        local Backend = require("Legado/Backend")
-        if Backend and Backend.dbManager then
-            Backend.dbManager:execute("DROP TABLE IF EXISTS task_pid;")
-        end
-    end)
+    dbManager:execute("DROP TABLE IF EXISTS task_pid;")
+    dbManager:execute("DROP TABLE IF EXISTS replace_rules;")
+    if dbManager:getDB():rowexec("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_records';") then
+        dbManager:execute("DELETE FROM sync_records WHERE resourceType = 'replace_rules';")
+    end
 
+    local legacy_book_dir = FS.joinPath(Env.getHomeDir(), "Legado\u{200B}书目")
+    if util.directoryExists(legacy_book_dir) then
+        local ffiUtil = require("ffi/util")
+        ffiUtil.purgeDir(legacy_book_dir)
+        util.removePath(legacy_book_dir)
+    end
+
+    local cache_dir = Env.getTempDirectory()
+    for _, css_path in ipairs({
+        FS.joinPath(cache_dir, "legado.css"),
+        FS.joinPath(cache_dir, "resources/legado.css"),
+    }) do
+        if util.fileExists(css_path)
+            and not util.removeFile(css_path)
+            and util.fileExists(css_path) then
+            error("failed to remove stale shared stylesheet: " .. css_path)
+        end
+    end
+
+    local shared_css = require("Legado/EpubHelper").addCssRes()
+    assert(util.fileExists(shared_css), "failed to restore shared stylesheet: " .. shared_css)
+
+    upgrade_database(dbManager)
     return true
 end

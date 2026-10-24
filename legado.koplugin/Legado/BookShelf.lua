@@ -1,4 +1,3 @@
--- Legado/BookShelf.lua
 local BD = require("ui/bidi")
 local CoverMenu = require("Legado/CoverMenu")
 local Device = require("device")
@@ -22,7 +21,7 @@ local function init_book_shelf(parent)
         title = "书架",
         with_context_menu = true,
         align_baselines = true,
-        covers_fullscreen = true, 
+        covers_fullscreen = true,
         is_borderless = true,
         title_bar_left_icon = "appbar.menu",
         title_bar_fm_style = true,
@@ -53,7 +52,16 @@ local function init_book_shelf(parent)
         end
         parent:openMenu(dimen)
     end
-    
+
+    function book_shelf:refreshModeTitle()
+        local title = Backend:_isLocal() and "书架 (本地)" or "书架"
+        if self.title == title then return end
+        self.title = title
+        if self.title_bar then
+            self.title_bar:setTitle(title)
+        end
+    end
+
     function book_shelf:onFocusRight()
         local focused_widget = CoverMenu.getFocusItem(self)
         if focused_widget then
@@ -69,7 +77,7 @@ local function init_book_shelf(parent)
             return true
         end
     end
-    
+
     function book_shelf:onSwipe(arg, ges_ev)
         local direction = BD.flipDirectionIfMirroredUILayout(ges_ev.direction)
         if direction == "south" then
@@ -78,7 +86,7 @@ local function init_book_shelf(parent)
                     self:onRefreshLibrary()
                 end)
             else
-                NetworkMgr:runWhenConnected(function() self:onRefreshLibrary() end)  
+                NetworkMgr:runWhenConnected(function() self:onRefreshLibrary() end)
             end
             return
         end
@@ -86,6 +94,7 @@ local function init_book_shelf(parent)
     end
 
     function book_shelf:refreshItems(no_recalculate_dimen)
+        self:refreshModeTitle()
         local books_cache_data = Backend:getBookShelfCache()
         if H.is_tbl(books_cache_data) and #books_cache_data > 0 then
             self.item_table = self:generateItemTableFromMangas(books_cache_data)
@@ -106,7 +115,7 @@ local function init_book_shelf(parent)
             end)
             return
         end
-        
+
         local bookinfo = Backend:getBookInfoCache(item.cache_id)
         PlgState:currentSelectedBook(item)
 
@@ -114,14 +123,20 @@ local function init_book_shelf(parent)
             return MessageBox:error("书籍信息查询出错")
         end
 
+        if Backend:isDownloadBook(bookinfo) then
+            require("Legado.LocalExtension").downloadBook(bookinfo)
+            return
+        end
+
         local onReturnCallBack = function()
             self:show_view()
             self:refreshItems(true)
         end
 
+        PlgState:entrySource("bookshelf")
         self.parent_ref:refreshBookTocWidget(bookinfo, onReturnCallBack, true)
         self:onClose()
-        
+
         UIManager:nextTick(function()
             Backend:autoPinToTop(bookinfo.cache_id, bookinfo.sortOrder)
             self.parent_ref:addBkShortcut(bookinfo)
@@ -130,23 +145,27 @@ local function init_book_shelf(parent)
 
     function book_shelf:onRefreshLibrary()
         Backend:closeDbManager()
+        local is_local = Backend:_isLocal()
         TaskProg.loading({
-            text = "Refreshing Library ",
+            text = is_local and "正在刷新书架…" or "Refreshing Library ",
             dismissable = true,
             runnable = function()
                 return Backend:refreshLibraryCache(PlgState.ui_refresh_time)
             end,
             callback = function(ok, result)
                 if ok == true then
-                    Backend:HandleResponse(result, function(data)
-                        MessageBox:notice('同步成功')
+                    Backend:HandleResponse(result, function()
+                        MessageBox:notice(is_local and '刷新成功' or '同步成功')
                         if UIManager:isWidgetShown(self) then
                             self:refreshItems()
                         end
                         PlgState.ui_refresh_time = time.now()
+                        if not is_local then
+                            Backend:BookSourcesAndRulesAsync()
+                        end
                     end, function(err_msg)
                         pcall(function() Backend:onServiceError(err_msg) end)
-                        MessageBox:notice(tostring(err_msg) or '同步失败')
+                        MessageBox:notice(tostring(err_msg) or (is_local and '刷新失败' or '同步失败'))
                     end)
                 end
             end,
@@ -168,12 +187,16 @@ local function init_book_shelf(parent)
             has_reload_btn = true,
             buttons = {
                 {
-                    text = "同步至书库目录",
+                    text = "同步至本地书库",
                     callback = function()
                         UIManager:nextTick(function()
-                            self.parent_ref:addBkShortcut(bookinfo, true)
+                            local epub_path, err_msg = self.parent_ref:addBkShortcut(bookinfo, true)
+                            if epub_path then
+                                MessageBox:notice("已保存到本地书库")
+                            else
+                                MessageBox:error("同步到本地书库失败：", tostring(err_msg or "未知错误"))
+                            end
                         end)
-                        MessageBox:notice("已在书库生成快捷书籍")
                     end,
                 }, {
                     text = pin_top_text,
@@ -190,11 +213,12 @@ local function init_book_shelf(parent)
                             if result then
                                 Backend:closeDbManager()
                                 TaskProg.loading("删除中...", function()
-                                    Backend:deleteBook(bookinfo)
+                                    local response = Backend:deleteBook(bookinfo)
+                                    if response.type ~= "SUCCESS" then return response end
                                     return Backend:refreshLibraryCache()
                                 end, function(state, response)
                                     if state == true then
-                                        Backend:HandleResponse(response, function(data)
+                                        Backend:HandleResponse(response, function()
                                             MessageBox:notice("删除成功")
                                             self:refreshItems(true)
                                         end, function(err_msg)

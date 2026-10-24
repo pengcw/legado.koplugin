@@ -1,3 +1,5 @@
+local ffi = require("ffi")
+local JSON = require("json")
 local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local ffiUtil = require("ffi/util")
@@ -44,10 +46,25 @@ local function releaseHighCPU()
     end)
 end
 
+local function get_android_cache_dir()
+    local ok, android = pcall(require, "android")
+    local files_dir = ok and type(android.dir) == "string" and android.dir:gsub("/+$", "")
+    local app_dir = files_dir and files_dir:match("^(/.+)/files$")
+    return app_dir and (app_dir .. "/cache") or nil
+end
+
 local function generate_ipc_endpoint()
-    local ffi = require("ffi")
     local is_android = Device and Device.isAndroid and Device:isAndroid()
-    if ffi.os == "Linux" and not is_android then
+    if is_android then
+        local dir = get_android_cache_dir()
+        local ok, lfs = pcall(require, "lfs")
+        if dir and ok and lfs.attributes(dir, "mode") == "directory" then
+            local name = string.format("lg_%d_%d.sock", math.floor(socket.gettime() * 1000), math.random(1000, 9999))
+            if #dir + #name + 1 <= 100 then
+                return "ipc://" .. dir .. "/" .. name
+            end
+        end
+    elseif ffi.os == "Linux" then
         local name = string.format("legado_task_%d_%d", math.floor(socket.gettime() * 1000), math.random(1000, 9999))
         return "ipc://@" .. name
     end
@@ -61,12 +78,12 @@ function M.spawnProcessStream(job, opts)
     local on_finish = opts.on_finish
     local timeout = opts.timeout
     local raw_chunks = opts.raw_chunks == true
-    -- 正常结束握手：子进程发 __end__ 标记后等待 ACK，父进程据此确认全部帧已按序送达
     local stream_ended = false
-
-    local ERR_PREFIX = "\x00ERR:"
+    local child_error = nil
+    local error_grace_deadline = nil
 
     local finished = false
+    local protocol_version = 1
     local zmq_registered = false
     local mq = nil
 
@@ -101,9 +118,10 @@ function M.spawnProcessStream(job, opts)
     local pid
 
     local client_identity = string.format("task_%d_%d", math.floor(socket.gettime() * 1000), math.random(1000, 9999))
+    local nonce = string.format("%08x%08x%08x%08x", math.random(0, 0x7fffffff), math.random(0, 0x7fffffff), math.random(0, 0x7fffffff), math.random(0, 0x7fffffff))
 
     local function on_incoming_data(incoming)
-        if finished or not incoming then return end
+        if finished or child_error or not incoming then return end
         local chunk = ""
         if type(incoming) == "table" then
             if incoming.id then
@@ -119,19 +137,20 @@ function M.spawnProcessStream(job, opts)
         end
         if #chunk == 0 then return end
 
-        if chunk:sub(1, #ERR_PREFIX) == ERR_PREFIX then
-            finish(false, chunk:sub(#ERR_PREFIX + 1))
-            return false
-        end
-
-        -- 流结束标记：ZMQ 保序，此前所有帧必已收到；回 ACK 让子进程安全关闭
-        -- （字符串层拦截，不受 on_decode 过滤影响）
-        if chunk:find('"__end__"', 1, true) or chunk == "__end__" then
-            stream_ended = true
-            if mq and client_identity then
-                pcall(function() mq:send("__ack__", client_identity) end)
+        local ok_control, control = pcall(JSON.decode, chunk)
+        if ok_control and type(control) == "table" and control.protocol == protocol_version
+            and control.nonce == nonce and (control.kind == "error" or control.kind == "end") then
+            if control.kind == "error" then
+                child_error = child_error or control.payload or "child_error"
+                error_grace_deadline = error_grace_deadline or (socket.gettime() + 1.5)
+                return false
+            elseif control.kind == "end" then
+                stream_ended = true
+                if mq and client_identity then
+                    pcall(function() mq:send(JSON.encode({ protocol = protocol_version, kind = "ack" }), client_identity) end)
+                end
+                return true
             end
-            return true
         end
 
         if raw_chunks then
@@ -164,6 +183,16 @@ function M.spawnProcessStream(job, opts)
         receiveCallback = on_incoming_data,
     }
     local ok_start, serr = pcall(function() mq:start() end)
+    if not ok_start and endpoint:sub(1, 6) == "ipc://" and endpoint:sub(7, 7) == "/" then
+        pcall(function() mq:stop() end)
+        logger.warn("[spawnProcessStream] Android private IPC bind failed; using loopback TCP")
+        mq = IpcMQ:new{
+            endpoint = "tcp://127.0.0.1:*",
+            is_server = true,
+            receiveCallback = on_incoming_data,
+        }
+        ok_start, serr = pcall(function() mq:start() end)
+    end
     if not ok_start then
         logger.err("[spawnProcessStream] IpcMessage start failed: " .. tostring(serr))
         finish(false, "zmq_bind_failed")
@@ -179,8 +208,11 @@ function M.spawnProcessStream(job, opts)
     end
 
     local bound_endpoint = mq.endpoint or endpoint
+    if bound_endpoint:sub(1, 6) == "ipc://" and bound_endpoint:sub(7, 7) == "/" then
+        logger.info("[spawnProcessStream] Android private IPC bound")
+    end
 
-    pid = ffiUtil.runInSubProcess(function(_pid)
+    pid = ffiUtil.runInSubProcess(function()
         local JSON = require("json")
         if not IpcMQ then IpcMQ = require("Legado.task.v2.IpcMessage") end
         local child_mq = IpcMQ:new{
@@ -196,6 +228,7 @@ function M.spawnProcessStream(job, opts)
             _cancel_reason = nil,
             _paused = false,
             _incoming_buffer = {},
+            _rate_grants = {},
             send = function(self, data)
                 if self._closed then return false, "closed" end
                 return child_mq:send(tostring(data))
@@ -218,6 +251,8 @@ function M.spawnProcessStream(job, opts)
                                 self._paused = true
                             elseif control_msg.action == "resume" then
                                 self._paused = false
+                            elseif control_msg.action == "rate_grant" and control_msg.request_id then
+                                self._rate_grants[tostring(control_msg.request_id)] = true
                             end
                         elseif data == "CANCEL" or data == "CANCEL\n" then
                             self._cancelled = true
@@ -235,9 +270,21 @@ function M.spawnProcessStream(job, opts)
                     end
                 end
             end,
+            cancel = function(self, reason)
+                if self._cancelled then return end
+                self._cancelled = true
+                self._cancel_reason = reason or "user_cancelled"
+            end,
             is_cancelled = function(self)
                 self:poll_control()
                 return self._cancelled
+            end,
+            take_rate_grant = function(self, request_id)
+                self:poll_control()
+                request_id = tostring(request_id)
+                if not self._rate_grants[request_id] then return false end
+                self._rate_grants[request_id] = nil
+                return true
             end,
             throw_if_cancelled = function(self)
                 if self:is_cancelled() then
@@ -279,7 +326,7 @@ function M.spawnProcessStream(job, opts)
                 end
                 return true
             end,
-            receive = function(self, pattern, to)
+            receive = function(self, _, to)
                 if self._closed then return nil, "closed" end
                 self:poll_control()
                 if self._incoming_buffer and #self._incoming_buffer > 0 then
@@ -328,7 +375,6 @@ function M.spawnProcessStream(job, opts)
             return job(writer_fn, reader_fn, stream)
         end, function(e)
             raw_err = e
-            -- 保留原始错误对象：避免 traceback 字符串污染业务错误消息（如"没有更多了"）
             if type(e) == "table" and not e.trace then
                 e.trace = debug.traceback(tostring(e), 2)
             end
@@ -348,12 +394,13 @@ function M.spawnProcessStream(job, opts)
                     raw_msg = raw_msg.message or raw_msg.errorMsg or raw_msg.error or raw_msg.msg or raw_msg.reason or raw_msg[1] or tostring(raw_msg)
                 end
                 local err_msg = tostring(raw_msg):gsub("\r", ""):gsub("\n", " -> ")
-                pcall(function() stream:send(ERR_PREFIX .. err_msg) end)
+                pcall(function()
+                    stream:send(JSON.encode({ protocol = 1, nonce = nonce, kind = "error", payload = err_msg }))
+                end)
             end
         else
-            -- 正常结束：先发 __end__ 标记并等待父进程 ACK，保证所有帧送达后再关闭连接
             local ok_end = pcall(function()
-                stream:write(JSON.encode({ type = "__end__" }))
+                stream:write(JSON.encode({ protocol = 1, nonce = nonce, kind = "end" }))
             end)
             if ok_end then
                 local ack = nil
@@ -364,25 +411,19 @@ function M.spawnProcessStream(job, opts)
                     if ack then break end
                 end
                 if ack == nil then
-                    -- ACK 超时（如父进程已取消/关闭）：短暂休眠让 linger 继续 flush
                     socket.sleep(0.1)
                 end
             end
         end
 
         stream:close()
-        -- 绕过 runInSubProcess 里 os.exit(0) 的 C atexit 清理死锁：
-        -- fork 后 czmq/LuaSocket 继承的锁在 exit() 清理阶段无法获取，导致子进程不退出。
-        -- POSIX _exit 直接 exit_group，不运行 atexit，不触发任何库清理。
         pcall(function()
-            local ffi = require("ffi")
             pcall(ffi.cdef, "void _exit(int status);")
             if ffi.C and ffi.C._exit then
                 io.flush()
                 ffi.C._exit(0)
             end
         end)
-        -- fallback：若 _exit 不可用，退回原退出路径
         return
     end, false)
 
@@ -407,21 +448,28 @@ function M.spawnProcessStream(job, opts)
     end
 
     local cancel_grace_deadline = nil
+    local termination_reason = nil
+    local terminate_sent = false
 
     local function poll()
         if finished then return end
 
         local now = socket.gettime()
-        if cancel_grace_deadline and now >= cancel_grace_deadline then
+        if cancel_grace_deadline and now >= cancel_grace_deadline and not terminate_sent then
+            termination_reason = "已取消"
+            terminate_sent = true
             if pid then pcall(ffiUtil.terminateSubProcess, pid) end
-            finish(false, "已取消")
-            return
         end
 
-        if timeout and now - start_time >= timeout then
+        if error_grace_deadline and now >= error_grace_deadline and not terminate_sent then
+            terminate_sent = true
             if pid then pcall(ffiUtil.terminateSubProcess, pid) end
-            finish(false, "timeout")
-            return
+        end
+
+        if timeout and now - start_time >= timeout and not terminate_sent then
+            termination_reason = "timeout"
+            terminate_sent = true
+            if pid then pcall(ffiUtil.terminateSubProcess, pid) end
         end
 
         if mq and mq.waitEvent then
@@ -434,8 +482,14 @@ function M.spawnProcessStream(job, opts)
                 pcall(function() mq:waitEvent(50) end)
             end
             if not finished then
-                if cancel_grace_deadline then
+                if termination_reason then
+                    finish(false, termination_reason)
+                elseif cancel_grace_deadline then
                     finish(false, "已取消")
+                elseif child_error then
+                    finish(false, child_error)
+                elseif not stream_ended then
+                    finish(false, "child_exited_without_end")
                 else
                     finish(true)
                 end
@@ -449,12 +503,18 @@ function M.spawnProcessStream(job, opts)
 
     local handle = setmetatable({
         pid = pid,
-        send = function(self, data)
+        send = function(_, data)
             if finished or not mq then return false, "closed" end
-            local ok_s, serr = pcall(function()
-                return mq:send(tostring(data), client_identity)
+            local target_id = client_identity
+            if not target_id and mq.clients then
+                target_id = next(mq.clients)
+            end
+            if not target_id then return false, "target_not_ready" end
+            local call_ok, send_ok, send_err = pcall(function()
+                return mq:send(tostring(data), target_id)
             end)
-            return ok_s, serr
+            if not call_ok then return false, send_ok end
+            return send_ok, send_err
         end,
         send_line = function(self, line)
             return self:send(line)
@@ -467,12 +527,12 @@ function M.spawnProcessStream(job, opts)
         end,
         cancel = function(self, reason)
             if not finished and not cancel_grace_deadline then
-                local reason_str = reason or "user_cancelled"
-                self:send(string.format("{\"type\":\"control\",\"action\":\"cancel\",\"reason\":\"%s\"}", reason_str))
+                local reason_str = tostring(reason or "user_cancelled"):sub(1, 512)
+                self:send(JSON.encode({ type = "control", action = "cancel", reason = reason_str }))
                 cancel_grace_deadline = socket.gettime() + 1.5
             end
         end,
-        is_done = function(self)
+        is_done = function()
             return finished
         end,
     }, {

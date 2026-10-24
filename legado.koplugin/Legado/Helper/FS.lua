@@ -68,7 +68,6 @@ end
 
 M.getSafeFilename = function(str, path, limit, limit_ext)
     local safe_name = util.getSafeFilename(str, path, limit, limit_ext)
-    -- fix util.getSafeFilename < 2025.11
     return safe_name:gsub("[\r\n]", " "):gsub("\t", " ")
 end
 
@@ -80,6 +79,43 @@ M.checkAndCreateFolder = function(d_path)
         end
     end
     return d_path
+end
+
+M.getFileSize = function(path)
+    if not (path and util.fileExists(path)) then return 0 end
+    local size = lfs.attributes(path, "size")
+    if type(size) == "number" then return size end
+    local f = io.open(path, "rb")
+    if f then
+        local sz = f:seek("end")
+        f:close()
+        return sz or 0
+    end
+    return 0
+end
+
+M.getDirectorySize = function(path)
+    if not (path and util.directoryExists(path)) then return 0 end
+    local total = 0
+
+    local function scan(dir)
+        local ok, iterator, directory = pcall(lfs.dir, dir)
+        if not ok or not iterator then return end
+        for entry in iterator, directory do
+            if entry ~= "." and entry ~= ".." then
+                local child = M.joinPath(dir, entry)
+                local attr = lfs.attributes(child)
+                if attr and attr.mode == "file" then
+                    total = total + (attr.size or 0)
+                elseif attr and attr.mode == "directory" then
+                    scan(child)
+                end
+            end
+        end
+    end
+
+    scan(path)
+    return total
 end
 
 return M

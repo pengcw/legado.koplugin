@@ -1,11 +1,11 @@
--- QueueCbz.lua
 local logger = require("logger")
 local util = require("util")
 local TaskQueue = require("Legado.task.Queue")
 local ZipUtil = require("Legado.Helper.ZipUtil")
 local ZipWrite = ZipUtil.Writer
 local ImageUtil = require("Legado.Helper.ImageUtil")
-local socket = require("socket")
+local H = require("Legado/Helper")
+local FS = require("Legado.Helper.FS")
 local Probe = require("Legado.Helper.Probe")
 
 local M = {}
@@ -105,13 +105,12 @@ function M:_finalize(is_aborted)
         self.writer = nil
     end
 
-    -- 成功：未中止且写入完整；容忍模式（allow_failed）下只要成功条目 > 0 即算成功
     local success = not self.aborted and close_ok
         and ((self.params.allow_failed and self.succeeded > 0) or self.succeeded == self.total)
     if not success and not self.params.keep_partial and self.output then
         pcall(os.remove, self.output)
     end
-    
+
     if self.params.on_finish then
         pcall(self.params.on_finish, self.aborted, {
             output = self.output,
@@ -137,7 +136,7 @@ function M:start(params)
     if params then
         apply_params(self, params)
     end
-    
+
     if self.channel or self.writer then
         return nil, "CBZ writer is already running"
     end
@@ -193,7 +192,6 @@ function M:start(params)
         returns_string = true,
         task_func = function(item)
             if type(item) ~= "table" then return false, "invalid item" end
-            -- Preset entries (e.g., mimetype) return data directly, no download.
             if item.data ~= nil then return item.data end
             local url = item.url
             if type(url) ~= "string" or url == "" then return false, "missing url" end
@@ -206,7 +204,6 @@ function M:start(params)
         end,
         on_item_end = function(index, item, success, result, retries_used)
             if self.aborted then return true end
-            -- External cancel check (e.g., chapter task aborted)
             if type(self.params.check_running) == "function" and self.params.check_running() then
                 self.aborted = true
                 return true
@@ -215,7 +212,7 @@ function M:start(params)
             if not success or (type(result) ~= "string" or #result == 0) then
                 self.failed = self.failed + 1
                 local err_msg = success and "empty image data" or tostring(result)
-                
+
                 if self.params.on_progress then
                     pcall(self.params.on_progress, self.completed, self.total, index, item, false, err_msg, retries_used)
                 end
@@ -223,29 +220,29 @@ function M:start(params)
                 if not self.params.allow_failed then
                     logger.warn(string.format("CBZBatchWriter: download failed for [%s]: %s", item.name, err_msg))
                     self.aborted = true
-                    return true -- No failure allowed, return true to abort task.
+                    return true
                 end
                 return false
             end
 
-            local add_ok, ret, add_err = pcall(self.writer.add, self.writer, item.name, result, true) -- true 表示无需再压缩
+            local add_ok, ret, add_err = pcall(self.writer.add, self.writer, item.name, result, true)
             if not add_ok or ret == false then
                 self.failed = self.failed + 1
                 self.aborted = true
                 local add_msg = add_ok and (add_err or "zip add failed") or tostring(ret)
                 logger.err("CBZBatchWriter: ZIP add failed:", item.name, add_msg)
-                
+
                 if self.params.on_progress then
                     pcall(self.params.on_progress, self.completed, self.total, index, item, false, add_msg, retries_used)
                 end
-                return true -- Write failed, critical error, abort.
+                return true
             end
 
             self.succeeded = self.succeeded + 1
             if self.params.on_progress then
                 pcall(self.params.on_progress, self.completed, self.total, index, item, true, nil, retries_used)
             end
-            
+
             return false
         end,
         on_batch_end = function(aborted, results)
@@ -258,8 +255,8 @@ end
 function M:cancel()
     if self.finished then return false end
     self.aborted = true
-    if self.channel then 
-        self.channel:clearTasks() 
+    if self.channel then
+        self.channel:clearTasks()
     end
     return true
 end
@@ -274,7 +271,7 @@ function M:getStatus()
         aborted = self.aborted,
         finished = self.finished,
     }
-    
+
     if self.channel then
         local busy, queued, active = self.channel:hasTasks()
         status.busy = busy
@@ -288,16 +285,6 @@ function M:getStatus()
     return status
 end
 
--- ==========================================
--- Serial download + zip pack in calling thread (usually child process).
--- Errors always throw via error() (caller wraps with pcall).
--- img_sources: URL string, or { url=..., name=... } table.
--- ==========================================
--- Serial/Copas concurrent download + zip pack in calling thread (usually child process).
--- Errors always throw via error() (caller wraps with pcall).
--- img_sources: URL string, or { url=..., name=... } table.
--- opts.allow_failed=false aborts on any failure (default tolerates failures).
--- ==========================================
 function M.from_urls(filePath, img_sources, check_running_callback, opts)
     if type(filePath) ~= "string" or filePath == "" then
         error("Cbz param error: invalid filePath")
@@ -352,12 +339,11 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
         error(msg)
     end
 
-    -- On failure: return false and continue by default; strict mode errors out.
     local function download_one(i, img_src)
         if type(check_running_callback) == "function" and check_running_callback() then
             abort("Other threads downloading, cancelled")
         end
-        local t_img_start = socket.gettime()
+        local t_img_start = H.timestamp()
         local url = img_src
         local custom_name = nil
         if type(img_src) == "table" then
@@ -481,33 +467,11 @@ function M.from_urls(filePath, img_sources, check_running_callback, opts)
         error(string.format("CreateCBZ rename err: %s", tostring(rename_err)))
     end
 
-    local function get_sz(p)
-        local f = io.open(p, "rb")
-        if f then
-            local sz = f:seek("end")
-            f:close()
-            return sz or 0
-        end
-        return 0
-    end
-    local cbz_sz = get_sz(filePath)
+    local cbz_sz = FS.getFileSize(filePath)
     Probe.done("Chapter", "CBZ完成", desc, t_cbz_start, "200 OK", Probe.format_bytes(cbz_sz), string.format("%d/%dP", succeeded, total_items))
     return filePath
 end
 
--- ==========================================
--- Async batch CBZ pack (main process only: relies on TaskQueue event loop, do not call in child)
--- Images downloaded in parallel via TaskQueue child processes, main thread writes zip.
--- Renames ".downloading" temp file to target and triggers on_finish when done.
--- params:
---   output        : target .cbz path
---   images        : array of URL strings, or { url=, name= } tables
---   opts          : { max_workers, max_retries, timeout, allow_failed }
---   check_running : optional cancel check (return true to abort)
---   on_progress   : optional progress callback (same as start())
---   on_finish     : function(aborted, result) completion callback
--- returns ok, err; ok=true means task started (async execution).
--- ==========================================
 function M:from_urls_async(params)
     if type(params) ~= "table" then return nil, "missing params" end
     local filePath = params.output
@@ -567,13 +531,9 @@ function M:from_urls_async(params)
         max_retries = opts.max_retries,
         timeout = opts.timeout,
         allow_failed = (opts.allow_failed ~= false),
-        -- on_finish handles rename or cleanup uniformly
         keep_partial = true,
         check_running = params.check_running,
-        -- Append PageCount = actual image count to ComicInfo.xml at zip end
-        -- Generated by default (opts.comic_info can pass title, etc.)
         finalize_callback = function(result)
-            -- Skip ComicInfo append on abort (tmp will be cleaned up)
             if result.aborted or image_succeeded <= 0 then
                 return nil
             end
@@ -588,7 +548,6 @@ function M:from_urls_async(params)
             end
         end,
         on_finish = function(aborted, result)
-            -- Only count image pages (mimetype not counted)
             local success = (result and not aborted and result.success and image_succeeded > 0)
             if success and util.fileExists(cbz_path_tmp) then
                 if util.fileExists(filePath) then

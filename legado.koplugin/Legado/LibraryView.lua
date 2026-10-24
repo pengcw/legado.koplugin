@@ -1,27 +1,26 @@
-local Font = require("ui/font")
 local ffiUtil = require("ffi/util")
 local util = require("util")
 local logger = require("logger")
 local Event = require("ui/event")
 local UIManager = require("ui/uimanager")
-local NetworkMgr = require("ui/network/manager")
 local Device = require("device")
 
-local ChapterListing = require("Legado/ChapterListing")
 local ReaderUI = require("apps/reader/readerui")
 local FileManager = require("apps/filemanager/filemanager")
 local DocSettings = require("docsettings")
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
+local Reader = require("Legado.Skeleton.Reader")
+local SkeletonBook = require("Legado.Skeleton.Book")
+local LocalExtension = require("Legado.LocalExtension")
 local MessageBox = require("Legado/MessageBox")
 local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
-local FS = require("Legado.Helper.FS")
+local Probe = require("Legado.Helper.Probe")
+local Error = require("Legado.Helper.Error")
 
 local PlgState = require("Legado/PlgState")
-local init_book_links = require("Legado/BookLinks")
-local init_book_shelf = require("Legado/BookShelf")
 
 local LibraryView = {
     book_toc = nil,
@@ -39,10 +38,8 @@ function LibraryView:init()
 end
 
 function LibraryView:fetchAndShow()
-    local is_first = not LibraryView.instance
-    local library_obj = LibraryView.instance or self:getInstance()
-    local use_browser = not self:isDisableBrowserMode() and is_first and self:browserViewHasLnk()
-    local widget = use_browser and self:getBrowserWidget() or self:getMenuWidget()
+    self:getInstance()
+    local widget = self:getMenuWidget()
     if widget then
         widget:show_view()
         widget:refreshItems()
@@ -52,31 +49,132 @@ end
 
 function LibraryView:isDisableBrowserMode()
     local settings = Backend:getSettings()
-    if settings and settings.chapter_mode == true then
+    if settings and settings.chapter_mode ~= false then
         return settings.disable_browser == true
     end
     return false
 end
 
-function LibraryView:browserViewHasLnk()
-    local browser_homedir = self:getBrowserHomeDir(true)
-    return browser_homedir and util.directoryExists(browser_homedir) and not util.isEmptyDir(browser_homedir)
-end
-
 function LibraryView:addBkShortcut(bookinfo, always_add)
     if not always_add and self:isDisableBrowserMode() then
-        return
+        return nil, "当前设置已禁用本地书库入口"
     end
     local browser = self:getBrowserWidget()
-    if browser then
-        browser:addBookShortcut(bookinfo)
+    if not browser then
+        return nil, "本地书库服务未就绪"
     end
+    local ok, epub_path, err_msg = pcall(function()
+        return browser:addBookShortcut(bookinfo)
+    end)
+    if not ok then
+        logger.warn("addBkShortcut failed:", tostring(epub_path))
+        return nil, tostring(epub_path)
+    end
+    return epub_path, err_msg
 end
 
 function LibraryView:onRefreshLibrary()
     if self.book_shelf then
         self.book_shelf:onRefreshLibrary()
     end
+end
+
+function LibraryView:refreshLocalModeView()
+    if not self.book_shelf then return end
+    self.book_shelf:refreshItems(true)
+end
+
+function LibraryView:enableLocalMode()
+    local function activate_local_mode()
+        local shelf_id = Backend:getCurrentBookShelfId()
+
+        local local_sources = {}
+        if Backend.dbManager and type(Backend.dbManager.getEnabledBookSources) == "function" then
+            local_sources = Backend.dbManager:getEnabledBookSources(shelf_id) or {}
+        end
+
+        if #local_sources > 0 then
+            local books = Backend:getBookShelfCache()
+            if not books or #books == 0 then
+                return MessageBox:notice("书架为空，请先同步")
+            end
+            pcall(function() Backend:BookSourcesAndRulesAsync(true) end)
+            Backend:applyLocalModeState(true)
+            self:refreshLocalModeView()
+            MessageBox:notice("已启用本地接管解析")
+            return
+        end
+
+        Backend:closeDbManager()
+        TaskProg.loading({
+            text = "首次启用正在准备本地书源...",
+            dismissable = true,
+            runnable = function()
+                local ok, err_msg, synced = Backend:syncLocalModeData(shelf_id)
+                if not ok then return false, err_msg end
+                return { synced = synced == true, message = err_msg }
+            end,
+            callback = function(ok, result)
+                if ok ~= true then
+                    return MessageBox:error("本地接管解析失败", tostring(result or "书源同步失败"))
+                end
+
+                local synced = H.is_tbl(result) and result.synced == true
+                if not synced then
+                    local check_sources = {}
+                    if Backend.dbManager and type(Backend.dbManager.getEnabledBookSources) == "function" then
+                        check_sources = Backend.dbManager:getEnabledBookSources(shelf_id) or {}
+                    end
+                    if #check_sources == 0 then
+                        return MessageBox:error("本地接管解析失败", "同步书源失败且本地无离线书源")
+                    end
+                end
+
+                local books = Backend:getBookShelfCache()
+                if not books or #books == 0 then
+                    return MessageBox:notice("书架为空，请先同步")
+                end
+
+                Backend:applyLocalModeState(true)
+                self:refreshLocalModeView()
+                MessageBox:notice(synced and "已启用本地接管解析" or "已启用本地接管解析（使用离线书源）")
+            end,
+        })
+    end
+
+    if LocalExtension.available() then
+        return MessageBox:confirm(
+            "开启后可脱离服务端使用，兼容大部分书源。是否启用？",
+            function(confirmed)
+                if confirmed then activate_local_mode() end
+            end,
+            { ok_text = "启用", cancel_text = "取消" }
+        )
+    end
+
+    local Update = require("Legado/Update")
+    return Update:ensureEngineLibrary(
+        activate_local_mode,
+        function(err_msg)
+            if err_msg == "已取消安装" then return end
+            local message = Error.extract_message(err_msg or "未知错误")
+            Probe.fail("Update", "启用本地解析", "", nil, message)
+            MessageBox:error(Error.format_failure("扩展安装失败，请重试", message))
+        end,
+        false,
+        {
+            confirm_text = "开启后可脱离服务端, 目前处于测试阶段，兼容大部分书源。下载扩展后将自动启用，是否安装？",
+        }
+    )
+end
+
+function LibraryView:disableLocalMode()
+    local ok, err_msg = Backend:toggleLocalMode(false)
+    if not ok then
+        return MessageBox:error("停用本地解析失败", tostring(err_msg or "请稍后重试"))
+    end
+    self:refreshLocalModeView()
+    MessageBox:notice("已停用本地解析")
 end
 
 function LibraryView:clearMenuItems()
@@ -94,100 +192,24 @@ function LibraryView:closeMenu()
     end
 end
 
-function LibraryView:openBrowserMenu(file)
-    self:getInstance()
-    self:getBrowserWidget()
-
-    local book_cache_id
-    local ui = FileManager.instance or ReaderUI.instance
-    if file and ui and ui.bookinfo then
-        local doc_settings = DocSettings:open(file)
-        book_cache_id = doc_settings:readSetting("book_cache_id")
-
-        if not book_cache_id then
-            local ok, lnk_conf = pcall(Backend.getLuaConfig, Backend, file)
-            if ok and lnk_conf then
-                book_cache_id = lnk_conf:readSetting("book_cache_id")
-                if book_cache_id then
-                    doc_settings:saveSetting("book_cache_id", book_cache_id):flush()
-                end
-            end
-        end
-    else
-        return MessageBox:error("获取书籍信息出错")
-    end
-
-    local dialog
-    local buttons = { {{
-        text = "更多设置 >>",
-        callback = function()
-            UIManager:close(dialog)
-            UIManager:nextTick(function() self:openMenu() end)
-        end
-    }, {
-        text = "书籍详情 >>",
-        callback = function()
-            if book_cache_id then
-                local bookinfo = Backend:getBookInfoCache(book_cache_id)
-                if not (H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex)) then
-                    MessageBox:error('书籍不存在于当前激活书架或已被删除')
-                    return
-                end
-                UIManager:close(dialog)
-                UIManager:nextTick(function()
-                    UIManager:show(require("Legado/BookDetailsDialog"):new{
-                        bookinfo = bookinfo,
-                        has_reload_btn = true,
-                        lnk_file = file,
-                    })
-                end)
-            end
-        end
-    }}, {{
-        text = "清空书库快捷书籍",
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm("是否清除书库目录下所有已同步的快捷书籍?", function(result)
-                if result then
-                    local browser_homedir = self:getBrowserHomeDir(true)
-                    if self:deleteFile(browser_homedir) then
-                        MessageBox:notice("已清除")
-                    end
-                end
-            end, { ok_text = "清除", cancel_text = "取消" })
-        end
-    }, {
-        text = "修复与升级书库书籍",
-        callback = function()
-            UIManager:close(dialog)
-            self.book_links:verifyBooksMetadata()
-            MessageBox:notice("已完成书库书籍校验与升级")
-        end
-    }},}
-
-    dialog = require("ui/widget/buttondialog"):new{
-        title = "Legado 设置",
-        title_align = "center",
-        title_face = Font:getFace("x_smalltfont"),
-        info_face = Font:getFace("tfont"),
-        buttons = buttons,
-    }
-    UIManager:show(dialog)
-end
-
 function LibraryView:openMenu(dimen)
     local dialog
     self:getInstance()
     local unified_align = dimen and "left" or "center"
-    local buttons = {{},{{
-        text = Icons.FA_SEARCH .. " 添加书籍",
-        callback = function()
-            UIManager:close(dialog)
-            self:openSearchBooksDialog()
-        end,
-        align = unified_align,
-    }}, {{
-        text = Icons.FA_GLOBE .. " 切换书架",
+    local local_mode = Backend:_isLocal()
+    local buttons = {{}}
+    if Backend:canUseBookDiscovery() then
+        table.insert(buttons, {{
+            text = Icons.FA_SEARCH .. " 搜书与发现",
+            callback = function()
+                UIManager:close(dialog)
+                self:openSearchBooksDialog()
+            end,
+            align = unified_align,
+        }})
+    end
+    table.insert(buttons, {{
+        text = Icons.FA_GLOBE .. " 切换服务",
         callback = function()
             UIManager:close(dialog)
             require("Legado/WebConfigDialog"):openWebConfigManager(function()
@@ -197,37 +219,57 @@ function LibraryView:openMenu(dimen)
             end)
         end,
         align = unified_align,
-    }}, {{
-        text = Icons.FA_REFRESH .. " 拉取远端排序",
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm("即将同步远端书架，按最后阅读时间排序。此操作将覆盖本地书架排序（手动置顶的书籍不受影响)\n是否继续？", function(result)
-                if result then
-                    TaskProg.loading("同步中...", function()
-                        return Backend:syncAndResortBooks()
-                    end, function(state, response)
-                        if state == true then
-                            Backend:HandleResponse(response, function(data)
-                                MessageBox:notice("同步并排序成功")
-                                if self.book_shelf then
-                                    self.book_shelf:refreshItems(true)
-                                end
-                            end, function(err_msg)
-                                MessageBox:error('操作失败: ', tostring(err_msg))
-                            end)
-                        else
-                            MessageBox:error('操作失败', '未知错误')
-                        end
-                    end)
+    }})
+
+    if local_mode or PlgState.LOCAL_MODE_ENTRY_ENABLED then
+        table.insert(buttons, {{
+            text = local_mode and Icons.FA_CLOUD .. " 停用本地解析"
+                or Icons.FA_DOWNLOAD .. " 启用本地解析",
+            callback = function()
+                UIManager:close(dialog)
+                if local_mode then
+                    self:disableLocalMode()
+                else
+                    self:enableLocalMode()
                 end
-            end, { ok_text = "确定", cancel_text = "取消" })
-        end,
-        align = unified_align,
-    }}}
+            end,
+            align = unified_align,
+        }})
+    end
+
+    if not local_mode then
+        table.insert(buttons, {{
+            text = Icons.FA_REFRESH .. " 拉取远端排序",
+            callback = function()
+                UIManager:close(dialog)
+                MessageBox:confirm("即将同步远端书架，按最后阅读时间排序。此操作将覆盖本地书架排序（手动置顶的书籍不受影响)\n是否继续？", function(result)
+                    if result then
+                        TaskProg.loading("同步中...", function()
+                            return Backend:syncAndResortBooks()
+                        end, function(state, response)
+                            if state == true then
+                                Backend:HandleResponse(response, function()
+                                    MessageBox:notice("同步并排序成功")
+                                    if self.book_shelf then
+                                        self.book_shelf:refreshItems(true)
+                                    end
+                                end, function(err_msg)
+                                    MessageBox:error('操作失败: ', tostring(err_msg))
+                                end)
+                            else
+                                MessageBox:error('操作失败', '未知错误')
+                            end
+                        end)
+                    end
+                end, { ok_text = "确定", cancel_text = "取消" })
+            end,
+            align = unified_align,
+        }})
+    end
 
     if not Device:isTouchDevice() then
         table.insert(buttons, #buttons, {{
-            text = Icons.FA_REFRESH .. ' ' .. " 同步书架",
+            text = Icons.FA_REFRESH .. ' ' .. (local_mode and " 刷新书架" or " 同步书架"),
             callback = function()
                 UIManager:close(dialog)
                 self:onRefreshLibrary()
@@ -276,41 +318,37 @@ function LibraryView:afterCloseReaderUi(callback)
     self:openLegadoFolder(nil, nil, nil, callback)
 end
 
-function LibraryView:loadAndRenderChapter(chapter)
-    if not (H.is_tbl(chapter) and chapter.book_cache_id) then 
+function LibraryView:openStreamImageView(chapter)
+    MessageBox:notice("漫画免缓存已开启")
+    self:afterCloseReaderUi(function()
+        self.stream_view = require("Legado/StreamImageView"):fetchAndShow({
+            chapter = chapter,
+            on_return_callback = function()
+                local bookinfo = Backend:getBookInfoCache(chapter.book_cache_id)
+                self:showBookTocDialog(bookinfo)
+            end,
+            on_fallback_callback = function()
+                PlgState:clearReadingRoute(chapter.book_cache_id)
+                self:loadAndRenderChapter(chapter, { mode = "chapter_mode" })
+            end,
+        })
+    end)
+    return self.stream_view
+end
+
+function LibraryView:loadAndRenderChapter(chapter, options)
+    if not (H.is_tbl(chapter) and chapter.book_cache_id) then
         logger.err("loadAndRenderChapter: chapter parameter is invalid")
-        return 
-    end
-    if chapter.cacheExt == 'cbz' then
-        local book_cache_id = chapter.book_cache_id
-        local extras_settings = Backend:getBookExtras(book_cache_id)
-        if H.is_tbl(extras_settings.data) and extras_settings.data.stream_image_view == true then
-            MessageBox:notice("流式漫画开启")
-            if not NetworkMgr:isConnected() then
-                MessageBox:error("需要网络连接")
-                return
-            end
-            self:afterCloseReaderUi(function()
-                local ex_chapter = chapter
-                self.stream_view = require("Legado/StreamImageView"):fetchAndShow({
-                    chapter = ex_chapter,
-                    on_return_callback = function()
-                        local bookinfo = Backend:getBookInfoCache(ex_chapter.book_cache_id)
-                        self:showBookTocDialog(bookinfo)
-                    end,
-                })   
-            end)
-            return
-        end
+        return
     end
 
     local ReadingFlow = require("Legado.ReadingFlow")
-    return ReadingFlow:openBook(chapter, {
-        parent_view = self,
-        on_error = function(err_msg)
-            MessageBox:error(err_msg or "开书失败")
-        end
-    })
+    options = options or {}
+    options.parent_view = self
+    options.on_error = options.on_error or function(err_msg)
+        MessageBox:error(err_msg or "开书失败")
+    end
+    return ReadingFlow:openBook(chapter, options)
 end
 
 function LibraryView:ReaderUIEventCallback(chapter_direction, ui)
@@ -318,7 +356,7 @@ function LibraryView:ReaderUIEventCallback(chapter_direction, ui)
 
     local fullpath = ui and ui.document and ui.document.file
     local chapter = PlgState:readingChapter()
-    
+
     if not (H.is_tbl(chapter) and chapter.book_cache_id) and fullpath then
         local doc_settings = DocSettings:open(fullpath)
         if doc_settings.data and doc_settings.data.doc_props then
@@ -344,7 +382,7 @@ function LibraryView:ReaderUIEventCallback(chapter_direction, ui)
         book_cache_id = chapter.book_cache_id,
         totalChapterNum = chapter.totalChapterNum
     })
- 
+
     if H.is_tbl(nextChapter) then
         nextChapter.call_event = chapter.call_event
         self:loadAndRenderChapter(nextChapter)
@@ -359,45 +397,152 @@ function LibraryView:ReaderUIEventCallback(chapter_direction, ui)
     end
 end
 
+function LibraryView:navigateAfterReaderOpen(opts)
+    opts = opts or {}
+    local ui = self.ui or ReaderUI.instance
+    if not (ui and ui.document) then return false end
+    local doc_settings = opts.doc_settings or ui.doc_settings
+    local chapter = opts.chapter
+
+    if chapter and Env.is_legado_skeleton_book(ui.document.file) then
+        local cur_resolved = Reader:resolveChapter(ui, chapter.book_cache_id)
+        if cur_resolved and cur_resolved.chapters_index == chapter.chapters_index then
+            Probe.eventf("Nav", "跳过同章跳转", nil, "第%d章 (book_id: %s)",
+                chapter.chapters_index + 1, tostring(chapter.book_cache_id))
+            return true
+        end
+        local toc = ui.document:getToc()
+        local target = Reader:getTocEntry(toc, chapter.book_cache_id, chapter.chapters_index)
+        if not target then
+            logger.warn("virtual EPUB TOC entry not found for chapter", chapter.chapters_index)
+            return false
+        end
+        Probe.eventf("Nav", "执行章节跳转", nil,
+            "第%d章 (xpointer: %s, page: %s)", chapter.chapters_index + 1,
+            tostring(target.xpointer or "-"), tostring(target.page or "-"))
+        if target.xpointer then
+            if ui.rolling and ui.rolling._wrapped_gotoXPointer then
+                ui.rolling:_wrapped_gotoXPointer(target.xpointer, target.xpointer)
+            else
+                ui:handleEvent(Event:new("GotoXPointer", target.xpointer, target.xpointer))
+            end
+        elseif target.page then
+            if ui.paging and ui.paging._wrapped_gotoPage then
+                ui.paging:_wrapped_gotoPage(target.page)
+            else
+                ui:handleEvent(Event:new("GotoPage", target.page))
+            end
+        end
+        return true
+    end
+
+    local chapter_direction = opts.chapter_direction or PlgState:chapterDirection()
+    if not chapter_direction then return false end
+    if not Env.is_legado_chapter_cache(nil, ui) then return false end
+
+    local document_is_new = ui.document.is_new == true or (doc_settings and doc_settings:readSetting("legado_doc_is_new") == true)
+
+    if document_is_new then
+        if doc_settings then doc_settings:delSetting("legado_doc_is_new") end
+        if chapter_direction == "next" then return true end
+    end
+
+    local current_page = ui:getCurrentPage()
+    local is_paging = true
+
+    if not H.is_num(current_page) or current_page == 0 then
+        if ui.paging or (ui.document.info and ui.document.info.has_pages) then
+            current_page = ui.view.state.page
+        else
+            is_paging = false
+            local xp = ui.document:getXPointer()
+            current_page = ui.document:getPageFromXPointer(tostring(xp))
+        end
+    end
+
+    local page_count = ui.document:getPageCount()
+    if not (H.is_num(page_count) and page_count > 0) and doc_settings then
+        page_count = doc_settings:readSetting("doc_pages")
+    end
+
+    local target_page
+    if chapter_direction == "next" then
+        target_page = 1
+    elseif chapter_direction == "prev" and page_count then
+        target_page = page_count
+    end
+
+    if not H.is_num(target_page) then return false end
+
+    if target_page == tonumber(current_page) then return true end
+    if ui.link then ui.link:addCurrentLocationToStack() end
+
+    if is_paging then
+        if ui.paging and ui.paging._wrapped_gotoPage then
+            ui.paging:_wrapped_gotoPage(target_page)
+        else
+            ui:handleEvent(Event:new("GotoPage", target_page))
+        end
+    else
+        local page_xpointer = ui.document:getPageXPointer(target_page)
+        if not page_xpointer then return false end
+        if ui.rolling and ui.rolling._wrapped_gotoXPointer then
+            ui.rolling:_wrapped_gotoXPointer(page_xpointer, page_xpointer)
+        else
+            ui:handleEvent(Event:new("GotoXPointer", page_xpointer, page_xpointer))
+        end
+    end
+    return true
+end
+
 function LibraryView:showReaderUI(chapter)
     if not (H.is_tbl(chapter) and H.is_str(chapter.cacheFilePath)) then return end
     local book_path = chapter.cacheFilePath
     if not util.fileExists(book_path) then
         return MessageBox:error(book_path, "不存在")
     end
+    if Env.is_legado_skeleton_book(book_path) then
+        return SkeletonBook:openExisting(chapter, {
+            parent_view = self,
+            navigate = function(opts) return self:navigateAfterReaderOpen(opts) end,
+        })
+    end
     PlgState:readingChapter(chapter)
+    local is_skeleton = false
 
     local toc_obj = self:getBookTocWidget()
-    if toc_obj and UIManager:isWidgetShown(toc_obj) then
-        UIManager:close(toc_obj)
-    end
+    if toc_obj and UIManager:isWidgetShown(toc_obj) then UIManager:close(toc_obj) end
+    local triggered = false
     local function navigate_to_target_chapter()
-        if ReaderUI.instance and ReaderUI.instance.document then
-            local toc = ReaderUI.instance.document:getToc()
-            local target_idx = (chapter.chapters_index or 0) + 1
-            if toc and toc[target_idx] then
-                if toc[target_idx].xpointer then
-                    ReaderUI.instance:handleEvent(Event:new("GotoXPointer", toc[target_idx].xpointer, toc[target_idx].xpointer))
-                elseif toc[target_idx].page then
-                    ReaderUI.instance:handleEvent(Event:new("GotoPage", toc[target_idx].page))
-                end
-            end
-        end
+        if triggered then return end
+        triggered = true
+        local chapter_direction = PlgState:chapterDirection()
+        PlgState:afterReadUiOpenCallback(false)
+        self:navigateAfterReaderOpen({
+            chapter = chapter,
+            chapter_direction = chapter_direction,
+        })
     end
 
-    if ReaderUI.instance then
-        if ReaderUI.instance.document and ReaderUI.instance.document.file == book_path then
-            -- 已经在阅读当前虚拟 EPUB，通过底层引擎原地重载并刷新界面（不重启 ReaderUI）
-            Backend:refreshDocumentInPlace(ReaderUI.instance)
+    local safe_navigate = function(...)
+        local cb = PlgState:afterReadUiOpenCallback()
+        if cb then return cb(...) end
+    end
+
+    local ui = ReaderUI.instance
+    if ui then
+        if ui.document and ui.document.file == book_path then
             UIManager:nextTick(navigate_to_target_chapter)
             return
         end
-        ReaderUI.instance:switchDocument(book_path, true)
-        UIManager:nextTick(navigate_to_target_chapter)
+        PlgState:afterReadUiOpenCallback(navigate_to_target_chapter)
+        ui:switchDocument(book_path, true, safe_navigate)
     else
+        PlgState:afterReadUiOpenCallback(navigate_to_target_chapter)
         UIManager:broadcastEvent(Event:new("SetupShowReader"))
-        ReaderUI:showReader(book_path, nil, true)
-        UIManager:nextTick(navigate_to_target_chapter)
+        local show_reader = is_skeleton and ReaderUI._legado_wrapped or ReaderUI.showReader
+        show_reader = show_reader or ReaderUI.showReader
+        show_reader(ReaderUI, book_path, nil, true, nil, safe_navigate)
     end
 end
 
@@ -409,48 +554,41 @@ function LibraryView:openLastReadChapter(bookinfo)
     if H.is_num(last_read_chapter_index) then
         if last_read_chapter_index < 0 then last_read_chapter_index = 0 end
         local chapter = Backend:getChapterInfoCache(book_cache_id, last_read_chapter_index)
+
+        if H.is_tbl(chapter) and chapter.isVolume == true then
+            chapter = Backend:findNextChapter({
+                book_cache_id = book_cache_id,
+                chapters_index = chapter.chapters_index,
+                call_event = "next",
+            }) or Backend:findNextChapter({
+                book_cache_id = book_cache_id,
+                chapters_index = chapter.chapters_index,
+                call_event = "prev",
+            })
+        end
+
         if H.is_tbl(chapter) and H.is_num(chapter.chapters_index) then
             chapter.call_event = "next"
-            self:loadAndRenderChapter(chapter)
+            self:loadAndRenderChapter(chapter, { resume_position = true })
         else
             self:showBookTocDialog(bookinfo)
             MessageBox:notice('请同步刷新目录数据')
         end
         return true
-    end 
+    end
 end
 
 function LibraryView:getSharedMetaData(dir)
     local cached_meta = PlgState:sharedMetaData(dir)
     if cached_meta then return cached_meta end
-    
+
     local new_meta = Backend:sharedChapterMetadata(dir)
     PlgState:sharedMetaData(dir, new_meta)
     return new_meta
 end
 
-function LibraryView:getBrowserHomeDir(skip_check)
-    local home_dir = Env.getHomeDir()
-    if not H.is_str(home_dir) then return nil end
-    local expected_path, browser_dir_name = Env.getLinksDir()
-    
-    if not H.is_str(PlgState.book_links_homedir) or PlgState.book_links_homedir ~= expected_path then
-        local clean_home_dir = home_dir:gsub("/+$", "")
-        local last_folder = clean_home_dir:match("([^/]+)$")
-        if last_folder and last_folder == browser_dir_name then
-            PlgState.book_links_homedir = home_dir
-        else
-            PlgState.book_links_homedir = expected_path
-        end
-    end
-
-    if not skip_check then
-        local success, err = pcall(FS.checkAndCreateFolder, PlgState.book_links_homedir)
-        if not (success and util.directoryExists(PlgState.book_links_homedir)) then
-            return nil
-        end
-    end
-    return PlgState.book_links_homedir
+function LibraryView:getBrowserHomeDir()
+    return Backend:getFullBookCacheOutputDir()
 end
 
 function LibraryView:deleteFile(file, is_file)
@@ -489,14 +627,13 @@ function LibraryView:getInstance()
 end
 
 function LibraryView:getBrowserWidget()
-    return init_book_links(self)
+    return require("Legado/BookLinks")(self)
 end
 
 function LibraryView:getMenuWidget()
-    return init_book_shelf(self)
+    return require("Legado/BookShelf")(self)
 end
 
--- reset widget cache on value change
 function LibraryView:invalidateBookShelf()
     if self.book_shelf then
         self.book_shelf:onClose()
@@ -513,23 +650,27 @@ function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible)
 
     local book_cache_id = bookinfo.cache_id
     local toc_obj = self.book_toc
-    
+    local toc_bookinfo = {
+        cache_id = bookinfo.cache_id,
+        bookUrl = bookinfo.bookUrl,
+        durChapterIndex = bookinfo.durChapterIndex,
+        name = bookinfo.name,
+        author = bookinfo.author,
+        cacheExt = bookinfo.cacheExt,
+        origin = bookinfo.origin,
+        originName = bookinfo.originName,
+        originOrder = bookinfo.originOrder,
+        coverUrl = bookinfo.coverUrl,
+        variable = bookinfo.variable,
+    }
+
     if not (H.is_tbl(toc_obj) and H.is_tbl(toc_obj.bookinfo) and toc_obj.bookinfo.cache_id == book_cache_id) then
-        self.book_toc = ChapterListing:fetchAndShow({
-            cache_id = bookinfo.cache_id,
-            bookUrl = bookinfo.bookUrl,
-            durChapterIndex = bookinfo.durChapterIndex,
-            name = bookinfo.name,
-            author = bookinfo.author,
-            cacheExt = bookinfo.cacheExt,
-            origin = bookinfo.origin,
-            originName = bookinfo.originName,
-            originOrder = bookinfo.originOrder,
-            coverUrl = bookinfo.coverUrl,
-        }, onReturnCallBack, function(chapter)
+        self.book_toc = require("Legado/ChapterListing"):fetchAndShow(toc_bookinfo, onReturnCallBack, function(chapter)
             self:loadAndRenderChapter(chapter)
         end, true, visible)
     else
+        self.book_toc.bookinfo = toc_bookinfo
+        self.book_toc.expanded_nodes = nil
         self.book_toc:updateReturnCallback(onReturnCallBack)
         if visible == true then
             self.book_toc:refreshItems(nil, true)

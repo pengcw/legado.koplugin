@@ -3,18 +3,7 @@ local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local logger = require("logger")
-local ZipWrite = require("Legado.Helper.ZipUtil").Writer
 local image_meta = require("Legado.Helper.image_meta")
-
---[[
-    EpubHelper - EPUB 工具集
-
-    功能：
-    1. 章节 HTML 生成（用于 Backend.lua 缓存章节）
-    2. EPUB 导出完整功能（用于 LibraryView 导出 EPUB）
-    3. 支持自定义封面、CSS、元数据
-    4. 自动兼容 KOReader 新旧版本的压缩库
-]]
 
 local M = {}
 
@@ -25,13 +14,10 @@ local EpubExporter = {
     default_cover = nil,
 }
 
--- CSS 文件路径
-local mianCss = string.format("%s/%s", Env.getPluginDirectory(), "Legado/res/main.css")
-local resCss = "resources/legado.css"
+local resCss = "../resources/legado.css"
+local epubCss = "resources/legado.css"
+local defaultCss = "Legado/res/main.css"
 
--- ============================================================
--- 章节标题分割函数（用于章节 HTML 和 EPUB 导出）
--- ============================================================
 local function split_title_advanced(title)
     if type(title) ~= 'string' or title == "" then
         return nil, nil
@@ -42,7 +28,6 @@ local function split_title_advanced(title)
         return nil, nil
     end
 
-    -- 查找隔断符号的位置
     local count = 0
     local segmentation = {
         ["\u{0020}"] = true,
@@ -74,7 +59,6 @@ local function split_title_advanced(title)
         ["—"] = true,
         ["."] = true
     }
-    -- 全空白标题 (仅含空格/分隔符): 无有效序号, 整体作 subpart
     local all_blank = true
     for _, w in ipairs(words) do
         if not segmentation[w] then
@@ -98,7 +82,6 @@ local function split_title_advanced(title)
     if count > 0 and count < words_len then
         local part_end = count
         local subpart_start = count + 1
-        -- 跳过连续的 clean 分隔符 (如 —— 的两个破折号)
         if is_need_clean == true then
             while subpart_start <= words_len and need_clean[words[subpart_start]] do
                 subpart_start = subpart_start + 1
@@ -106,7 +89,6 @@ local function split_title_advanced(title)
         end
 
         if subpart_start > words_len then
-            -- 去掉结尾字符
             return "", table.concat(words, "", 1, words_len - 1)
         end
         local part = table.concat(words, "", 1, part_end)
@@ -114,8 +96,6 @@ local function split_title_advanced(title)
         return part, subpart
     end
 
-    -- 回退支持: 中文"第X章/节/卷"开头
-    -- 字符级匹配：pattern 按字节会截断多字节（如"第1话"的"话"首字节 E8 产生乱码）
     local CN_NUM = { ["一"]=true, ["二"]=true, ["三"]=true, ["四"]=true, ["五"]=true,
         ["六"]=true, ["七"]=true, ["八"]=true, ["九"]=true, ["十"]=true,
         ["百"]=true, ["千"]=true, ["万"]=true, ["零"]=true, ["〇"]=true, ["两"]=true }
@@ -126,10 +106,9 @@ local function split_title_advanced(title)
         while j <= #words and (CN_NUM[words[j]] or (type(words[j]) == "string" and words[j]:match("^%d$"))) do
             j = j + 1
         end
-        -- j<=#words：纯"第X章"（如"第四章"）也算完整章节序号，EPUB 序号 span 不再为空
         if j > 2 and j <= #words and CN_SUFFIX[words[j]] then
             local part = table.concat(words, "", 1, j)
-            local subpart = table.concat(words, "", j + 1)   -- j==#words 时为空串
+            local subpart = table.concat(words, "", j + 1)
             return part, subpart
         end
     end
@@ -140,38 +119,81 @@ end
 M.split_title_advanced = split_title_advanced
 M.split_title = split_title_advanced
 
--- ============================================================
--- 章节缓存相关函数（用于 Backend.lua）
--- ============================================================
-
--- 添加 CSS 资源到书籍缓存目录
-M.addCssRes = function(book_cache_id)
-    local book_cache_path = Env.getBookCachePath(book_cache_id)
-    local book_css_path = string.format("%s/%s", book_cache_path, resCss)
-
-    if not util.fileExists(book_css_path) then
-        FS.copyFileFromTo(mianCss, book_css_path)
-    end
-    return book_css_path
+M.escape_xml = function(text)
+    local escaped = tostring(text or "")
+    escaped = escaped:gsub("&", "&amp;")
+    escaped = escaped:gsub("<", "&lt;")
+    escaped = escaped:gsub(">", "&gt;")
+    return escaped
 end
 
--- 生成章节 HTML（用于缓存章节）
+M.escape_xml_attr = function(value, quote)
+    local escaped = M.escape_xml(value)
+    if quote == '"' then
+        return escaped:gsub('"', "&quot;")
+    else
+        return escaped:gsub("'", "&apos;")
+    end
+end
+
+M.addCssRes = function(book_cache_id)
+    local resources_dir = FS.joinPath(Env.getTempDirectory(), "resources")
+    local css_path = FS.joinPath(resources_dir, "legado.css")
+    if not util.fileExists(css_path) then
+        FS.checkAndCreateFolder(resources_dir)
+        local source_path = FS.joinPath(Env.getPluginDirectory(), defaultCss)
+        if util.fileExists(source_path) then
+            FS.copyFileFromTo(source_path, css_path)
+        end
+    end
+    return css_path
+end
+
+M.prepareCacheResources = function()
+    local css_path = M.addCssRes()
+    local marker = FS.joinPath(Env.getTempDirectory(), ".nomedia")
+    if not util.fileExists(marker) then
+        local file, err = io.open(marker, "wb")
+        if file then
+            file:close()
+        else
+            logger.warn("Legado .nomedia creation failed:", err)
+        end
+    end
+    return css_path
+end
+
+M.format_title_header = function(title, ch_idx)
+    local ch_title = title
+    if (not ch_title or ch_title == "") and ch_idx ~= nil then
+        ch_title = string.format("第%d章", ch_idx + 1)
+    end
+    ch_title = ch_title or ""
+    local safe_title = M.escape_xml(ch_title)
+
+    local part, subpart = split_title_advanced(ch_title)
+    local title_header = safe_title
+    if part and part ~= "" and subpart and subpart ~= "" then
+        title_header = string.format(
+            '<span class="chapter-sequence-number">%s</span><br />%s',
+            M.escape_xml(part),
+            M.escape_xml(subpart)
+        )
+    end
+    return safe_title, title_header
+end
+
 M.addchapterT = function(title, content)
-    title = title or ""
     content = content or ""
+    local safe_title, title_header = M.format_title_header(title)
     local html = [=[
 <?xml version="1.0" encoding="utf-8"?><!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
 <head><title>%s</title><link href="%s" type="text/css" rel="stylesheet"/><style>p + p {margin-top: 0.5em;}</style>
-</head><body><h2 class="head"><span class="chapter-sequence-number">%s</span><br />%s</h2>
-<div>%s</div></body></html>]=]
-    local part, subpart = split_title_advanced(title)
-    return string.format(html, title, resCss, part or "", subpart or "", content)
+</head><body><h2 class="head">%s</h2>
+<div class="legado-chapter-v2">%s</div></body></html>]=]
+    return string.format(html, safe_title, resCss, title_header, content)
 end
-
--- ============================================================
--- EPUB 导出器（用于 LibraryView 导出 EPUB）
--- ============================================================
 
 local function generateUUID()
     local template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
@@ -189,18 +211,6 @@ function EpubExporter:new(o)
     return o
 end
 
---[[
-    初始化导出器
-    @param options table 配置选项
-        - title: 书名
-        - author: 作者
-        - description: 简介（可选）
-        - cover_path: 封面图片路径（可选）
-        - custom_css: 自定义CSS内容（可选）
-        - chapters: 章节列表
-        - output_path: 输出路径
-        - book_cache_id: 书籍缓存ID
-]]
 function EpubExporter:init(options)
     self.title = options.title or self.default_title
     self.author = options.author or self.default_author
@@ -212,7 +222,6 @@ function EpubExporter:init(options)
     self.book_cache_id = options.book_cache_id
     self.book_cache_path = Env.getBookCachePath(self.book_cache_id)
 
-    -- 获取封面文件扩展名和 MIME 类型
     if self.cover_path then
         local ext = image_meta.get_image_ext(self.cover_path) or "jpg"
         self.cover_ext = ext
@@ -226,7 +235,6 @@ function EpubExporter:createOPF()
     local manifest_items = {}
     local spine_items = {}
 
-    -- 添加封面
     table.insert(manifest_items, '<item id="cover" href="Text/cover.xhtml" media-type="application/xhtml+xml"/>')
     if self.cover_path then
         local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
@@ -237,10 +245,8 @@ function EpubExporter:createOPF()
         ))
     end
 
-    -- 添加CSS
     table.insert(manifest_items, '<item id="stylesheet" href="Text/resources/legado.css" media-type="text/css"/>')
 
-    -- 添加章节, 章节不一定是连续的, 不能使用 i
     for _, chapter in ipairs(self.chapters) do
         local chapter_index = chapter.chapters_index
         local chapter_id = string.format("chapter%d", chapter_index)
@@ -251,13 +257,10 @@ function EpubExporter:createOPF()
         table.insert(spine_items, string.format('<itemref idref="%s"/>', chapter_id))
     end
 
-    -- 封面在spine中
     table.insert(spine_items, 1, '<itemref idref="cover"/>')
 
-    -- 构建 description 元数据（如果有）
     local description_meta = ""
     if H.is_str(self.description) and self.description ~= "" then
-        -- 转义 XML 特殊字符
         local escaped_desc = self.description:gsub("&", "&amp;")
                                             :gsub("<", "&lt;")
                                             :gsub(">", "&gt;")
@@ -394,8 +397,7 @@ end
 function EpubExporter:createChapterPage(index, chapter)
     local title = chapter.title or ("第" .. index .. "章")
     local content = chapter.content or ""
-
-    local part, subpart = split_title_advanced(title)
+    local safe_title, title_header = M.format_title_header(title, index - 1)
 
     local chapter_template = [[<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -406,14 +408,12 @@ function EpubExporter:createChapterPage(index, chapter)
     <style>p + p {margin-top: 0.5em;}</style>
 </head>
 <body>
-    <h2 class="head">
-        <span class="chapter-sequence-number">%s</span><br />%s
-    </h2>
+    <h2 class="head">%s</h2>
     <div>%s</div>
 </body>
 </html>]]
 
-    return string.format(chapter_template, title, part or "", subpart or "", content)
+    return string.format(chapter_template, safe_title, title_header, content)
 end
 
 function EpubExporter:createContainer()
@@ -431,7 +431,6 @@ end
 
 function EpubExporter:build()
 
-    -- 清理失败的缓存文件（.tmp 文件）
     if H.is_str(self.book_cache_path) and util.directoryExists(self.book_cache_path) then
         util.findFiles(self.book_cache_path, function(path, fname, attr)
             if attr and attr.mode == "file" and H.is_str(fname) and fname:match("%.tmp$")then
@@ -457,6 +456,7 @@ function EpubExporter:packageEpub()
     end
 
     local epub_path_tmp = epub_path .. ".tmp"
+    local ZipWrite = require("Legado.Helper.ZipUtil").Writer
     local new_ok, writer = pcall(ZipWrite.new, ZipWrite)
     if not new_ok or not writer then
         logger.warn("无法加载任何压缩库")
@@ -500,79 +500,61 @@ function EpubExporter:packageEpub()
     addFile("OEBPS/Text/cover.xhtml", self:createCoverPage())
     addFile("OEBPS/Text/nav.xhtml", self:createNavPage())
 
-    -- chapters
     local cache_ext
     local cache_file_path
     local chapter_content
     local file_index
     for _, chapter in ipairs(self.chapters) do
-        
+
         file_index = chapter.chapters_index
         cache_ext = chapter.cache_ext
         cache_file_path = chapter.cache_path
         chapter_content = ""
 
-        -- TODO use text_to_html
         if cache_ext == "txt" then
             chapter_content = util.readFromFile(cache_file_path, "r") or ""
-            -- 将文本段落转换为HTML段落
             chapter.content = chapter_content:gsub("([^\n]+)", "<p>%1</p>")
             chapter_content = self:createChapterPage(file_index, chapter)
         elseif cache_ext == "html" or cache_ext == "xhtml" then
             chapter_content = util.readFromFile(cache_file_path, "r") or ""
-            -- 如果使用自定义 CSS，移除章节中的首字下沉相关代码
+            chapter_content = chapter_content:gsub('href="%.%./resources/legado%.css"', 'href="' .. epubCss .. '"')
             if self.custom_css_path then
-                -- 移除首字下沉的 span 标签和内联样式
                 chapter_content = chapter_content:gsub('<p%s+style="text%-indent:%s*0em;"><span%s+class="duokan%-dropcaps%-two">(.)</span>', '<p>%1')
             end
         elseif image_meta.is_image_extension(cache_ext) then
-            -- 章节可能是单图片
             local img_data = util.readFromFile(cache_file_path, "rb")
             if img_data then
                  chapter.content = string.format("<img src='resources/chapter%d.%s'><img>", file_index, cache_ext)
                  chapter_content = self:createChapterPage(file_index, chapter)
                  addFile(string.format("OEBPS/Text/resources/chapter%d.%s", file_index, cache_ext), img_data)
             end
-        end  
-        
+        end
+
         addFile(string.format("OEBPS/Text/chapter%d.xhtml", file_index), chapter_content)
     end
 
-    -- OPF
     addFile("OEBPS/content.opf", self:createOPF())
 
-    -- NCX
     addFile("OEBPS/toc.ncx", self:createNCX())
 
-    -- res /resources
     local resources_path = FS.joinPath(self.book_cache_path, "resources")
     if util.directoryExists(resources_path) then
         util.findFiles(resources_path, function(file_path, fname, attr)
             if attr and attr.mode == "file" and H.is_str(fname) and fname ~= "" then
-                -- css 由后面添加
-                if not (fname:find("%.%.") and fname == "legado.css") then
+                if fname ~= "legado.css" then
                     local file_content = util.readFromFile(file_path)
                     if file_content and #file_content > 0 then
                         addFile("OEBPS/Text/resources/" .. fname, file_content)
                     else
                         logger.warn("Empty or unreadable resource file:", file_path)
                     end
-                else
-                    logger.warn("Skipped unsafe resource name:", fname)
                 end
             end
         end, false)
     end
 
-    local css_content
-    if self.custom_css then
-        css_content = self.custom_css
-    else
-        local default_css_path = string.format("%s/Legado/main.css.lua", Env.getPluginDirectory())
-        if util.fileExists(default_css_path) then
-            css_content = util.readFromFile(default_css_path, "r")
-        end
-    end
+    local css_content = self.custom_css
+        or util.readFromFile(FS.joinPath(Env.getPluginDirectory(), defaultCss), "r")
     if css_content then
         addFile("OEBPS/Text/resources/legado.css", css_content)
     end
@@ -583,10 +565,7 @@ function EpubExporter:packageEpub()
 
     local success = os.rename(epub_path_tmp, epub_path)
     if success then
-        --logger.info("EPUB 创建成功:", epub_path)
-        --logger.info("标题:", self.title, "作者:", self.author)
 
-        -- 清理缓存目录（可选）
         collectgarbage()
         collectgarbage()
 

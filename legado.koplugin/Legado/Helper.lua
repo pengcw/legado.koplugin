@@ -1,4 +1,5 @@
 local util = require("util")
+local socket = require("socket")
 
 local M = {}
 
@@ -111,7 +112,6 @@ M.join = function(l, s)
     return table.concat(M.map(l, tostring), s, 1)
 end
 
--- pay attention to infinite recursion
 M.deep_equal = function(a, b)
     return util.tableEquals(a, b, true)
 end
@@ -122,6 +122,10 @@ end
 
 M.n_to_b = function(n)
     return n == 1
+end
+
+M.timestamp = function()
+    return socket.gettime()
 end
 
 return M

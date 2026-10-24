@@ -2,14 +2,30 @@ local logger = require("logger")
 
 local M = {}
 
---- 提取错误信息（支持字符串、LuaSocket/Copas table 错误形如 {[1]="...", message="..."}，并自动剥离 traceback 与行号）
+local function strip_lua_locations(message)
+    local clean = message
+
+    local previous
+    repeat
+        previous = clean
+        clean = clean:gsub("^%s*[%w_%.%-%/\\@]+%.lua:%d+:%s*", "")
+        clean = clean:gsub("^%s*%[string .-%]:%d+:%s*", "")
+        clean = clean:gsub("([%s%(])[%w_%.%-%/\\@]+%.lua:%d+:%s*", "%1")
+        clean = clean:gsub("([%s%(])%[string .-%]:%d+:%s*", "%1")
+        clean = clean:gsub("(：)%s*[%w_%.%-%/\\@]+%.lua:%d+:%s*", "%1")
+        clean = clean:gsub("(：)%s*%[string .-%]:%d+:%s*", "%1")
+    until clean == previous
+
+    return clean
+end
+
 M.extract_message = function(err)
     if err == nil then return "unknown error" end
-    local raw_str = nil
+    local raw_str
     if type(err) == "string" then
         raw_str = err
     elseif type(err) == "table" then
-        local val = err[1] or err.reason or err.message or err.error or err.errorMsg or err.err or err.msg or "unknown table error"
+        local val = err[1] or err.message or err.errorMsg or err.error or err.reason or err.err or err.msg or "unknown table error"
         if type(val) == "table" then
             return M.extract_message(val)
         end
@@ -18,12 +34,23 @@ M.extract_message = function(err)
         raw_str = tostring(err)
     end
 
-    local clean = raw_str:match("^(.-)%s*[%->\n\r]+%s*stack traceback:") or raw_str:match("^(.-)\r?\n") or raw_str
-    while clean:match("^.-:%d+:%s*(.+)$") do
-        clean = clean:match("^.-:%d+:%s*(.+)$")
-    end
+    raw_str = raw_str:gsub("\r\n", "\n"):gsub("\r", "\n")
+    local trace_pos = raw_str:find("\n%s*stack traceback:")
+    local clean = trace_pos and raw_str:sub(1, trace_pos - 1) or raw_str
+    clean = clean:match("^(.-)\n") or clean
+    clean = strip_lua_locations(clean)
     clean = clean:match("^%s*(.-)%s*$")
     return (clean and clean ~= "") and clean or raw_str
+end
+
+M.format_failure = function(message, err)
+    if err == nil then return message end
+    local detail = M.extract_message(err)
+    local chars = require("util").splitToChars(detail)
+    if #chars > 40 then
+        detail = table.concat(chars, "", 1, 40) .. "…"
+    end
+    return message .. "：" .. detail
 end
 
 M.pcall = function(f, ...)
@@ -31,16 +58,11 @@ M.pcall = function(f, ...)
         return false, "safe_pcall: first argument must be a function"
     end
     local function err_handler(err)
-        local raw_msg = M.extract_message(err)
-        local err_msg = tostring(raw_msg or "unknown error")
         if logger and type(logger.err) == "function" and
             G_reader_settings and G_reader_settings:isTrue("debug") then
-            local trace = debug.traceback(err_msg, 2)
-            logger.err("safe_call: ", trace)
+            logger.err("safe_call: ", debug.traceback(tostring(err), 2))
         end
-        local first_line = err_msg:match("^(.-)\n%s*stack traceback:") or err_msg:match("^(.-)\r?\n") or err_msg
-        local clean_msg = first_line:match("^.-:%d+:%s*(.+)$") or first_line
-        return clean_msg:match("^%s*(.-)%s*$")
+        return M.extract_message(err)
     end
     return xpcall(f, err_handler, ...)
 end

@@ -5,9 +5,17 @@ local FS = require("Legado.Helper.FS")
 local M = {}
 
 local LEGADO_CACHE_PATH = "/cache/legado.cache/"
-local LEGADO_BOOK_DIR = "Legado\u{200B}书目"
-local REGEX_LEGADO_BOOK_DIR = string.format("/%s/", LEGADO_BOOK_DIR)
-local LEGADO_EXT = "\u{200B}.html"
+local SKELETON_EPUB_EXT = "\u{200B}.epub"
+
+M.CHAPTER_CACHE_EXTENSIONS_LIST = {
+    "html", "cbz", "xhtml", "txt", "png", "jpg", "jpeg", "webp", "htm",
+}
+
+local CHAPTER_CACHE_EXTENSIONS = {}
+for _, ext in ipairs(M.CHAPTER_CACHE_EXTENSIONS_LIST) do
+    CHAPTER_CACHE_EXTENSIONS[ext] = true
+end
+M.CHAPTER_CACHE_EXTENSIONS = CHAPTER_CACHE_EXTENSIONS
 
 local function get_file_path(file_path, instance)
     if instance and instance.document and instance.document.file then
@@ -16,45 +24,34 @@ local function get_file_path(file_path, instance)
     return file_path
 end
 
-M.is_legado_path = function(file_path, instance)
-    local path = get_file_path(file_path, instance)
-    return type(path) == 'string' and path:lower():find(LEGADO_CACHE_PATH, 1, true) ~= nil
-end
-
-M.is_legado_browser_book = function(file_path, instance)
-    local path = get_file_path(file_path, instance)
+local function is_cache_path(path)
     if type(path) ~= "string" then return false end
-    if path:find(REGEX_LEGADO_BOOK_DIR, 1, true) ~= nil then
-        return true
-    end
-    return path:find(LEGADO_EXT, 1, true) ~= nil
+    if path:find(LEGADO_CACHE_PATH, 1, true) ~= nil then return true end
+    return path:lower():find(LEGADO_CACHE_PATH, 1, true) ~= nil
 end
 
-local CHAPTER_CACHE_EXTENSIONS = {
-    htm = true,
-    html = true,
-    xhtml = true,
-    txt = true,
-    cbz = true,
-}
+local function is_skeleton_file(path)
+    return type(path) == "string" and path:find(SKELETON_EPUB_EXT, 1, true) ~= nil
+end
 
 M.is_legado_chapter_cache = function(file_path, instance)
     local path = get_file_path(file_path, instance)
-    if not M.is_legado_path(path) then return false end
-    local extension = type(path) == "string" and path:match("%.([^%.]+)$")
+    if not is_cache_path(path) then return false end
+    local extension = path:match("%-%d+%.([^%.]+)$")
     if not extension then return false end
-    return CHAPTER_CACHE_EXTENSIONS[extension:lower()] == true
+    return CHAPTER_CACHE_EXTENSIONS[extension] == true or CHAPTER_CACHE_EXTENSIONS[extension:lower()] == true
 end
-M.is_legado_cache_file = M.is_legado_chapter_cache
+
+M.is_legado_skeleton_epub = function(file_path, instance)
+    return is_skeleton_file(get_file_path(file_path, instance))
+end
 
 M.is_legado_book = function(file_path, instance)
     local path = get_file_path(file_path, instance)
-    -- 1. 传统 cache 目录与旧版伪链接判断
-    if M.is_legado_path(path) or M.is_legado_browser_book(path) then
+    if is_cache_path(path) or is_skeleton_file(path) then
         return true
     end
 
-    -- 2. DocSettings (Layer 1)
     local doc_settings
     if instance and instance.doc_settings then
         doc_settings = instance.doc_settings
@@ -70,7 +67,6 @@ M.is_legado_book = function(file_path, instance)
         end
     end
 
-    -- 3. EPUB OPF 自包含元数据 (Layer 2)
     if instance and instance.document then
         local doc = instance.document
         local props = (doc.getProps and doc:getProps())
@@ -93,7 +89,7 @@ M.is_legado_book = function(file_path, instance)
     return false
 end
 
-M.is_legado_full_book = function(file_path, instance)
+M.is_legado_skeleton_book = function(file_path, instance)
     if not M.is_legado_book(file_path, instance) then
         return false
     end
@@ -151,11 +147,9 @@ M.getChapterCacheFilePath = function(book_cache_id, chapters_index, book_name)
     return FS.joinPath(book_cache_path, chapter_cache_name)
 end
 
-M.getVirtualBookEpubPath = function(book_cache_id, book_name)
-    assert(type(book_cache_id) == "string", "Error: book_cache_id must be a string.")
-    local book_cache_path = M.getBookCachePath(book_cache_id)
+M.getVirtualBookEpubPath = function(book_cache_id, book_name, output_dir)
     local safe_name = (type(book_name) == "string" and book_name ~= "") and FS.getSafeFilename(book_name) or "book"
-    return FS.joinPath(book_cache_path, safe_name .. ".epub")
+    return FS.joinPath(output_dir or M.getHomeDir(), safe_name .. "\u{200B}.epub")
 end
 
 M.getHomeDir = function()
@@ -164,16 +158,7 @@ M.getHomeDir = function()
 end
 
 M.getLinksDir = function()
-    return FS.joinPath(M.getHomeDir(), LEGADO_BOOK_DIR), LEGADO_BOOK_DIR
-end
-
-function M.getLinkName(name, author)
-    if type(name) ~= "string" or name == "" then return nil end
-    local valid_author = (type(author) == "string" and author ~= "") and author or "未知作者"
-    local book_lnk_name = string.format("%s-%s", name, valid_author)
-    book_lnk_name = FS.getSafeFilename(book_lnk_name)
-    if not book_lnk_name or book_lnk_name == "" then return nil end
-    return book_lnk_name .. LEGADO_EXT
+    return M.getHomeDir()
 end
 
 return M

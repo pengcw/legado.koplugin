@@ -1,55 +1,33 @@
-local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
 local NetworkMgr = require("ui/network/manager")
 local ffiUtil = require("ffi/util")
 local dbg = require("dbg")
 local LuaSettings = require("luasettings")
+local DocSettings = require("docsettings")
+local lfs = require("libs/libkoreader-lfs")
 local util = require("util")
 local time = require("ui/time")
+local bit = require("bit")
 
 local UIManager = require("ui/uimanager")
 local TaskQueue = require("Legado.task.Queue")
 local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
-local safe_call = require("Legado.Helper.Error").pcall
+local errHandler = require("Legado.Helper.Error")
+local safe_call = pcall
 local load_script = require("Legado.Helper.Loader").load_script
 local TaskLock = require("Legado.task.Lock")
 local ImageUtil = require("Legado.Helper.ImageUtil")
-local ContentParser = require("Legado.ContentParser")
 local ConfigValidator = require("Legado.ConfigValidator")
-local socket = require("socket")
+local base = require("Legado.spore.base")
 local Probe = require("Legado.Helper.Probe")
-local TaskQueueV2 = require("Legado.task.v2")
+local PreloadReadAhead = require("Legado/PreloadReadAhead")
 local PlgState = require("Legado/PlgState")
+local BookSourceLogin = require("Legado.Helper.BookSourceLogin")
+local TextTransformRules = require("Legado.Helper.TextTransformRules")
+local LocalExtension = require("Legado.LocalExtension")
 
-local function format_chapter_desc(ch)
-    if not ch then return "未知章节" end
-    local idx = ch.chapters_index or ch.index or "?"
-    local title = ch.title or ch.name or ""
-    if title ~= "" then
-        return string.format("第%s章: %s", tostring(idx), tostring(title))
-    end
-    return string.format("第%s章", tostring(idx))
-end
-
-local function get_file_size(path)
-    if not path or not util.fileExists(path) then return 0 end
-    local ok, size = pcall(function()
-        local lfs = require("libs/libkoreader-lfs")
-        return lfs.attributes(path, "size")
-    end)
-    if ok and type(size) == "number" then return size end
-    local f = io.open(path, "rb")
-    if f then
-        local sz = f:seek("end")
-        f:close()
-        return sz or 0
-    end
-    return 0
-end
-
--- 太旧版本缺少这个函数
 if not dbg.log then
     dbg.log = logger.dbg
 end
@@ -59,7 +37,16 @@ local M = {
     settings_data = nil,
     task_pid_file = nil,
     apiClient = nil,
+    preload_read_ahead = nil,
 }
+
+local BOOK_SOURCES_SYNC_INTERVAL = 60 * 60
+
+function M:normalizeDownloadThreads(value)
+    local n = tonumber(value)
+    if not n or n ~= n then n = 2 end
+    return math.max(1, math.min(6, math.floor(n)))
+end
 
 local SERVICE_UNREACHABLE_PATTERNS = {
     "connection refused", "连接被拒绝",
@@ -96,10 +83,62 @@ local function wrap_response(data, err_message)
     if data ~= nil then
         response.body = data
     else
-        local clean_err = extract_err_msg(err_message)
+        local clean_err = err_message and errHandler.extract_message(err_message) or nil
         response.message = clean_err or "Unknown error"
     end
     return response
+end
+
+local function unsupported_response(message)
+    return wrap_response(nil, message or "当前服务端不支持此功能")
+end
+
+local function extract_list(value)
+    if type(value) == "string" then
+        local ok_json, JSON = pcall(require, "json")
+        if not ok_json then return nil end
+        local ok_decode, decoded = pcall(JSON.decode, value)
+        if not ok_decode then return nil end
+        value = decoded
+    end
+    if type(value) ~= "table" then return nil end
+    if value.type == "SUCCESS" then return extract_list(value.body) end
+    if value.type == "ERROR" then return nil end
+    if value.isSuccess ~= nil then
+        if value.isSuccess ~= true then return nil end
+        return extract_list(value.data)
+    end
+    if value.list ~= nil then return extract_list(value.list) end
+    if value.data ~= nil then return extract_list(value.data) end
+    return value
+end
+
+local function normalize_list_response(raw, err_message, fallback_message)
+    local list = extract_list(raw)
+    if list then return wrap_response(list) end
+    local response_error = type(raw) == "table" and (raw.message or raw.errorMsg or raw.error)
+    return wrap_response(nil, err_message or response_error or fallback_message)
+end
+
+local function summarize_book_sources(sources, trust_provider_flag)
+    local summaries = {}
+    for _, source in ipairs(sources or {}) do
+        if type(source) == "table" then
+            local has_login = (trust_provider_flag and source.hasLogin == true)
+                or BookSourceLogin.hasLogin(source)
+            summaries[#summaries + 1] = {
+                bookSourceName = source.bookSourceName,
+                bookSourceUrl = source.bookSourceUrl,
+                bookSourceGroup = source.bookSourceGroup,
+                exploreUrl = source.exploreUrl,
+                enabled = source.enabled,
+                enabledExplore = source.enabledExplore,
+                loginUrl = source.loginUrl,
+                hasLogin = has_login and true or false,
+            }
+        end
+    end
+    return summaries
 end
 
 function M:HandleResponse(response, on_success, on_error)
@@ -118,6 +157,66 @@ function M:HandleResponse(response, on_success, on_error)
     return on_error("Unknown response type: " .. tostring(rtype))
 end
 
+function M:supportsProviderMethod(method)
+    local client = self.apiClient
+    if not client then return false end
+
+    if type(client.supports) == "function" then
+        local ok, supported = pcall(client.supports, client, method)
+        return ok and supported == true
+    end
+    return type(client[method]) == "function"
+end
+
+local function is_response_table(val)
+    return type(val) == "table" and (val.type == "SUCCESS" or val.type == "ERROR" or val.isSuccess ~= nil)
+end
+
+local function call_provider(client, method, callback, ...)
+    if not client then
+        local resp = unsupported_response("未初始化服务端")
+        if H.is_func(callback) then callback(resp) end
+        return resp
+    end
+    local fn = client[method]
+    if type(fn) == "function" then
+        local res, err = fn(client, ...)
+        if is_response_table(res) then
+            local resp = res
+            if res.isSuccess ~= nil and res.type == nil then
+                if res.isSuccess == true then
+                    resp = wrap_response(res.data)
+                else
+                    resp = wrap_response(nil, res.errorMsg or res.error or "操作失败")
+                end
+            end
+            if H.is_func(callback) then callback(resp) end
+            return resp
+        end
+        local resp = (res == nil and err ~= nil) and wrap_response(nil, err) or wrap_response(res)
+        if H.is_func(callback) then callback(resp) end
+        return resp
+    end
+    local resp = unsupported_response("当前服务端不支持此功能")
+    if H.is_func(callback) then callback(resp) end
+    return resp
+end
+
+function M:guardUnsupported(supported, message)
+    if supported == true then return nil end
+    return unsupported_response(message)
+end
+
+function M:clearAuthState()
+    local client = self.apiClient
+    local token_manager = client and client.tokenManager
+    if not token_manager or type(token_manager.clear) ~= "function" then
+        return false
+    end
+    local ok = pcall(token_manager.clear, token_manager)
+    return ok
+end
+
 function M:onServiceError(err_msg)
     if not self:_isLegadoApp() then return end
     local msg = extract_err_msg(err_msg)
@@ -126,8 +225,6 @@ function M:onServiceError(err_msg)
     local PlgState = require("Legado/PlgState")
     if PlgState.service_guard_cooldown_until
             and PlgState.service_guard_cooldown_until > time.now() then return end
-    -- ⚠️ time.now() 返回 fts（定点时间）而非秒：必须用 time.s(30) 换算，
-    -- 直接 +30 只加 30 个 fts 单位（毫秒级），冷却会形同虚设
     PlgState.service_guard_cooldown_until = time.now() + time.s(30)
     self:promptServiceUnreachable(msg)
 end
@@ -143,7 +240,6 @@ function M:promptServiceUnreachable()
         end, function(ok, result)
             if dialog and dialog.close then dialog:close() end
             if not ok or type(result) ~= "table" or not result.list or #result.list == 0 then
-                -- 无结果短冷却 10s（用户可能忘了开服务，开完想立即重扫）
                 require("Legado/PlgState").service_guard_cooldown_until = time.now() + time.s(10)
                 local scope = type(result) == "table" and result.net and result.net.cidr or nil
                 return self:_show_notice(string.format("未在 %s 网段发现开源阅读服务",
@@ -165,7 +261,6 @@ function M:promptServiceUnreachable()
             end
             table.insert(buttons, {{ text = "取消", callback = function()
                 UIManager:close(result_dialog)
-                -- 取消选择：重置冷却
                 require("Legado/PlgState").service_guard_cooldown_until = time.now() + time.s(30)
             end }})
             result_dialog = ButtonDialog:new{
@@ -176,16 +271,33 @@ function M:promptServiceUnreachable()
             UIManager:show(result_dialog)
         end, { timeout = 20 })
     end
+    local action_buttons = {}
+    if PlgState.LOCAL_MODE_ENTRY_ENABLED and not self:_isLocal() and self:_isLegadoApp() then
+        table.insert(action_buttons, {
+            text = "本地解析",
+            callback = function()
+                UIManager:close(dialog)
+                require("Legado/LibraryView"):getInstance():enableLocalMode()
+            end,
+        })
+    end
+    table.insert(action_buttons, {
+        text = "扫描并重连",
+        callback = function()
+            UIManager:close(dialog)
+            startScan()
+        end,
+    })
+    table.insert(action_buttons, {
+        text = "忽略",
+        callback = function()
+            UIManager:close(dialog)
+        end,
+    })
     dialog = ButtonDialog:new{
         title = "请检查阅读 Web 服务是否开启，\n或扫描局域网重连",
         title_align = "center",
-        buttons = {{
-            { text = "扫描并重连", callback = function()
-                UIManager:close(dialog)
-                startScan()
-            end },
-            { text = "忽略", callback = function() UIManager:close(dialog) end },
-        }},
+        buttons = { action_buttons },
     }
     UIManager:show(dialog)
 end
@@ -213,25 +325,338 @@ function M:updateActiveServerAddress(new_url)
     return wrap_response(true)
 end
 
-function M:_isQingread() return self.settings_data.data.server_type == 3 end
-function M:_isReader3() return self.settings_data.data.server_type == 2 end
-function M:_isLegadoApp() return self.settings_data.data.server_type == 1 end
+function M:_isLocal()
+    local data = self.settings_data and self.settings_data.data or {}
+    local conf_name = data.current_conf_name
+    return PlgState:isLocalMode(conf_name) or tonumber(data.server_type) == 4
+end
+
+function M:canUseBookDiscovery()
+    return not self:_isLocal()
+end
+
+function M:_isQingread()
+    return tonumber(self.settings_data.data.server_type) == 3
+end
+
+function M:_isReader3()
+    return tonumber(self.settings_data.data.server_type) == 2
+end
+
+function M:_isLegadoApp()
+    return tonumber(self.settings_data.data.server_type) == 1
+end
+
+function M:_getTextTransformDialect()
+    if self:_isReader3() then return "reader3" end
+    if self:_isQingread() then return "qread" end
+    return "legado"
+end
+
+function M:_getMatchedTextTransformRules(book, target)
+    if type(book) ~= "table" then return {} end
+    local db = self.dbManager
+    if not db or type(db.getEnabledTextTransformRules) ~= "function" then return {} end
+
+    local shelf_id = book.book_self_id or book.bookShelfId or self:getCurrentBookShelfId()
+    if not (H.is_str(shelf_id) and shelf_id ~= "") then return {} end
+
+    local ok, rules = pcall(db.getEnabledTextTransformRules, db, shelf_id)
+    if not ok or type(rules) ~= "table" then
+        logger.warn("读取文本转换规则失败:", tostring(rules))
+        return {}
+    end
+
+    local matched_ok, matched = pcall(
+        TextTransformRules.filter,
+        rules,
+        self:_getTextTransformDialect(),
+        book,
+        target
+    )
+    if not matched_ok then
+        logger.warn("筛选文本转换规则失败:", tostring(matched))
+        return {}
+    end
+    return matched
+end
+
+function M:_withLocalTextTransformRequest(value, target)
+    if not self:_isLocal() or type(value) ~= "table" then return value end
+
+    local rules = self:_getMatchedTextTransformRules(value, target)
+    if #rules == 0 then return value end
+
+    local request = {}
+    for key, item in pairs(value) do request[key] = item end
+    request.textTransformDialect = self:_getTextTransformDialect()
+    request.textTransformRules = rules
+    return request
+end
+
+function M:_applyRemoteReader3TextTransform(values, book, target)
+    if self:_isLocal() or not self:_isReader3() or type(values) ~= "table" or #values == 0 then
+        return values
+    end
+
+    local rules = self:_getMatchedTextTransformRules(book, target)
+    if #rules == 0 then return values end
+
+    local transformed, err = LocalExtension.applyReader3TextTransform(values, rules)
+    if type(transformed) ~= "table" then
+        logger.warn("Reader3 文本替换失败，使用原始内容:", tostring(err))
+        return values
+    end
+    return transformed
+end
+
+function M:_applyRemoteReader3ChapterTitles(chapters, book)
+    if self:_isLocal() or not self:_isReader3() or type(chapters) ~= "table" then
+        return chapters
+    end
+
+    local indexes, titles = {}, {}
+    for index, chapter in ipairs(chapters) do
+        if type(chapter) == "table" and H.is_str(chapter.title) then
+            indexes[#indexes + 1] = index
+            titles[#titles + 1] = chapter.title
+        end
+    end
+    if #titles == 0 then return chapters end
+
+    local transformed = self:_applyRemoteReader3TextTransform(titles, book, "title")
+    for i, chapter_index in ipairs(indexes) do
+        chapters[chapter_index].title = transformed[i] or chapters[chapter_index].title
+    end
+    return chapters
+end
+
+function M:isEnhancedMode()
+    local data = self.settings_data and self.settings_data.data or {}
+    return data.enhanced_mode == true
+end
+
+function M:toggleEnhancedMode(enable)
+    if enable == true then
+        local ok, err = LocalExtension.available()
+        if not ok then return false, err end
+    elseif self:_isLocal() then
+        self:toggleLocalMode(false)
+    end
+
+    if self.settings_data and self.settings_data.data then
+        self.settings_data.data.enhanced_mode = enable == true
+        if type(self.settings_data.flush) == "function" then
+            self.settings_data:flush()
+        end
+    end
+    return true
+end
+
+function M:syncLocalModeData(shelf_id)
+    shelf_id = shelf_id or self:getCurrentBookShelfId() or "default"
+    local engine_ok, engine_err = LocalExtension.available()
+    if not engine_ok then
+        return false, engine_err, false
+    end
+
+    local source_response = self:getBookSourcesList()
+    local supports_rules = self:supportsProviderMethod("getReplaceRules")
+    local rule_response, rule_err
+    if supports_rules then rule_response, rule_err = self:getReplaceRules() end
+    local sources = extract_list(source_response)
+    if type(sources) ~= "table" or (#sources == 0 and next(sources) == nil) then
+        return true, (source_response and source_response.message) or "未知错误", false
+    end
+
+    local rules = extract_list(rule_response)
+    if supports_rules and type(rules) ~= "table" then
+        return false, "同步替换规则失败: " .. tostring(rule_err or (type(rule_response) == "table" and rule_response.message) or "未知错误"), false
+    end
+
+    local ok, err = pcall(function()
+        if supports_rules then
+            local valid, validation_err = require("Legado.Helper.TextTransformRules").validateSnapshot(rules)
+            if not valid then error(validation_err) end
+        end
+        local committed, commit_err = self.dbManager:transaction(function()
+            self.dbManager:syncBookSources(shelf_id, sources)
+            if supports_rules then
+                self.dbManager:syncTextTransformRules(shelf_id, rules, self:_getTextTransformDialect())
+            end
+            return true
+        end)()
+        if not committed then error(commit_err) end
+    end)
+    if not ok then
+        return false, "同步本地模式数据失败: " .. tostring(err), false
+    end
+    return true, nil, true
+end
+
+function M:applyLocalModeState(enable)
+    local data = self.settings_data and self.settings_data.data or {}
+    PlgState:isLocalMode(data.current_conf_name, enable == true)
+    self:loadApiProvider()
+    return true
+end
+
+function M:toggleLocalMode(enable)
+    if enable then
+        local shelf_id = self:getCurrentBookShelfId() or "default"
+        local ok, err, synced = self:syncLocalModeData(shelf_id)
+        if not ok then return false, err end
+
+        local local_sources = {}
+        if self.dbManager and type(self.dbManager.getEnabledBookSources) == "function" then
+            local_sources = self.dbManager:getEnabledBookSources(shelf_id) or {}
+        end
+        if not synced and #local_sources == 0 then
+            return false, "同步书源失败且本地无离线书源: " .. tostring(err or "未知错误")
+        end
+        self:applyLocalModeState(true)
+        return true, synced and nil or "OFFLINE_CACHE"
+    end
+
+    self:applyLocalModeState(false)
+    return true
+end
 
 function M:loadApiProvider()
     local client
+    local opts = { settings = self:getSettings() }
+    if self:_isLocal() then
+        local local_client = LocalExtension.createProvider({
+            db = self.dbManager,
+            shelf_id = self:getCurrentBookShelfId() or "default",
+            settings = opts.settings,
+        })
+        if local_client then
+            self.apiClient = local_client
+            return
+        end
+
+        local data = self.settings_data and self.settings_data.data or {}
+        if tonumber(data.server_type) == 4 then
+            self.apiClient = nil
+            return
+        end
+        PlgState:isLocalMode(data.current_conf_name, false)
+    end
+
     if self:_isReader3() then
         client = require("Legado.spore.reader3")
     elseif self:_isQingread() then
         client = require("Legado.spore.qread")
+        opts.source_summary_loader = function()
+            local db, shelf_id = self.dbManager, self:getCurrentBookShelfId()
+            if not db or not H.is_str(shelf_id) or shelf_id == "" then return nil end
+            local sources = db:getEnabledBookSourceSummaries(shelf_id)
+            if #sources > 0 then return sources end
+            local known = db:execute([[
+                SELECT 1 FROM book_sources WHERE bookShelfId = ?
+                UNION ALL
+                SELECT 1 FROM sync_records WHERE scopeType = 'bookshelf' AND scopeId = ?
+                    AND resourceType = 'book_sources' AND resourceKey = '' AND lastSuccessAt > 0
+                LIMIT 1
+            ]], { shelf_id, shelf_id })
+            if #known > 0 then return sources end
+            return nil
+        end
     else
         client = require("Legado.spore.android_app")
     end
-    self.apiClient = client:new{
-        settings = self:getSettings()
+    self.apiClient = client:new(opts)
+end
+
+local preload_callbacks = {}
+
+local function make_preload_host(backend)
+    return {
+        is_connected = function()
+            return NetworkMgr:isConnected()
+        end,
+        get_settings = function()
+            return backend:getSettings()
+        end,
+        normalize_download_threads = function(value)
+            return backend:normalizeDownloadThreads(value)
+        end,
+        is_comic = function(book_cache_id)
+            return backend:isBookTypeComic(book_cache_id)
+        end,
+        get_usable_cache_path = function(chapter)
+            local cache = backend:getCacheChapterFilePath(chapter, true)
+            if cache and cache.cacheFilePath and util.fileExists(cache.cacheFilePath) then
+                return cache.cacheFilePath
+            end
+        end,
+        get_cached_ahead = function(chapter)
+            return backend:getcompleteReadAheadChapters(chapter)
+        end,
+        get_readable_ahead_indexes = function(chapter, count)
+            if backend.dbManager and type(backend.dbManager.getReadableAheadIndexes) == "function" then
+                return backend.dbManager:getReadableAheadIndexes(chapter, count)
+            end
+            local current_index = tonumber(chapter and chapter.chapters_index)
+            local indexes = {}
+            if current_index then
+                for i = 1, math.max(0, math.floor(tonumber(count) or 0)) do
+                    indexes[i] = current_index + i
+                end
+            end
+            return indexes
+        end,
+        find_missing_chapters = function(chapter, count)
+            return backend:findNextChaptersNotDownLoad(chapter, count, true)
+        end,
+        get_book_info = function(book_cache_id)
+            return backend:getBookInfoCache(book_cache_id)
+        end,
+        download_chapter = function(chapter, options)
+            return backend:_pDownloadChapter(chapter, options)
+        end,
+        commit_cache_path = function(chapter, path)
+            return backend.dbManager:updateCacheFilePath(chapter, path)
+        end,
+        set_task_lock = function(targets, is_locked, ttl, owner_id)
+            return TaskLock.setLock(backend.dbManager, targets, is_locked, ttl, owner_id)
+        end,
+        inject_one = function(book_cache_id, chapter_index, raw, book_name)
+            if preload_callbacks.inject_one then
+                return preload_callbacks.inject_one(book_cache_id, chapter_index, raw, book_name)
+            end
+        end,
+        inject_many = function(book_cache_id, chapters_map, book_name)
+            if preload_callbacks.inject_many then
+                return preload_callbacks.inject_many(book_cache_id, chapters_map, book_name)
+            end
+        end,
+        reading_chapter = function()
+            return PlgState:readingChapter()
+        end,
+        request_refresh = function(priority, context)
+            if preload_callbacks.request_refresh then return preload_callbacks.request_refresh(priority, context) end
+        end,
+        show_notice = function(message)
+            return backend:_show_notice(message)
+        end,
+        show_chapter_loading = function(chapter)
+            if preload_callbacks.show_chapter_loading then return preload_callbacks.show_chapter_loading(chapter) end
+        end,
+        hide_chapter_loading = function(chapter, error_msg)
+            if preload_callbacks.hide_chapter_loading then return preload_callbacks.hide_chapter_loading(chapter, error_msg) end
+        end,
     }
 end
 
-function M:initialize()
+function M:_newPreloadReadAhead(callbacks)
+    if callbacks then preload_callbacks = callbacks end
+    return PreloadReadAhead:new(make_preload_host(self), PlgState)
+end
+
+function M:initialize(callbacks)
+    if callbacks then preload_callbacks = callbacks end
     local BookInfoDB = require("Legado/BookInfoDB")
     self.dbManager = BookInfoDB:new({
         dbPath = Env.getTempDirectory() .. "/bookinfo.db"
@@ -243,6 +668,7 @@ function M:initialize()
     if not ok then
         logger.err("run_once_task loading loading failed:", err_msg)
     end
+    require("Legado/EpubHelper").prepareCacheResources()
 
     self.settings_data = self:getLuaConfig(Env.getUserSettingsPath())
 
@@ -268,6 +694,7 @@ function M:initialize()
         self.settings_data:flush()
     end
     pcall(function() TaskLock.cleanAll(self.dbManager) end)
+    self.preload_read_ahead = self:_newPreloadReadAhead()
     self:loadApiProvider()
 end
 
@@ -278,7 +705,7 @@ function M:checkOta(is_compel)
     local need_check = is_compel == true or (os.time() - last_check > check_interval)
 
     if need_check and NetworkMgr:isConnected() then
-        local legado_update = require("Legado.Update")
+        local legado_update = require("Legado/Update")
         setting_data.last_check_ota = (os.time() - check_interval + 259200)
         self:saveSettings(setting_data)
 
@@ -306,16 +733,35 @@ function M:sharedChapterMetadata(book_cache_dir)
     local book_defaults_path = FS.joinPath(book_cache_dir, "book_defaults.lua")
     return self:getLuaConfig(book_defaults_path)
 end
+function M:bookContentType(book)
+    if H.is_str(book) then book = self:getBookInfoCache(book) end
+    if not H.is_tbl(book) then return "unknown" end
+    local value = tonumber(book.btype or book.type)
+    if not value then
+        if book.cacheExt == "cbz" then return "comic" end
+        return "unknown"
+    end
+    if value == 2 or bit.band(value, 64) ~= 0 then return "comic" end
+    if value == 0 or value == 8 or bit.band(value, 8) ~= 0 then return "reader" end
+    if book.cacheExt == "cbz" then return "comic" end
+    return "unknown"
+end
+
 function M:isBookTypeComic(book_cache_id)
     if not H.is_str(book_cache_id) then return false end
-    local chapter = self:getChapterInfoCache(book_cache_id, 1)
-    return H.is_tbl(chapter) and chapter.cacheExt == "cbz" or false
+    local route = self:bookReaderRoute(book_cache_id)
+    if route == "comic" then return true end
+    if route == "reader" then return false end
+    return self:bookContentType(book_cache_id) == "comic"
 end
 
 function M:refreshLibraryCache(last_refresh_time)
     if self:enforceRateLimit(last_refresh_time, 2000) then
         dbg.v('ui_refresh_time prevent refreshChaptersCache')
         return wrap_response(nil, '处理中')
+    end
+    if self:_isLocal() then
+        return wrap_response(true)
     end
     local ret, err_msg = self.apiClient:getBookshelf(function(response)
         local bookShelfId = self:getCurrentBookShelfId()
@@ -332,6 +778,10 @@ function M:refreshLibraryCache(last_refresh_time)
 end
 
 function M:syncAndResortBooks()
+    if not self:supportsProviderMethod("getBookshelf") then
+        return unsupported_response("当前服务端不支持拉取远端书架排序")
+    end
+
     local wrapped_response = self:refreshLibraryCache()
     return self:HandleResponse(wrapped_response, function(_)
         local bookShelfId = self:getCurrentBookShelfId()
@@ -349,7 +799,6 @@ end
 
 function M:addBookToLibrary(bookinfo)
     return wrap_response(self.apiClient:saveBook(bookinfo, function(response)
-        -- isReader3Only = true
         if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
             local bookShelfId = self:getCurrentBookShelfId()
             local db_save = {response.data}
@@ -365,11 +814,28 @@ function M:addBookToLibrary(bookinfo)
         return true
     end))
 end
+function M:isDownloadBook(bookinfo)
+    return self:_isLocal() and H.is_tbl(bookinfo)
+        and tonumber(bookinfo.btype or bookinfo.type) == 3
+end
+
+function M:downloadBook(bookinfo, temp)
+    if not self:isDownloadBook(bookinfo) then
+        return unsupported_response("当前模式不支持文件书源下载")
+    end
+    return wrap_response(self.apiClient:downloadBook(bookinfo, temp))
+end
+
 function M:deleteBook(bookinfo)
+    if self:_isLocal() then
+        return unsupported_response("本地解析模式不支持删除")
+    end
     return wrap_response(self.apiClient:deleteBook(bookinfo))
 end
 function M:getChaptersList(bookinfo)
-    return wrap_response(self.apiClient:getChapterList(bookinfo))
+    return wrap_response(self.apiClient:getChapterList(
+        self:_withLocalTextTransformRequest(bookinfo, "title")
+    ))
 end
 function M:refreshChaptersCache(bookinfo, last_refresh_time)
     if self:enforceRateLimit(last_refresh_time, 2000) then
@@ -380,29 +846,109 @@ function M:refreshChaptersCache(bookinfo, last_refresh_time)
         return wrap_response(nil, "获取目录参数错误")
     end
     local book_cache_id = bookinfo.cache_id
+    local book_shelf_id = bookinfo.book_self_id or self:getCurrentBookShelfId()
 
-    return wrap_response(self.apiClient:getChapterList(bookinfo, function(response)
+    local request_book = self:_withLocalTextTransformRequest(bookinfo, "title")
+    return wrap_response(self.apiClient:getChapterList(request_book, function(response)
+        if not self:_isLocal() and self:_isReader3() and H.is_tbl(response.data) then
+            self:_applyRemoteReader3ChapterTitles(response.data, bookinfo)
+        end
+
+        local write_ok, valid_count = false, 0
         local status, err = safe_call(function()
-            local res = self.dbManager:upsertChapters(book_cache_id, response.data)
-            pcall(function() self:syncVirtualBookNewChapters(book_cache_id, bookinfo.name or bookinfo.title) end)
-            return res
+            if self:_isLocal() and H.is_str(response.bookVariable) then
+                self.dbManager:transaction(function()
+                    write_ok, valid_count = self.dbManager:upsertChapters(book_cache_id, response.data)
+                    if write_ok and valid_count > 0 then
+                        self.dbManager:dynamicUpdate('books', { variable = response.bookVariable }, {
+                            bookCacheId = book_cache_id, bookShelfId = book_shelf_id,
+                            bookUrl = bookinfo.bookUrl, origin = bookinfo.origin,
+                        })
+                    end
+                end)()
+            else
+                write_ok, valid_count = self.dbManager:upsertChapters(book_cache_id, response.data)
+            end
+            if write_ok and valid_count > 0 then
+                if preload_callbacks.sync_new_chapters then
+                    pcall(preload_callbacks.sync_new_chapters, book_cache_id, bookinfo.name or bookinfo.title)
+                end
+            end
         end)
-        if not status then
+        if not status or not write_ok then
             dbg.log('refreshChaptersCache数据写入', tostring(err))
             return nil, '数据写入出错，请重试'
+        end
+        if valid_count <= 0 then
+            return nil, '目录为空或格式异常'
         end
         return true
     end))
 end
 
 function M:pGetChapterContent(chapter)
-    return wrap_response(self.apiClient:getBookContent(chapter))
+    if not self:_isLocal() and self:_isReader3() then
+        return wrap_response(self.apiClient:getBookContent(chapter, function(response)
+            local content = response.data
+            if not H.is_str(content) then return content end
+            local transformed = self:_applyRemoteReader3TextTransform({ content }, chapter, "content")
+            return transformed[1] or content
+        end))
+    end
+
+    if not self:_isLocal() then
+        return wrap_response(self.apiClient:getBookContent(chapter))
+    end
+
+    local request_chapter = self:_withLocalTextTransformRequest(chapter, "content")
+    if not H.is_str(chapter.book_cache_id) or not H.is_num(chapter.chapters_index) then
+        return wrap_response(self.apiClient:getBookContent(request_chapter))
+    end
+    local next_chapter = self.dbManager:findNextChapterInfo({
+        book_cache_id = chapter.book_cache_id,
+        chapters_index = chapter.chapters_index,
+        call_event = "next",
+    })
+    if H.is_tbl(next_chapter) and H.is_str(next_chapter.chapterUrl)
+            and next_chapter.chapterUrl ~= "" then
+        if request_chapter == chapter then
+            request_chapter = {}
+            for key, value in pairs(chapter) do request_chapter[key] = value end
+        end
+        request_chapter.nextChapterUrl = next_chapter.chapterUrl
+    end
+    local shelf_id = chapter.book_self_id or self:getCurrentBookShelfId()
+    return wrap_response(self.apiClient:getBookContent(request_chapter, function(response)
+        local book_changed = H.is_str(response.bookVariable) and response.bookVariable ~= chapter.bookVariable
+        local chapter_changed = H.is_str(response.variable) and response.variable ~= chapter.variable
+        if book_changed or chapter_changed then
+            local saved, err = self.dbManager:transaction(function()
+                if book_changed then
+                    self.dbManager:dynamicUpdate('books', { variable = response.bookVariable }, {
+                        bookCacheId = chapter.book_cache_id, bookShelfId = shelf_id,
+                        bookUrl = chapter.bookUrl, origin = chapter.origin,
+                        variable = chapter.bookVariable or '_NULL',
+                    })
+                end
+                if chapter_changed then
+                    self.dbManager:dynamicUpdate('chapters', { variable = response.variable }, {
+                        bookCacheId = chapter.book_cache_id, chapterIndex = chapter.chapters_index,
+                        variable = chapter.variable or '_NULL',
+                    })
+                end
+                return true
+            end)()
+            if not saved then error(err or '正文变量保存失败') end
+        end
+        return response.data
+    end))
 end
 function M:refreshBookContent(chapter)
+    if self:_isLocal() then return self:pGetChapterContent(chapter) end
     return wrap_response(self.apiClient:refreshBookContent(chapter))
 end
 function M:saveBookProgress(chapter)
-    return wrap_response(self.apiClient:saveBookProgress(chapter))
+    return call_provider(self.apiClient, "saveBookProgress", nil, chapter)
 end
 function M:getProxyCoverUrl(coverUrl)
     return self.apiClient:getProxyCoverUrl(coverUrl)
@@ -417,59 +963,349 @@ function M:getProxyImageUrl(bookUrl, img_src)
     return img_src
 end
 function M:getBookSourcesList(callback)
-    return wrap_response(self.apiClient:getBookSourcesList(callback))
+    local raw, err_msg = self.apiClient:getBookSourcesList()
+    local response = normalize_list_response(raw, err_msg, "获取书源列表失败")
+    if H.is_func(callback) then callback(response) end
+    return response
 end
-function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
-    return wrap_response(self.apiClient:getBookSourcesExploreUrl(bookSourceUrl, callback))
-end
-function M:getAvailableBookSource(...)
-    if type(self.apiClient.getAvailableBookSource) == "function" then
-        return self.apiClient:getAvailableBookSource(...)
+
+function M:getBookSourcesListCached(callback)
+    local shelf_id = self:getCurrentBookShelfId()
+    local summary_reader = self:_isLocal() and self.dbManager
+        and self.dbManager.getEnabledBookSourceSummaries
+    if H.is_str(shelf_id) and shelf_id ~= ""
+            and self.dbManager and type(self.dbManager.getEnabledBookSources) == "function" then
+        local local_ok, local_sources = pcall(function()
+            if summary_reader then return summary_reader(self.dbManager, shelf_id) end
+            return self.dbManager:getEnabledBookSources(shelf_id)
+        end)
+        if local_ok and H.is_tbl(local_sources) and #local_sources > 0 then
+            local response = wrap_response(summarize_book_sources(local_sources, summary_reader ~= nil))
+            if H.is_func(callback) then callback(response) end
+            return response
+        end
+        if not local_ok then
+            logger.warn("getBookSourcesListCached: local read failed:", tostring(local_sources))
+        end
     end
-    return nil
+
+    local response = self:getBookSourcesList()
+    local sources = extract_list(response)
+    if not sources then
+        if H.is_func(callback) then callback(response) end
+        return response
+    end
+
+    local local_mode = self:_isLocal()
+    local response_sources = local_mode and summarize_book_sources(sources, true) or sources
+    if local_mode then
+        response = wrap_response(response_sources)
+        if H.is_func(callback) then callback(response) end
+        return response
+    end
+
+    if H.is_str(shelf_id) and shelf_id ~= ""
+            and self.dbManager and type(self.dbManager.syncBookSources) == "function" then
+        local sync_ok, sync_err = pcall(function()
+            return self.dbManager:syncBookSources(shelf_id, sources)
+        end)
+        if not sync_ok then
+            response = wrap_response(nil, "缓存书源失败: " .. tostring(sync_err))
+        else
+            response = wrap_response(response_sources)
+        end
+    else
+        response = wrap_response(response_sources)
+    end
+    if H.is_func(callback) then callback(response) end
+    return response
 end
+
+function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
+    return call_provider(self.apiClient, "getBookSourcesExploreUrl", callback, bookSourceUrl, callback)
+end
+
+function M:getBookSourceLoginUi(bookSourceUrl, callback)
+    return call_provider(self.apiClient, "getBookSourceLoginUi", callback, bookSourceUrl, callback)
+end
+
+function M:loginBookSource(options, callback)
+    return call_provider(self.apiClient, "loginBookSource", callback, options, callback)
+end
+
+function M:getAvailableBookSource(options, on_finish, on_chunk)
+    local client = self.apiClient
+    if not client or type(client.getAvailableBookSource) ~= "function" then
+        local msg = "当前服务端不支持此功能"
+        if H.is_func(on_finish) then on_finish(false, nil, msg, -1) end
+        return nil, msg
+    end
+    if self:_isLocal() then self:closeDbManager() end
+    return client:getAvailableBookSource(options, on_finish, on_chunk)
+end
+
 function M:exploreBook(options, callback)
-    return wrap_response(self.apiClient:exploreBook(options, callback))
+    return call_provider(self.apiClient, "exploreBook", callback, options, callback)
 end
+
 function M:autoChangeBookSource(bookinfo, callback)
-    return wrap_response(self.apiClient:autoChangeBookSource(bookinfo, callback))
+    return call_provider(self.apiClient, "autoChangeBookSource", callback, bookinfo, callback)
 end
+
 function M:searchBookSingle(options, callback)
-    return wrap_response(self.apiClient:searchBookSingle(options, callback))
+    return call_provider(self.apiClient, "searchBookSingle", callback, options, callback)
 end
 
 function M:searchBookMulti(...)
-    if type(self.apiClient.searchBookMulti) == "function" then
-        return self.apiClient:searchBookMulti(...)
+    local client = self.apiClient
+    if not client or type(client.searchBookMulti) ~= "function" then
+        return wrap_response(nil, "当前服务端不支持此功能")
     end
-    return nil
+
+    if self:_isLocal() then self:closeDbManager() end
+    local result, err_msg = client:searchBookMulti(...)
+    if result == nil and err_msg ~= nil then
+        return wrap_response(nil, err_msg)
+    end
+    return result
 end
 
 function M:getReplaceRules(callback)
-    if type(self.apiClient.getReplaceRules) == "function" then
-        return wrap_response(self.apiClient:getReplaceRules(callback))
+    local client = self.apiClient
+    if not client or type(client.getReplaceRules) ~= "function" then
+        local resp = unsupported_response("当前服务端不支持替换规则")
+        if H.is_func(callback) then callback(resp) end
+        return resp
     end
-    if callback then callback({type="SUCCESS", body={}}) end
-    return {type="SUCCESS", body={}}
+    local raw, err_msg = client:getReplaceRules()
+    local response = normalize_list_response(raw, err_msg, "获取替换规则失败")
+    if H.is_func(callback) then callback(response) end
+    return response
+end
+
+function M:getTxtTocRules(callback)
+    local client = self.apiClient
+    if not client or type(client.getTxtTocRules) ~= "function" then
+        local resp = unsupported_response("当前客户端不支持获取文本目录规则")
+        if H.is_func(callback) then callback(resp) end
+        return resp
+    end
+    local raw, err_msg = client:getTxtTocRules()
+    local response = normalize_list_response(raw, err_msg, "获取文本目录规则失败")
+    if H.is_func(callback) then callback(response) end
+    return response
+end
+
+function M:updateBookSources(shelf_id, skip_reload)
+    if self:_isLocal() then
+        return nil, "本地模式不支持同步远端书源"
+    end
+
+    if not (self.dbManager and type(self.dbManager.syncBookSources) == "function") then
+        return nil, "本地数据库不可用"
+    end
+
+    local response = self:getBookSourcesList()
+    local sources = extract_list(response)
+    if not sources then
+        return nil, (response and response.message) or "获取书源列表失败"
+    end
+
+    shelf_id = shelf_id or self:getCurrentBookShelfId()
+    if not (H.is_str(shelf_id) and shelf_id ~= "") then
+        return nil, "书架标识无效"
+    end
+
+    local ok, count = pcall(function()
+        return self.dbManager:syncBookSources(shelf_id, sources)
+    end)
+    if not ok then
+        return nil, "同步书源失败: " .. tostring(count)
+    end
+
+    if not skip_reload then
+        self:loadApiProvider()
+    end
+    return tonumber(count) or 0
+end
+
+function M:updateReplaceRules(shelf_id, skip_reload)
+    if self:_isLocal() then
+        return nil, "本地模式不支持同步远端替换规则"
+    end
+
+    if type(self.apiClient.getReplaceRules) ~= "function" then
+        return nil, "当前客户端不支持获取替换规则"
+    end
+    if not (self.dbManager and type(self.dbManager.syncTextTransformRules) == "function") then
+        return nil, "本地数据库不可用"
+    end
+
+    local response = self:getReplaceRules()
+    local rules = extract_list(response)
+    if not rules then
+        return nil, (response and response.message) or "获取替换规则失败"
+    end
+
+    shelf_id = shelf_id or self:getCurrentBookShelfId()
+    if not (H.is_str(shelf_id) and shelf_id ~= "") then
+        return nil, "书架标识无效"
+    end
+
+    local ok, count = pcall(function()
+        return self.dbManager:syncTextTransformRules(shelf_id, rules, self:_getTextTransformDialect())
+    end)
+    if not ok then
+        return nil, "同步替换规则失败: " .. tostring(count)
+    end
+
+    if not skip_reload then
+        self:loadApiProvider()
+    end
+    return tonumber(count) or 0
+end
+
+function M:BookSourcesAndRulesAsync(force)
+    if self:_isLocal() then
+        if force == true then return false, "本地模式不支持同步远端书源和替换规则" end
+        return false
+    end
+
+    local shelf_id = self:getCurrentBookShelfId()
+    local probe_target = "book_sources_and_rules@" .. tostring(shelf_id or "-")
+    if not (H.is_str(shelf_id) and shelf_id ~= "") then
+        logger.warn("BookSourcesAndRulesAsync: invalid bookshelf id")
+        return
+    end
+
+    local channel = TaskQueue:getChannel("BookSourcesAndRules")
+    if channel:hasTasks() then
+        logger.dbg("BookSourcesAndRulesAsync: task already running")
+        return
+    end
+
+    if not (self.dbManager and type(self.dbManager.tryStartSync) == "function") then
+        logger.warn("BookSourcesAndRulesAsync: sync state is unavailable")
+        return
+    end
+    local sync_interval = force == true and 0 or BOOK_SOURCES_SYNC_INTERVAL
+    local gate_ok, should_start = pcall(function()
+        return self.dbManager:tryStartSync(shelf_id, "book_sources", sync_interval)
+    end)
+    if not gate_ok then
+        logger.warn("BookSourcesAndRulesAsync: sync frequency check failed:", tostring(should_start))
+        return
+    end
+    Probe.eventf("Source", "后台同步限频", nil,
+        "shelf_id=%s allowed=%s interval=%ds",
+        shelf_id, tostring(should_start == true), sync_interval)
+    if should_start ~= true then
+        logger.dbg("BookSourcesAndRulesAsync: sync interval not reached")
+        return
+    end
+
+    local t_sync_start = Probe.start("Source", "书源后台更新", probe_target, function()
+        return string.format("(force=%s interval=%ds)", tostring(force == true), sync_interval)
+    end)
+
+    self:closeDbManager()
+    channel:pushTask(function(target_shelf_id)
+        local errors = {}
+        local source_ok, source_count, source_err = pcall(function()
+            return self:updateBookSources(target_shelf_id, true)
+        end)
+        if not source_ok then
+            logger.err("BookSourcesAndRulesAsync: book sources sync failed:", tostring(source_count))
+        elseif not source_count then
+            logger.warn("BookSourcesAndRulesAsync: book sources sync failed:", tostring(source_err))
+        end
+
+        local rule_ok, rule_count, rule_err = pcall(function()
+            return self:updateReplaceRules(target_shelf_id, true)
+        end)
+        if not rule_ok then
+            logger.err("BookSourcesAndRulesAsync: replace rules sync failed:", tostring(rule_count))
+        elseif not rule_count then
+            logger.warn("BookSourcesAndRulesAsync: replace rules sync failed:", tostring(rule_err))
+        end
+
+        if not source_ok or source_count == nil then
+            errors[#errors + 1] = "书源: " .. tostring(source_ok and source_err or source_count)
+        end
+        if not rule_ok or rule_count == nil then
+            errors[#errors + 1] = "规则: " .. tostring(rule_ok and rule_err or rule_count)
+        end
+        if #errors > 0 then return false, table.concat(errors, "; ") end
+        return true
+    end, function(ok, err)
+        if ok then
+            Probe.done("Source", "书源后台更新", probe_target, t_sync_start, "200 OK")
+            if self:_isLocal() then
+                self:loadApiProvider()
+            end
+        else
+            Probe.fail("Source", "书源后台更新", probe_target, t_sync_start, tostring(err))
+            logger.err("BookSourcesAndRulesAsync: process failed:", tostring(err))
+        end
+    end, {
+        args = { shelf_id },
+        timeout = 120,
+    })
 end
 
 function M:changeBookSource(newBookSource)
+    local client = self.apiClient
+    if not client or type(client.changeBookSource) ~= "function" then
+        return unsupported_response("当前服务端不支持换源")
+    end
     PlgState:cancelPreload("change_book_source")
     return wrap_response(self.apiClient:changeBookSource(newBookSource, function(response)
-        if H.is_tbl(response) and H.is_tbl(response.data) and H.is_str(response.data.name) and H.is_str(response.data.bookUrl) and H.is_str(response.data.origin) then
-            local bookShelfId = self:getCurrentBookShelfId()
-            local r_data = {response.data}
-            local status, err = pcall(function()
-                return self.dbManager:upsertBooks(bookShelfId, r_data, true)
-            end)
-            if not status then
-                dbg.log('changeBookSource数据写入', tostring(err))
-                return nil, '数据写入出错，请重试'
+        local target_book
+        if H.is_tbl(response) and H.is_tbl(response.data) then
+            target_book = base:_norm_book_fields(response.data)
+            if not target_book.bookUrl and newBookSource.newUrl then
+                target_book.bookUrl = newBookSource.newUrl
             end
-            return true
-        else
+            if not target_book.origin and newBookSource.bookSourceUrl then
+                target_book.origin = newBookSource.bookSourceUrl
+            end
+            if not target_book.originName and newBookSource.originName then
+                target_book.originName = newBookSource.originName
+            end
+        elseif H.is_tbl(newBookSource) then
+            target_book = {}
+            for key, value in pairs(newBookSource) do
+                target_book[key] = value
+            end
+            if target_book.newUrl then
+                target_book.bookUrl = target_book.newUrl
+            end
+            if target_book.bookSourceUrl then
+                target_book.origin = target_book.bookSourceUrl
+            end
+            if target_book.originName then
+                target_book.originName = target_book.originName
+            end
+            target_book = base:_norm_book_fields(target_book)
+        end
+
+        if not target_book then
+            return nil, '服务端返回空数据'
+        end
+        if not (H.is_str(target_book.name) and H.is_str(target_book.bookUrl)
+                and H.is_str(target_book.origin)) then
             return nil, '接口返回数据格式错误'
         end
+
+        local bookShelfId = self:getCurrentBookShelfId()
+        local status, err = pcall(function()
+            return self.dbManager:upsertBooks(bookShelfId, { target_book }, true)
+        end)
+        if not status then
+            dbg.log('changeBookSource数据写入', tostring(err))
+            return nil, '数据写入出错，请重试'
+        end
+        return true
     end))
 end
 
@@ -495,12 +1331,20 @@ local chapter_writeToFile = function(chapter, filePath, resources)
         error('下载 content 写入失败')
     end
 end
+local function format_chapter_desc(ch)
+    if not ch then return "未知章节" end
+    local idx = ch.chapters_index or ch.index or "?"
+    local title = ch.title or ch.name or ""
+    if title ~= "" then
+        return string.format("第%s章: %s", tostring(idx), tostring(title))
+    end
+    return string.format("第%s章", tostring(idx))
+end
 
 function M:_pDownloadChapter(chapter, download_opts)
     local bookUrl = chapter.bookUrl
     local book_cache_id = chapter.book_cache_id
     local chapters_index = chapter.chapters_index
-    -- qread only
 
     if bookUrl == nil or not book_cache_id then
         error('_pDownloadChapter input parameters err' .. tostring(bookUrl) .. tostring(book_cache_id))
@@ -508,12 +1352,16 @@ function M:_pDownloadChapter(chapter, download_opts)
 
     local cache_chapter = self:getCacheChapterFilePath(chapter, true)
     if cache_chapter and cache_chapter.cacheFilePath then
-        local cache_size = get_file_size(cache_chapter.cacheFilePath)
+        local cache_size = FS.getFileSize(cache_chapter.cacheFilePath)
         Probe.done("Chapter", "命中本地缓存", format_chapter_desc(chapter), chapter._t_probe_start, "CACHE_HIT", Probe.format_bytes(cache_size))
         return cache_chapter
     end
 
     local t_dl_start = Probe.start("Chapter", "下载章节内容", format_chapter_desc(chapter), tostring(bookUrl))
+    if download_opts and download_opts.acquire_request
+            and not download_opts.acquire_request() then
+        error("cancelled")
+    end
     local response = self:pGetChapterContent(chapter)
 
     if not H.is_tbl(response) or response.type ~= 'SUCCESS' then
@@ -523,18 +1371,12 @@ function M:_pDownloadChapter(chapter, download_opts)
     end
 
     local raw_body = response.body
-    local is_empty = false
+    local is_empty = true
     if H.is_str(raw_body) then
         local trimmed = raw_body:gsub("^%s+", ""):gsub("%s+$", "")
-        if #trimmed == 0 then
-            is_empty = true
-        end
+        if #trimmed > 0 then is_empty = false end
     elseif H.is_tbl(raw_body) then
-        if #raw_body == 0 then
-            is_empty = true
-        end
-    else
-        is_empty = true
+        if #raw_body > 0 then is_empty = false end
     end
 
     if is_empty then
@@ -545,16 +1387,17 @@ function M:_pDownloadChapter(chapter, download_opts)
 
     local filePath = Env.getChapterCacheFilePath(book_cache_id, chapters_index, chapter.name)
     local opts = {
+        content_normalized = self:_isLocal(),
         getPorxyPicUrls = function(url, txt) return self:getPorxyPicUrls(url, txt) end,
         getProxyEpubUrl = function(url, line) return self:getProxyEpubUrl(url, line) end,
         getProxyImageUrl = function(url, src) return self:getProxyImageUrl(url, src) end,
         is_txt = self.settings_data.data.istxt == true,
     }
-    local result = ContentParser.analyzing(chapter, response.body, filePath, opts)
+    local result = require("Legado.ContentParser").analyzing(chapter, response.body, filePath, opts)
     if result.kind == "cbz" then
         if download_opts and download_opts.auto_pack_cbz then
             Probe.done("Chapter", "漫画图片解析完成", format_chapter_desc(chapter), t_dl_start, "200 OK", Probe.format_bytes(#(response.body or "")), string.format("(%d P)", #(result.img_sources or {})))
-            local max_threads = tonumber(self.settings_data.data.download_threads) or 4
+            local max_threads = self:normalizeDownloadThreads(self.settings_data.data.download_threads)
             local QueueCbz = require("Legado.task.QueueCbz")
             local cbz_path = QueueCbz.from_urls(result.filePath, result.img_sources, download_opts and download_opts.check_running, {
                 max_workers = max_threads,
@@ -569,16 +1412,14 @@ function M:_pDownloadChapter(chapter, download_opts)
         end
     end
     if result.kind ~= "file" then
-        -- 避免静默写空文件
         error(string.format("未知章节解析类型: %s", tostring(result.kind)))
     end
     local written = chapter_writeToFile(result.chapter, result.filePath, result.data)
-    local cache_size = get_file_size(result.filePath)
+    local cache_size = FS.getFileSize(result.filePath)
     Probe.done("Chapter", "章节下载完成", format_chapter_desc(chapter), t_dl_start, "200 OK", Probe.format_bytes(cache_size))
     return written
 end
 
--- write_to_db, run in subprocess, no DB writes allowed
 function M:getCacheChapterFilePath(chapter, not_write_db)
 
     if not H.is_tbl(chapter) or chapter.book_cache_id == nil or chapter.chapters_index == nil then
@@ -598,10 +1439,9 @@ function M:getCacheChapterFilePath(chapter, not_write_db)
             return chapter
         else
             dbg.v('Files are deleted, clear database record flag', cache_file_path)
-            -- 清理可能的临时文件
             local tmp_file = cache_file_path .. ".tmp"
             if util.fileExists(tmp_file) then
-                pcall(function() util.removeFile(tmp_file) end)
+                util.removeFile(tmp_file)
             end
             if not not_write_db then
                 pcall(function()
@@ -614,18 +1454,21 @@ function M:getCacheChapterFilePath(chapter, not_write_db)
 
     local filePath = Env.getChapterCacheFilePath(book_cache_id, chapters_index, book_name)
 
-    local extensions = {'html', 'cbz', 'xhtml', 'txt', 'png', 'jpg'}
-
-    if H.is_str(cacheExt) then
-
-        table.insert(extensions, 1, chapter.cacheExt)
-    end
-
-    for _, ext in ipairs(extensions) do
-        local fullPath = filePath .. '.' .. ext
+    if H.is_str(cacheExt) and cacheExt ~= "" then
+        local fullPath = filePath .. '.' .. cacheExt
         if util.fileExists(fullPath) then
             chapter.cacheFilePath = fullPath
             return chapter
+        end
+    end
+
+    for _, ext in ipairs(Env.CHAPTER_CACHE_EXTENSIONS_LIST) do
+        if ext ~= cacheExt then
+            local fullPath = filePath .. '.' .. ext
+            if util.fileExists(fullPath) then
+                chapter.cacheFilePath = fullPath
+                return chapter
+            end
         end
     end
 
@@ -638,27 +1481,14 @@ function M:clearChapterCache(book_cache_id, chapters_index)
     local ch_cache = self:getCacheChapterFilePath(chapter, true)
     local cacheFilePath = ch_cache and ch_cache.cacheFilePath
     if cacheFilePath and util.fileExists(cacheFilePath) then
-        pcall(function()
-            require("docsettings"):open(cacheFilePath):purge()
-        end)
-        pcall(util.removeFile, cacheFilePath)
+        pcall(function() DocSettings:open(cacheFilePath):purge() end)
+        util.removeFile(cacheFilePath)
     end
-    if self.dbManager and type(self.dbManager.dynamicUpdateChapters) == "function" then
-        pcall(function()
-            self.dbManager:dynamicUpdateChapters(chapter, {
-                content = '_NULL',
-                cacheFilePath = '_NULL',
-            })
-        end)
-    elseif self.dbManager and type(self.dbManager.updateCacheFilePath) == "function" then
-        pcall(function()
-            self.dbManager:updateCacheFilePath(chapter, false)
-        end)
-    end
+    self.dbManager:updateCacheFilePath(chapter, false)
     return true
 end
 
-function M:findNextChaptersNotDownLoad(current_chapter, count)
+function M:findNextChaptersNotDownLoad(current_chapter, count, include_read)
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
         dbg.log('findNextChaptersNotDownLoad: bad params', current_chapter)
         return {}
@@ -668,7 +1498,7 @@ function M:findNextChaptersNotDownLoad(current_chapter, count)
         current_chapter.call_event = 'next'
     end
 
-    local next_chapters = self.dbManager:findChapterNotDownLoadLittle(current_chapter, count)
+    local next_chapters = self.dbManager:findChapterNotDownLoadLittle(current_chapter, count, include_read)
 
     if not H.is_tbl(next_chapters[1]) or next_chapters[1].chapters_index == nil then
         dbg.log('not found', current_chapter.chapters_index)
@@ -678,13 +1508,24 @@ function M:findNextChaptersNotDownLoad(current_chapter, count)
     return next_chapters
 end
 
+function M:findPreviousChapter(current_chapter)
+    if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil
+            or tonumber(current_chapter.chapters_index) == nil then
+        return nil
+    end
+    return self:findNextChapter({
+        book_cache_id = current_chapter.book_cache_id,
+        chapters_index = tonumber(current_chapter.chapters_index),
+        call_event = 'prev',
+    })
+end
+
 function M:findNextChapter(current_chapter, is_downloaded)
 
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
         dbg.log("findNextChapter: bad params", current_chapter)
         return
     end
-
 
     if current_chapter.call_event == nil then
         current_chapter.call_event = 'next'
@@ -731,12 +1572,19 @@ function M:getChapterImgList(chapter)
                     end
                 end)
                 if #img_entries > 0 then
-                    table.sort(img_entries)
+                    table.sort(img_entries, function(a, b)
+                        local a_index = tonumber(a:match("^(%d+)%."))
+                        local b_index = tonumber(b:match("^(%d+)%."))
+                        if a_index and b_index and a_index ~= b_index then
+                            return a_index < b_index
+                        end
+                        return a < b
+                    end)
                     local img_sources = {}
                     for _, entry_name in ipairs(img_entries) do
                         table.insert(img_sources, string.format("cbz://%s#%s", cbz_path, entry_name))
                     end
-                    if self.dbManager and type(self.dbManager.updateIsRead) == "function" and chapter.isRead ~= true then
+                    if chapter.isRead ~= true then
                         self.dbManager:updateIsRead(chapter, true, true)
                     end
                     return img_sources
@@ -745,16 +1593,29 @@ function M:getChapterImgList(chapter)
         end
     end
 
-    return self:HandleResponse(self:pGetChapterContent({
+    local req_chapter = {
         bookUrl = bookUrl,
         chapters_index = down_chapters_index,
         origin = origin,
-    }), function(data)
+        url = chapter.url or chapter.chapterUrl,
+        chapterUrl = chapter.chapterUrl or chapter.url,
+        book_cache_id = chapter.book_cache_id,
+        title = chapter.title,
+    }
+    if not (H.is_str(req_chapter.url) and req_chapter.url ~= "") and chapter.book_cache_id then
+        local ch = self:getChapterInfoCache(chapter.book_cache_id, tonumber(down_chapters_index))
+        if H.is_tbl(ch) then
+            req_chapter.url = ch.url or ch.chapterUrl
+            req_chapter.chapterUrl = req_chapter.url
+        end
+    end
+
+    return self:HandleResponse(self:pGetChapterContent(req_chapter), function(data)
         local err_msg
         if H.is_str(data) then
             local img_sources = self:getPorxyPicUrls(bookUrl, data)
             if H.is_tbl(img_sources) and #img_sources > 0 then
-                if self.dbManager and type(self.dbManager.updateIsRead) == "function" and chapter.isRead ~= true then
+                if chapter.isRead ~= true then
                     self.dbManager:updateIsRead(chapter, true, true)
                 end
                 return img_sources
@@ -789,7 +1650,6 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     local is_read_ahead = true
     if H.is_tbl(chapters[1]) and chapters[1].chapters_index ~= nil and chapters[1].book_cache_id ~= nil then
         chapter_down_tasks = chapters
-        -- mark false when input is a list (e.g., 1000 chapters)
         is_read_ahead = false
     else
         local down_count = tonumber(download_chapter_count)
@@ -805,8 +1665,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     end
 
     local settings = self:getSettings()
-    local max_threads = tonumber(settings.download_threads) or 2
-    max_threads = math.max(1, math.min(16, max_threads))
+    local max_threads = self:normalizeDownloadThreads(settings.download_threads)
     if temp_disable_multithread then
         max_threads = 1
         logger.info("Multi-threading temporarily disabled for this session")
@@ -832,54 +1691,58 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     local ch = TaskQueue:createChannel(channel_name, max_threads, nil, true)
     local completed_count = 0
     local has_error = false
+    local failed_count = 0
+    local failed_chapters = {}
+    local first_error = nil
 
     local is_finalizing = false
-    local pending_cbz_count = 0 -- 进行中的异步 CBZ 打包数(from_urls_async 不在 ch 任务队列中)
-    local check_completion = function(progress, err_msg)
+    local pending_cbz_count = 0
+    local check_completion = function(progress, err_msg, failed_chapter)
         if progress == false then
             Probe.fail("Preload", "预加载失败", batch_desc, t_batch_start, tostring(err_msg or "下载中断"))
-            if not is_read_ahead and not has_error then
+            if not is_read_ahead then
                 has_error = true
-                if ch then
-                    local tasks_to_remove = {}
-                    for _, task in ipairs(ch.queue) do
-                        if task.args and task.args[1] then
-                            local removed_chapter = task.args[1]
-                            removed_chapter.is_pre_loading = nil
-                            table.insert(tasks_to_remove, removed_chapter)
-                        end
-                    end
-                    pcall(function() TaskLock.setLock(self.dbManager, tasks_to_remove, false, nil, batch_id) end)
-                    ch:clearTasks()
-                end
+                failed_count = failed_count + 1
+                first_error = first_error or err_msg or "下载中断"
+                if failed_chapter then table.insert(failed_chapters, failed_chapter) end
                 if has_result_progress_callback then
-                    result_progress_callback(false, err_msg)
+                    result_progress_callback(completed_count + failed_count)
                 end
-            elseif is_read_ahead and has_result_progress_callback then
+            elseif has_result_progress_callback then
                 result_progress_callback(false, err_msg)
             end
-        elseif not has_error and has_result_progress_callback and type(progress) == "number" then
-            result_progress_callback(progress, err_msg)
+        elseif has_result_progress_callback and type(progress) == "number" then
+            if not is_read_ahead then
+                result_progress_callback(completed_count + failed_count, err_msg)
+            elseif not has_error then
+                result_progress_callback(progress, err_msg)
+            end
         end
 
         if is_finalizing then return end
         UIManager:nextTick(function()
             if ch and not ch:hasTasks() and pending_cbz_count <= 0 then
-                -- 并发锁
                 if is_finalizing then return end
                 is_finalizing = true
                 if not is_read_ahead then
                     TaskQueue:destroyChannel(channel_name)
                 end
-                Probe.done("Preload", "预加载批处理完成", batch_desc, t_batch_start, "SUCCESS", string.format("%d/%d loaded", completed_count, #chapter_down_tasks))
-                if has_result_progress_callback and not has_error then
-                    result_progress_callback(true, "任务结束")
+                if has_error and not is_read_ahead then
+                    local summary = string.format("缓存结束：成功%d章，失败%d章。首个错误：%s", completed_count, failed_count, tostring(first_error or "下载中断"))
+                    Probe.done("Preload", "预加载批处理完成", batch_desc, t_batch_start, "PARTIAL_FAILURE", string.format("completed=%d/%d, failed=%d", completed_count + failed_count, #chapter_down_tasks, failed_count))
+                    if has_result_progress_callback then
+                        result_progress_callback(false, summary, failed_chapters)
+                    end
+                else
+                    Probe.done("Preload", "预加载批处理完成", batch_desc, t_batch_start, "SUCCESS", string.format("%d/%d loaded", completed_count, #chapter_down_tasks))
+                    if has_result_progress_callback and not has_error then
+                        result_progress_callback(true, "任务结束")
+                    end
                 end
             end
         end)
     end
 
-    -- read_ahead task flow limit
     if is_read_ahead and ch.queue and #ch.queue > 0 then
         local max_queue_size = math.max(10, (tonumber(download_chapter_count) or 3) * 2)
         if #ch.queue > max_queue_size then
@@ -918,8 +1781,6 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                 function(success, downloaded_chapter)
                     local current_chapter = dlChapter
                     current_chapter.is_pre_loading = nil
-                    -- 图片章节, 子进程已解析出 URL 列表，打包由主进程异步执行
-                    -- （不传 check_running：打包期间章节锁仍持有，isTaskRunning == true 会误中止）
                     if success and H.is_tbl(downloaded_chapter) and downloaded_chapter.kind == "cbz" then
                         local pending = downloaded_chapter
                         pending_cbz_count = pending_cbz_count + 1
@@ -930,7 +1791,6 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                             images = pending.img_sources,
                             opts = {
                                 comic_info = { name = current_chapter.title or "" },
-                                -- 图片下载并发跟随"同时下载数", 与章节级并发解耦
                                 max_workers = max_threads,
                             },
                             on_finish = function(_, result)
@@ -939,7 +1799,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                                     pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                                     logger.err("Failed to package cbz:", tostring(pending.filePath))
                                     Probe.fail("Chapter", "CBZ打包失败", format_chapter_desc(current_chapter), t_cbz_start, tostring(result and result.output or pending.filePath))
-                                    return check_completion(false, string.format("章节[%s]图片打包失败: %s", tostring(current_chapter.title), tostring(result and result.output or pending.filePath)))
+                                    return check_completion(false, string.format("章节[%s]图片打包失败: %s", tostring(current_chapter.title), tostring(result and result.output or pending.filePath)), current_chapter)
                                 end
                                 current_chapter.cacheFilePath = pending.filePath
                                 logger.dbg('Download chapter successfully (cbz):', current_chapter.book_cache_id, current_chapter.chapters_index, pending.filePath)
@@ -950,7 +1810,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                                 pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
 
                                 completed_count = completed_count + 1
-                                local cbz_size = get_file_size(pending.filePath)
+                                local cbz_size = FS.getFileSize(pending.filePath)
                                 local progress_str = string.format("进度 %d/%d", completed_count, #chapter_down_tasks)
                                 Probe.done("Chapter", "CBZ完成", format_chapter_desc(current_chapter), t_cbz_start, "200 OK", Probe.format_bytes(cbz_size), progress_str)
                                 check_completion(completed_count)
@@ -961,7 +1821,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                             pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                             logger.err("Failed to start cbz packaging:", tostring(start_err))
                             Probe.fail("Chapter", "CBZ启动失败", format_chapter_desc(current_chapter), t_cbz_start, tostring(start_err))
-                            return check_completion(false, string.format("章节[%s]图片打包启动失败: %s", tostring(current_chapter.title), tostring(start_err)))
+                            return check_completion(false, string.format("章节[%s]图片打包启动失败: %s", tostring(current_chapter.title), tostring(start_err)), current_chapter)
                         end
                         return
                     end
@@ -970,7 +1830,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                         pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
                         logger.err("Failed to download chapter:", tostring(downloaded_chapter))
                         Probe.fail("Chapter", "章节下载失败", format_chapter_desc(current_chapter), current_chapter._t_probe_start, tostring(downloaded_chapter))
-                        return check_completion(false, string.format("章节[%s]下载失败: %s", tostring(current_chapter.title), tostring(downloaded_chapter)))
+                        return check_completion(false, string.format("章节[%s]下载失败: %s", tostring(current_chapter.title), tostring(downloaded_chapter)), current_chapter)
                     end
 
                     local cache_file_path = downloaded_chapter.cacheFilePath
@@ -982,7 +1842,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     pcall(function() TaskLock.setLock(self.dbManager, current_chapter, false, nil, batch_id) end)
 
                     completed_count = completed_count + 1
-                    local file_size = get_file_size(cache_file_path)
+                    local file_size = FS.getFileSize(cache_file_path)
                     local progress_str = string.format("进度 %d/%d", completed_count, #chapter_down_tasks)
                     Probe.done("Chapter", "章节下载完成", format_chapter_desc(current_chapter), current_chapter._t_probe_start, "200 OK", Probe.format_bytes(file_size), progress_str)
                     check_completion(completed_count)
@@ -992,7 +1852,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     insert_at_head = true,
                     timeout = chapter_timeout,
                     on_start = function()
-                        dlChapter._t_probe_start = socket.gettime()
+                        dlChapter._t_probe_start = H.timestamp()
                         Probe.start("Chapter", "下载章节", format_chapter_desc(dlChapter), string.format("(book_id: %s, idx: %s)", tostring(book_cache_id), tostring(dlChapter.chapters_index)))
                         logger.dbg('TaskQueue running: chapter_title:', dlChapter.title or nil)
                     end
@@ -1007,7 +1867,6 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
         local lock_ttl = math.max(3600, chapter_timeout * #tasks_to_insert)
         pcall(function() TaskLock.setLock(self.dbManager, tasks_to_insert, true, lock_ttl, batch_id) end)
     else
-        -- If all tasks were skipped but we have a callback waiting, resolve it now
         if has_result_progress_callback and not has_error then
             UIManager:nextTick(function()
                 result_progress_callback(true, "所选章节已在后台下载或已完成")
@@ -1037,9 +1896,8 @@ function M:analyzeCacheStatusForRange(book_cache_id, start_index, end_index, sta
         return result
     end
     for i = start_index, end_index do
-        -- local all_chapters = self:getBookChapterPlusCache(book_cache_id)
         local chapter = self:getChapterInfoCache(book_cache_id, i)
-        if H.is_tbl(chapter) then
+        if H.is_tbl(chapter) and not chapter.isVolume then
             local is_cached = false
             if chapter.cacheFilePath and util.fileExists(chapter.cacheFilePath) then
                 is_cached = true
@@ -1099,7 +1957,6 @@ end
 
 function M:autoPinToTop(bookCacheId, sortOrder)
     if 0 == sortOrder then
-        -- If it is manually placed on top
         return wrap_response(true)
     end
     local bookShelfId = self:getCurrentBookShelfId()
@@ -1123,6 +1980,24 @@ function M:getBookExtras(book_cache_id)
     return self:getLuaConfig(FS.joinPath(book_cache_dir, "cache.lua"))
 end
 
+function M:bookReaderRoute(book_cache_id, route)
+    if not H.is_str(book_cache_id) then
+        return route == nil and "auto" or wrap_response(nil, "book_cache_id 参数错误")
+    end
+    local settings = self:getBookExtras(book_cache_id)
+    if route ~= nil then
+        if route ~= "auto" and route ~= "reader" and route ~= "comic" then
+            return wrap_response(nil, "route 必须是 auto、reader 或 comic")
+        end
+        settings:saveSetting("reader_route_override", route):flush()
+        PlgState:clearReadingRoute(book_cache_id)
+        return wrap_response(true)
+    end
+    local saved = H.is_tbl(settings.data) and settings.data.reader_route_override or nil
+    if saved == "reader" or saved == "comic" then return saved end
+    return "auto"
+end
+
 function M:chapterSortingMode(bookCacheId, mode)
     if not H.is_str(bookCacheId) then
         return wrap_response(nil, 'bookCacheId 参数错误')
@@ -1144,13 +2019,7 @@ function M:chapterSortingMode(bookCacheId, mode)
 end
 
 function M:getAllChaptersByUI(bookCacheId)
-
-    local chapter_sorting_mode = self:chapterSortingMode(bookCacheId)
-    local is_desc_sort = true
-    if chapter_sorting_mode == 'ASC' then
-        is_desc_sort = false
-    end
-    local chapter_data = self.dbManager:getAllChaptersByUI(bookCacheId, is_desc_sort)
+    local chapter_data = self.dbManager:getAllChaptersByUI(bookCacheId, false)
     return chapter_data
 end
 
@@ -1159,36 +2028,99 @@ function M:getBookChapterPlusCache(bookCacheId)
     return chapter_data
 end
 
+function M:getReadableChapters(bookCacheId)
+    local chapter_data = self.dbManager:getReadableChapters(bookCacheId)
+    return chapter_data
+end
+
 function M:closeDbManager()
     if self.dbManager and type(self.dbManager.closeDB) == "function" then
-        self.dbManager:closeDB()
+        pcall(function() self.dbManager:closeDB() end)
     end
 end
 
-function M:cleanBookCache(book_cache_id, bookinfo)
+local BOOK_CACHE_METADATA_FILES = {
+    ["book_defaults.lua"] = true,
+    ["cache.lua"] = true,
+    ["virtual_book_location.lua"] = true,
+}
+
+local function purge_book_cache_files(path, is_root)
+    local ok, iterator, state = pcall(lfs.dir, path)
+    if not ok or not iterator then return false end
+    local success = true
+    local scan_ok = pcall(function()
+        for entry in iterator, state do
+            if entry ~= "." and entry ~= ".." then
+                local child = FS.joinPath(path, entry)
+                local attr = (lfs.symlinkattributes or lfs.attributes)(child)
+                if not attr then
+                    success = false
+                elseif attr.mode == "directory" then
+                    if not purge_book_cache_files(child, false) then success = false end
+                    util.removePath(child)
+                    if util.pathExists(child) then success = false end
+                elseif not is_root or not BOOK_CACHE_METADATA_FILES[entry] then
+                    util.removeFile(child)
+                    if util.pathExists(child) then success = false end
+                end
+            end
+        end
+    end)
+    return scan_ok and success
+end
+
+function M:purgeBookCache(book_cache_id)
+    if not (H.is_str(book_cache_id) and book_cache_id ~= "")
+            or book_cache_id:find("[/\\]") then
+        return wrap_response(nil, "缓存标识无效")
+    end
+    if self:isTaskRunning() then
+        return wrap_response(nil, "有后台任务进行中，请等待结束或者重启 KOReader")
+    end
+
+    local reading = PlgState:readingChapter()
+    if H.is_tbl(reading) and reading.book_cache_id == book_cache_id then
+        return wrap_response(nil, "当前书籍正在阅读，请关闭后再清理")
+    end
+
+    local cached_paths = self.dbManager:getChapterCachePaths(book_cache_id)
+    for _, path in ipairs(cached_paths) do
+        if util.fileExists(path) then
+            pcall(function() DocSettings:open(path):purge() end)
+        end
+    end
+
+    local cache_path = FS.joinPath(Env.getTempDirectory(), book_cache_id .. ".sdr")
+    if util.pathExists(cache_path) then
+        if not purge_book_cache_files(cache_path, true) then
+            return wrap_response(nil, "缓存目录清理失败")
+        end
+        util.removePath(cache_path)
+    end
+    self.dbManager:clearChapterCachePaths(book_cache_id)
+    return wrap_response(true)
+end
+
+function M:cleanBookCache(book_cache_id)
     if self:isTaskRunning() then
         return wrap_response(nil, '有后台任务进行中，请等待结束或者重启 KOReader')
     end
+
     local bookShelfId = self:getCurrentBookShelfId()
-    self.dbManager:clearBook(bookShelfId, book_cache_id)
+    local ok_clear, cleared = pcall(self.dbManager.clearBook, self.dbManager, bookShelfId, book_cache_id)
+    if not ok_clear or cleared ~= true then
+        return wrap_response(nil, '清理章节数据失败')
+    end
+
     local book_cache_path = Env.getBookCachePath(book_cache_id)
     if book_cache_path and util.pathExists(book_cache_path) then
-        ffiUtil.purgeDir(book_cache_path)
-        if H.is_tbl(bookinfo) and H.is_str(bookinfo.bookUrl) then
-            local refresh_bookinfo = {
-                bookUrl = bookinfo.bookUrl,
-                origin = bookinfo.origin,
-                name = bookinfo.name or bookinfo.book_name,
-                refresh = true,
-            }
-            self:launchProcess(function()
-                self:getChaptersList(refresh_bookinfo)
-            end)
+        local ok_purge = pcall(ffiUtil.purgeDir, book_cache_path)
+        if not ok_purge then
+            return wrap_response(nil, '清理缓存文件失败')
         end
-        return wrap_response(true)
-    else
-        return wrap_response(nil, '没有缓存')
     end
+    return wrap_response(true)
 end
 
 function M:cleanAllBookCaches()
@@ -1202,15 +2134,14 @@ function M:cleanAllBookCaches()
     self:closeDbManager()
     local books_cache_dir = Env.getTempDirectory()
     ffiUtil.purgeDir(books_cache_dir)
-    Env.getTempDirectory()
+    require("Legado/EpubHelper").prepareCacheResources()
     self:saveSettings()
     return wrap_response(true)
 end
 
 function M:getDBFileSize()
     if not (self.dbManager and self.dbManager.dbPath) then return 0 end
-    local lfs = require("lfs")
-    return lfs.attributes(self.dbManager.dbPath, "size") or 0
+    return FS.getFileSize(self.dbManager.dbPath)
 end
 
 function M:vacuumDatabase()
@@ -1239,7 +2170,6 @@ function M:ChangeChapterCache(chapter)
     local isDownLoaded = chapter.isDownLoaded
 
     if isDownLoaded ~= true then
-
         local task_started, err = self:preLoadingChapters({chapter}, 1)
         if task_started == true then
             return wrap_response(true)
@@ -1248,17 +2178,10 @@ function M:ChangeChapterCache(chapter)
         end
     else
         if util.fileExists(cacheFilePath) then
-            pcall(function()
-                require("docsettings"):open(cacheFilePath):purge()
-            end)
+            pcall(function() DocSettings:open(cacheFilePath):purge() end)
             util.removeFile(cacheFilePath)
         end
-
-        self.dbManager:dynamicUpdateChapters(chapter, {
-            content = '_NULL',
-            cacheFilePath = '_NULL'
-        })
-
+        self.dbManager:updateCacheFilePath(chapter, false)
         self:refreshBookContentAsync(chapter)
         return wrap_response(true)
     end
@@ -1271,11 +2194,12 @@ function M:refreshBookContentAsync(chapter)
 end
 
 function M:saveBookProgressAsync(chapter)
+    if not self:supportsProviderMethod("saveBookProgress") then return end
+
     self:launchProcess(function()
             return self:saveBookProgress(chapter)
         end, function(_, response)
         if not (H.is_tbl(response) and response.type == 'SUCCESS') then
-            -- local message = type(response) == 'table' and response.message or "阅读进度自动上传失败"
             self:_show_notice("自动上传进度失败")
         end
     end)
@@ -1331,14 +2255,6 @@ end
 function M:emitMetadataChanged(book_file)
     if H.is_str(book_file) and util.fileExists(book_file) then
         local Event = require("ui/event")
-        --[[
-        local prop_updated = {
-            filepath = file,
-            doc_props = book_props,
-            metadata_key_updated = prop_updated,
-            metadata_value_old = prop_value_old,
-        }
-        ]]
         UIManager:broadcastEvent(Event:new("InvalidateMetadataCache", book_file))
         UIManager:broadcastEvent(Event:new("BookMetadataChanged"))
     end
@@ -1348,7 +2264,6 @@ function M:get_default_cover_cache(book_cache_id)
     return ImageUtil.get_default_cover_cache(book_cache_id)
 end
 
--- 网络层失败（连接/超时），区别于 HTTP 层拒绝（403/405 等，GET 仍可能成功）
 local function is_cover_network_failure(err)
     if type(err) ~= "string" then return false end
     return err:find("request interrupted", 1, true) ~= nil
@@ -1360,7 +2275,7 @@ function M:download_cover_img(book_cache_id, cover_url, is_force)
     local function push_candidate(url)
         if not (H.is_str(url) and url ~= "") then return end
         for _, c in ipairs(candidates) do
-            if c == url then return end -- 去重
+            if c == url then return end
         end
         table.insert(candidates, url)
     end
@@ -1408,175 +2323,20 @@ function M:isTaskRunning(target)
     return TaskLock.isLocked(self.dbManager, target)
 end
 
-function M:_pPreloadReadAheadV2(chapter, count)
-    -- 首先检查当前正在阅读的 chapter 本身是否已下载缓存！
-    -- 若当前章节尚未下载（如快速翻页跳入占位页），必须将当前章节置于下载任务的第一优先级（self-healing）！
-    local tasks = {}
-    local cur_cache = self:getCacheChapterFilePath(chapter, true)
-    if not (cur_cache and cur_cache.cacheFilePath and util.fileExists(cur_cache.cacheFilePath)) then
-        table.insert(tasks, chapter)
-    end
-
-    local next_tasks = self:findNextChaptersNotDownLoad(chapter, count) or {}
-    for _, t in ipairs(next_tasks) do
-        if t.chapters_index ~= chapter.chapters_index then
-            table.insert(tasks, t)
-        end
-    end
-
-    if #tasks == 0 then
-        Probe.done("Preload", "全部已缓存跳过", format_chapter_desc(chapter), nil, "CACHE_HIT")
-        return
-    end
-
-    PlgState:cancelPreload("new_preload_started")
-    pcall(function() TaskLock.setLock(self.dbManager, tasks, true) end)
-    local t_batch_start = Probe.start("Preload", "启动V2预读批次", format_chapter_desc(chapter), string.format("共%d章 (threads=1, mode=spawn)", #tasks))
-
-    local task = TaskQueueV2.spawn(function(ctx)
-        for i, ch in ipairs(tasks) do
-            if ctx.is_cancelled() then break end
-            local t_ch_start = socket.gettime()
-            local ok, ch_file = pcall(function()
-                return self:_pDownloadChapter(ch, {
-                    auto_pack_cbz = true,
-                    check_running = function() return ctx.is_cancelled() end,
-                })
-            end)
-            if ok and ch_file and ch_file.cacheFilePath then
-                local size = get_file_size(ch_file.cacheFilePath)
-                ctx.emit("chapter_done", {
-                    chapter = ch,
-                    cacheFilePath = ch_file.cacheFilePath,
-                    size = size,
-                    t_start = t_ch_start,
-                    progress = string.format("进度 %d/%d", i, #tasks)
-                })
-            else
-                ctx.emit("chapter_failed", {
-                    chapter = ch,
-                    t_start = t_ch_start,
-                    err = tostring(ch_file)
-                })
-            end
-        end
-    end)
-
-    task._target_idx = tasks[1] and tasks[1].chapters_index
-    PlgState._preload_task = task
-
-    local pending_updates = {}
-    local book_cache_id = tasks[1] and tasks[1].book_cache_id
-    local book_name = tasks[1] and tasks[1].name
-
-    local function flush_pending_updates(reason)
-        if next(pending_updates) == nil then return end
-        local batch_map = pending_updates
-        pending_updates = {}
-        pcall(function()
-            self:syncChaptersToVirtualBook(book_cache_id, batch_map, book_name)
-        end)
-    end
-
-    local success_count = 0
-    task:on("chapter_done", function(data)
-        success_count = success_count + 1
-        pcall(function() self.dbManager:updateCacheFilePath(data.chapter, data.cacheFilePath) end)
-        pcall(function() TaskLock.setLock(self.dbManager, data.chapter, false) end)
-        if data.cacheFilePath and util.fileExists(data.cacheFilePath) and data.chapter.cacheExt ~= "cbz" then
-            local raw = util.readFromFile(data.cacheFilePath)
-            if raw and raw ~= "" then
-                local cur_reading = PlgState:readingChapter()
-                -- 1. 当前在读章穿透直连 (Fast-Path)：若读者停留在该章占位页，立即单独注水并原地重载呈现正文
-                if cur_reading and cur_reading.book_cache_id == data.chapter.book_cache_id and cur_reading.chapters_index == data.chapter.chapters_index then
-                    pcall(function()
-                        self:syncChapterToVirtualBook(data.chapter.book_cache_id, data.chapter.chapters_index, raw, data.chapter.name)
-                    end)
-                    UIManager:nextTick(function()
-                        self:refreshDocumentInPlace()
-                    end)
-                else
-                    -- 2. 未来预读章进入微批缓冲池 (Adaptive Micro-Batching)
-                    pending_updates[data.chapter.chapters_index] = raw
-                    local pending_count = 0
-                    for _ in pairs(pending_updates) do pending_count = pending_count + 1 end
-                    if pending_count >= 3 then
-                        flush_pending_updates("batch_threshold_3")
-                    end
-                end
-            end
-        end
-        Probe.done("Chapter", "章节入库", format_chapter_desc(data.chapter), data.t_start, "200 OK", Probe.format_bytes(data.size), data.progress)
-    end)
-
-    task:on("chapter_failed", function(data)
-        pcall(function() TaskLock.setLock(self.dbManager, data.chapter, false) end)
-        local cur_reading = PlgState:readingChapter()
-        local is_cur = cur_reading and data.chapter and (cur_reading.chapters_index == data.chapter.chapters_index)
-        local reason = tostring(data.err or ""):find("源站返回正文内容为空") and "源站正文为空" or "下载失败"
-        if is_cur then
-            local msg = string.format("《%s》%s，请尝试换源或刷新", tostring(data.chapter.title or "当前章节"), reason)
-            Probe.done("Chapter", "提示正文异常", format_chapter_desc(data.chapter), data.t_start, "NOTICE_POPUP", msg)
-            self:_show_notice(msg)
-        else
-            Probe.done("Chapter", "后台失败静默", format_chapter_desc(data.chapter), data.t_start, "SILENT_SKIP", string.format("当前在读: %s", tostring(cur_reading and cur_reading.chapters_index or "-")))
-        end
-    end)
-
-    local function cleanup()
-        PlgState._preload_task = nil
-        pcall(function() TaskLock.setLock(self.dbManager, tasks, false) end)
-    end
-
-    task:on("finish", function()
-        cleanup()
-        flush_pending_updates("batch_finish")
-        -- 仅当真正有新章节注水入 EPUB 时，才执行后台静默热重载
-        if success_count > 0 then
-            local cur_reading = PlgState:readingChapter()
-            local active_in_batch = false
-            if cur_reading then
-                for _, t in ipairs(tasks) do
-                    if t.chapters_index == cur_reading.chapters_index then
-                        active_in_batch = true
-                        break
-                    end
-                end
-            end
-            if active_in_batch then
-                pcall(function() self:refreshDocumentInPlace() end)
-            else
-                if self._idle_reload_timer then
-                    UIManager:unschedule(self._idle_reload_timer)
-                    self._idle_reload_timer = nil
-                end
-                self._idle_reload_timer = function()
-                    self._idle_reload_timer = nil
-                    pcall(function() self:refreshDocumentInPlace() end)
-                end
-                UIManager:scheduleIn(4, self._idle_reload_timer)
-            end
-            Probe.done("Preload", "预读批处理完成", format_chapter_desc(chapter), t_batch_start, "SUCCESS", string.format("%d/%d loaded", success_count, #tasks))
-        else
-            Probe.fail("Preload", "预读批处理未下载任何章节", format_chapter_desc(chapter), t_batch_start, string.format("0/%d succeeded", #tasks))
-        end
-    end)
-    task:on("error", function(err)
-        cleanup()
-        flush_pending_updates("batch_error")
-        Probe.fail("Preload", "预读批处理失败", format_chapter_desc(chapter), t_batch_start, tostring(err))
-    end)
-    task:on("cancel", function(reason)
-        cleanup()
-        flush_pending_updates("batch_cancel")
-        Probe.retry("Preload", "预读批处理取消", format_chapter_desc(chapter), t_batch_start, tostring(reason or "cancelled"))
-    end)
-end
-
 function M:after_reader_chapter_show(chapter)
+    if not chapter or chapter.isVolume == true then return end
     local book_cache_id = chapter.book_cache_id
     local chapters_index = chapter.chapters_index
     local cache_file_path = chapter.cacheFilePath
+    local should_sync_cache_path = cache_file_path == nil or chapter.isDownLoaded ~= true
+    if cache_file_path == nil then
+        local ch_cache = self:getCacheChapterFilePath(chapter, true)
+        if ch_cache and ch_cache.cacheFilePath and util.fileExists(ch_cache.cacheFilePath) then
+            chapter.cacheFilePath = ch_cache.cacheFilePath
+            cache_file_path = ch_cache.cacheFilePath
+        end
+    end
+    local is_downloaded = H.is_str(cache_file_path) and util.fileExists(cache_file_path) or false
     Probe.start("Reader", "阅读展示", format_chapter_desc(chapter), string.format("(book_id: %s, idx: %s, ext: %s)", tostring(book_cache_id), tostring(chapters_index), tostring(chapter.cacheExt or "txt")))
 
     local status, err = safe_call(function()
@@ -1585,6 +2345,9 @@ function M:after_reader_chapter_show(chapter)
             self.dbManager:updateIsRead(chapter, true, true)
             if book_cache_id and H.is_num(chapters_index) then
                 self.dbManager:updateReadingProgress(bookShelfId, book_cache_id, chapters_index, chapter.title or chapter.name, 0)
+                if is_downloaded and should_sync_cache_path then
+                    self.dbManager:updateCacheFilePath(chapter, cache_file_path)
+                end
             end
         end)()
     end)
@@ -1612,7 +2375,6 @@ function M:after_reader_chapter_show(chapter)
                 dbg.log('updating cache ext err:', tostring(p_err))
             end
         end
-        -- document_cover
          if G_reader_settings and G_reader_settings.readSetting and
                 G_reader_settings:readSetting("lastfile") ~= cache_file_path then
             G_reader_settings:saveSetting("lastfile", cache_file_path)
@@ -1626,44 +2388,17 @@ function M:after_reader_chapter_show(chapter)
                 self._save_progress_timer_cancel = nil
             end
 
-            self._save_progress_timer_cancel = TaskQueue.delay(8, function()
+            self._save_progress_timer_cancel = require("Legado.task.v2").delay(8, function()
                 self:saveBookProgressAsync(chapter)
                 self._save_progress_timer_cancel = nil
             end)
         end
-        local preDownloadNum = tonumber(settings.preload_chapters) or 5
-        if chapter.cacheExt == 'cbz' then
-            preDownloadNum = 1
-        end
-        local cached_ahead = self:getcompleteReadAheadChapters(chapter)
-        if preDownloadNum > 0 and cached_ahead < 40 then
-            if PlgState._preload_timer_cancel then
-                PlgState._preload_timer_cancel()
-                PlgState._preload_timer_cancel = nil
-                Probe.retry("Preload", "防抖重置 (快速切章)", format_chapter_desc(chapter), nil, "取消前次未触发预读")
-            end
-
-            local cur_task = PlgState._preload_task
-            if cur_task and cur_task._target_idx == (chapter.chapters_index + 1) and not cur_task:is_done() then
-                Probe.done("Preload", "顺读复用在途任务", format_chapter_desc(chapter))
-            else
-                Probe.start("Preload", "预读排队防抖 (1.5s)", format_chapter_desc(chapter), string.format("(预下载: %d章, 已预存: %d/40)", preDownloadNum, cached_ahead))
-                PlgState._preload_timer_cancel = TaskQueue.delay(1.5, function()
-                    PlgState._preload_timer_cancel = nil
-                    self:_pPreloadReadAheadV2(chapter, preDownloadNum)
-                end)
-            end
-        end
-    end
-    if cache_file_path == nil then
-        local ch_cache = self:getCacheChapterFilePath(chapter, true)
-        if ch_cache and ch_cache.cacheFilePath and util.fileExists(ch_cache.cacheFilePath) then
-            chapter.cacheFilePath = ch_cache.cacheFilePath
-            cache_file_path = ch_cache.cacheFilePath
-        end
+        local preloader = self.preload_read_ahead or self:_newPreloadReadAhead()
+        self.preload_read_ahead = preloader
+        preloader:ensure(chapter, true)
     end
     chapter.isRead = true
-    chapter.isDownLoaded = (cache_file_path ~= nil and util.fileExists(cache_file_path)) or false
+    chapter.isDownLoaded = is_downloaded
 end
 
 function M:downloadChapter(chapter)
@@ -1683,7 +2418,7 @@ function M:downloadChapter(chapter)
 end
 
 function M:getCurrentBookShelfId()
-    local current_conf_name = self.settings_data.data.current_conf_name
+    local current_conf_name = self.settings_data and self.settings_data.data and self.settings_data.data.current_conf_name
     if not (H.is_str(current_conf_name) and current_conf_name ~= "") then
         logger.err("[Fatal] BookShelfId is null — cannot proceed without a valid BookShelfId")
         return nil
@@ -1739,7 +2474,6 @@ function M:deleteWebConfig(conf_name)
         return wrap_response(nil, "当前激活配置, 不可删除")
     end
 
-    -- Use the config name to generate the bookshelf ID for deletion
     local book_shelf_id = tostring(H.md5(conf_name))
     pcall(function() self.dbManager:disableBookShelf(book_shelf_id) end)
 
@@ -1760,7 +2494,6 @@ function M:saveWebConfig(conf_name, web_config)
         return wrap_response(nil, "配置名称暂不支持修改")
     end
 
-    -- 如果修改的是当前激活项, 需要切换
     local current_conf_name = self.settings_data.data.current_conf_name
     local is_need_switch = not is_new and current_conf_name == conf_name
 
@@ -1801,7 +2534,6 @@ function M:saveWebConfig(conf_name, web_config)
         self.settings_data.data.web_configs[conf_name] = web_config
 
         if is_need_switch then
-            -- 交由switchWebConfig写入，不然可能导致数据不一致
             return self:switchWebConfig(conf_name, true)
         else
             self:saveSettings()
@@ -1814,8 +2546,7 @@ end
 
 function M:getSettings()
     if not self.settings_data then
-        local LuaSettings = require("luasettings")
-        self.settings_data = LuaSettings:open(Env.getUserSettingsPath())
+        self.settings_data = self:getLuaConfig(Env.getUserSettingsPath())
     end
     local settings = self.settings_data.data or {}
     if not H.is_str(settings.server_address) then
@@ -1827,7 +2558,7 @@ end
 function M:saveSettings(settings)
     if not H.is_tbl(settings) then
         self.settings_data:flush()
-        self.settings_data = LuaSettings:open(Env.getUserSettingsPath())
+        self.settings_data = self:getLuaConfig(Env.getUserSettingsPath())
         return wrap_response(true)
     end
 
@@ -1837,13 +2568,10 @@ function M:saveSettings(settings)
 
     self.settings_data.data = settings
     self.settings_data:flush()
-    self.settings_data = LuaSettings:open(Env.getUserSettingsPath())
+    self.settings_data = self:getLuaConfig(Env.getUserSettingsPath())
     return wrap_response(true)
 end
 
--- Multi-process execution: the job function call chain should not write to the database
--- No need to use pcall for job, errors are already handled inside the function
--- If a callback is provided, there will be no return value, as the callback will always be invoked
 function M:launchProcess(job, callback, timeout)
     if not H.is_func(job) then
         logger.err("Legado.launchProcess - job must be a function")
@@ -1899,326 +2627,30 @@ function M:backupDbWithPreCheck()
     return true
 end
 
-function M:getVirtualBookEpubPath(book_cache_id, book_name)
-    if not book_cache_id then return nil end
-    return Env.getVirtualBookEpubPath(book_cache_id, book_name)
+local function ensure_directory(dir)
+    if not (H.is_str(dir) and dir ~= "") then
+        return nil, "整本缓存保存目录无效"
+    end
+    if util.directoryExists(dir) then return dir end
+    pcall(FS.checkAndCreateFolder, dir)
+    if util.directoryExists(dir) then return dir end
+    return nil, "整本缓存保存目录不可用，且无法创建：" .. dir
 end
 
-function M:ensureVirtualBookEpub(bookinfo, target_chapter_idx, custom_output_path)
-    if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
-        return nil, "invalid bookinfo"
-    end
-    local book_cache_id = bookinfo.cache_id
-    local epub_path = custom_output_path or self:getVirtualBookEpubPath(book_cache_id, bookinfo.name or bookinfo.title)
-    if not epub_path then
-        return nil, "cannot resolve epub path"
-    end
-
-    local SkeletonEpub = require("Legado.Helper.SkeletonEpub")
-
-    -- 如果已存在且版本匹配，则直接返回
-    local SKELETON_SCHEMA_VERSION = SkeletonEpub.SKELETON_SCHEMA_VERSION or 3
-    if util.fileExists(epub_path) then
-        local attr = lfs.attributes(epub_path)
-        if attr and attr.size > 1024 then
-            local DocSettings = require("docsettings")
-            local ds = DocSettings:open(epub_path)
-            local ver = ds and ds:readSetting("virtual_book_schema_version")
-            if ver and ver >= SKELETON_SCHEMA_VERSION then
-                return epub_path
-            end
-        end
-    end
-
-    -- 否则快速构建骨架
-    local chapters
-    if self.dbManager and type(self.dbManager.getAllChapters) == "function" then
-        chapters = self.dbManager:getAllChapters(book_cache_id)
-    elseif self.dbManager and type(self.dbManager.getChapters) == "function" then
-        chapters = self.dbManager:getChapters(book_cache_id)
-    else
-        chapters = self:getBookChapterPlusCache(book_cache_id)
-    end
-    if not H.is_tbl(chapters) or #chapters == 0 then
-        local cache_info = self:getCacheInfo(book_cache_id)
-        if cache_info and cache_info.chapters then
-            chapters = cache_info.chapters
-        end
-    end
-    if not H.is_tbl(chapters) or #chapters == 0 then
-        return nil, "no chapters found for book"
-    end
-
-    local cover_path = bookinfo.cover_path or self:get_default_cover_cache(book_cache_id)
-    if not cover_path then
-        local ImageUtil = require("Legado.Helper.ImageUtil")
-        cover_path = ImageUtil.get_default_cover_cache(book_cache_id)
-    end
-
-    local toc = {}
-    local chapters_content = {}
-    for i, ch in ipairs(chapters) do
-        local ch_idx = ch.chapters_index or (i - 1)
-        table.insert(toc, {
-            index = ch_idx,
-            title = ch.title or ch.name or string.format("第%d章", ch_idx + 1),
-        })
-        local ch_cache = self:getCacheChapterFilePath(ch, true)
-        local cache_file = (ch_cache and ch_cache.cacheFilePath) or ch.cacheFilePath
-        if cache_file and util.fileExists(cache_file) then
-            local data = util.readFromFile(cache_file)
-            if data and data ~= "" and not SkeletonEpub.isPlaceholderHtml(data) then
-                chapters_content[ch_idx] = data
-            end
-        end
-    end
-
-    local ok_build, err_build = SkeletonEpub.buildSkeleton({
-        bookinfo = {
-            title = bookinfo.name or bookinfo.title or "未知书名",
-            author = bookinfo.author or "未知作者",
-            cache_id = book_cache_id,
-        },
-        toc = toc,
-        chapters_content = chapters_content,
-        cover_path = cover_path,
-        output_path = epub_path,
-    })
-
-    if not ok_build then
-        return nil, err_build
-    end
-    return epub_path
+function M:getFullBookCacheOutputDir()
+    local dir = self:getSettings().full_book_cache_output_dir
+    return H.is_str(dir) and dir ~= "" and dir or Env.getHomeDir()
 end
 
-function M:syncVirtualBookNewChapters(book_cache_id, book_name)
-    if not book_cache_id then return false end
-    local epub_path = self:getVirtualBookEpubPath(book_cache_id, book_name)
-    if not (epub_path and util.fileExists(epub_path)) then return false end
-
-    local chapters
-    if self.dbManager and type(self.dbManager.getAllChapters) == "function" then
-        chapters = self.dbManager:getAllChapters(book_cache_id)
-    elseif self.dbManager and type(self.dbManager.getChapters) == "function" then
-        chapters = self.dbManager:getChapters(book_cache_id)
-    else
-        chapters = self:getBookChapterPlusCache(book_cache_id)
-    end
-    if not (H.is_tbl(chapters) and #chapters > 0) then return false end
-
-    local DocSettings = require("docsettings")
-    local ds = DocSettings:open(epub_path)
-    local epub_ch_count = ds and ds:readSetting("virtual_book_chapters_count")
-    if not epub_ch_count then
-        epub_ch_count = #chapters
-        if ds then ds:saveSetting("virtual_book_chapters_count", epub_ch_count) end
-        return false
-    end
-
-    if #chapters > epub_ch_count then
-        local SkeletonEpub = require("Legado.Helper.SkeletonEpub")
-        local new_toc = {}
-        local new_contents = {}
-        for i = epub_ch_count + 1, #chapters do
-            local ch = chapters[i]
-            local ch_idx = ch.chapters_index or (i - 1)
-            table.insert(new_toc, {
-                index = ch_idx,
-                title = ch.title or ch.name or string.format("第%d章", ch_idx + 1),
-            })
-            local ch_cache = self:getCacheChapterFilePath(ch, true)
-            local cache_file = (ch_cache and ch_cache.cacheFilePath) or ch.cacheFilePath
-            if cache_file and util.fileExists(cache_file) then
-                local data = util.readFromFile(cache_file)
-                if data and data ~= "" and not SkeletonEpub.isPlaceholderHtml(data) then
-                    new_contents[ch_idx] = data
-                end
-            end
-        end
-
-        if #new_toc > 0 then
-            local ok, err = SkeletonEpub.appendChapters(epub_path, new_toc, new_contents)
-            if ok then
-                if ds then ds:saveSetting("virtual_book_chapters_count", #chapters) end
-                local ok_r, ReaderUI = pcall(require, "apps/reader/readerui")
-                if ok_r and ReaderUI and ReaderUI.instance and ReaderUI.instance.document and ReaderUI.instance.document.file == epub_path then
-                    self:refreshDocumentInPlace(ReaderUI.instance)
-                end
-                return true
-            else
-                logger.warn("syncVirtualBookNewChapters append failed: " .. tostring(err))
-            end
-        end
-    end
-    return false
-end
-
-function M:refreshDocumentInPlace(ui)
-    local ok_r, ReaderUI = pcall(require, "apps/reader/readerui")
-    ui = ui or (ok_r and ReaderUI and ReaderUI.instance)
-    if not (ui and ui.document and ui.document._document) then
-        return false, "no active credocument"
-    end
-    local doc = ui.document
-    local t_start = Probe.start("DOM", "原地热重载", doc.file)
-    -- 记录重载前进度：章节占位→正文的 DOM 变化会使旧 xpointer 失效（crengine 静默解析回第 1 页），
-    -- 此时按阅读百分比兜底恢复，避免跳回首页
-    local old_pos = doc._document:getCurrentPos()
-    local old_height = doc._document:getFullHeight()
-    local old_page = doc._document:getCurrentPage()
-    local old_percent = (old_pos and old_height and old_height > 0) and (old_pos / old_height) or nil
-    -- 章节级锚点：从当前 xpointer 提取 DocFragment 前缀，构造章节头锚点。
-    -- 占位页与正文页的章节根节点 <div class="legado-ch"><h2>…</h2> 结构一致，
-    -- 章节被更新（占位→正文）后旧 xpointer 失效，但该锚点仍有效，可精确回到章节头。
-    local cur_chapter_xp
-    do
-        local cur_xp = doc._document:getXPointer()
-        local frag_prefix = cur_xp and cur_xp:match("^(/body/DocFragment%[%d+%])")
-        if frag_prefix then
-            cur_chapter_xp = frag_prefix .. "/body/div/h2"
-        end
-    end
-    local ok, err = pcall(function()
-        -- 临时静音 crengine 进度条回调，防止顶部弹出进度条并引起卡顿
-        if doc.setCallback then
-            doc:setCallback(nil)
-        end
-        doc._loaded = false
-        if doc.resetCallCache then
-            doc:resetCallCache()
-        elseif doc.setupCallCache then
-            doc:setupCallCache()
-        end
-        local ok_load = doc._document:loadDocument(doc.file, false)
-        if ok_load then
-            doc._loaded = true
-            doc._document:renderDocument()
-            doc.info.doc_height = doc._document:getFullHeight()
-
-            -- 1. 驱动 ReaderRolling 锁定当前视口并通知整页重绘
-            if ui.rolling and ui.rolling.onUpdatePos then
-                ui.rolling:onUpdatePos(true)
-            elseif ui.rolling and ui.rolling.onRedrawCurrentView then
-                ui.rolling:onRedrawCurrentView()
-            elseif ui.paging and ui.paging.onRedrawCurrentPage then
-                ui.paging:onRedrawCurrentPage()
-            else
-                local Event = require("ui/event")
-                ui:handleEvent(Event:new("DocumentRerendered"))
-                local UIManager = require("ui/uimanager")
-                if ui.view and ui.view.dialog then
-                    UIManager:setDirty(ui.view.dialog, "partial")
-                end
-            end
-
-            -- 2. xpointer 失效兜底：重载后仍落在第 1 页而原本不在（占位→正文 DOM 变化导致旧 xpointer 解析回第 1 页），
-            --    按阅读百分比恢复，避免跳回首页
-            if old_percent and old_page and old_page > 1 then
-                local new_page = doc._document:getCurrentPage()
-                if new_page and new_page <= 1 then
-                    logger.warn("refreshDocumentInPlace: xpointer lost after reload (page %s -> 1), restoring by percent %.2f",
-                        tostring(old_page), old_percent * 100)
-                    pcall(function()
-                        -- 章节锚点优先；锚点不存在或定位后仍在第 1 页（锚点无效）时降级百分比兜底
-                        local restored = false
-                        if cur_chapter_xp then
-                            local ok_a = pcall(function()
-                                -- onGotoXPointer 内部会同步 self.xpointer
-                                if ui.rolling and ui.rolling.onGotoXPointer then
-                                    ui.rolling:onGotoXPointer(cur_chapter_xp)
-                                elseif doc._document.gotoXPointer then
-                                    doc._document:gotoXPointer(cur_chapter_xp)
-                                end
-                            end)
-                            if ok_a then
-                                local p_after = doc._document:getCurrentPage()
-                                restored = not (p_after and p_after <= 1)
-                            end
-                        end
-                        if not restored then
-                            -- 百分比兜底（onGotoPercent 公开入口，内部同步 self.xpointer）
-                            if ui.rolling and ui.rolling.onGotoPercent then
-                                ui.rolling:onGotoPercent(old_percent * 100)
-                            elseif doc._document.gotoPos then
-                                -- 非 rolling（paging）文档不可达（虚拟书必为 EPUB），防御性兜底
-                                local new_height = doc._document:getFullHeight()
-                                if new_height and new_height > 0 then
-                                    doc._document:gotoPos(math.floor(old_percent * new_height))
-                                end
-                            end
-                        end
-                        -- 触发重绘（onUpdatePos 因 hash 未变不会重定位，仅重绘，幂等）
-                        if ui.rolling and ui.rolling.onUpdatePos then
-                            ui.rolling:onUpdatePos()
-                        elseif ui.rolling and ui.rolling.onRedrawCurrentView then
-                            ui.rolling:onRedrawCurrentView()
-                        end
-                    end)
-                end
-            end
-
-            -- 3. 同步更新底部状态栏（刷新总页数与章节进度）
-            if ui.view and ui.view.footer and ui.view.footer.onUpdateFooter then
-                pcall(function()
-                    ui.view.footer:onUpdateFooter(ui.view.footer_visible)
-                end)
-            end
-
-            Probe.done("DOM", "原地重载完成", string.format("页数: %s, 高度: %s", tostring(doc:getPageCount()), tostring(doc.info.doc_height)), t_start)
-        else
-            Probe.fail("DOM", "原地重载失败", doc.file, t_start, "loadDocument failed")
-        end
-    end)
-    return ok, err
-end
-
-function M:syncChaptersToVirtualBook(book_cache_id, chapters_map, book_name)
-    if not book_cache_id or not chapters_map or next(chapters_map) == nil then return false end
-    local epub_path = self:getVirtualBookEpubPath(book_cache_id, book_name)
-    if not epub_path or not util.fileExists(epub_path) then return false end
-
-    local count = 0
-    for _ in pairs(chapters_map) do count = count + 1 end
-
-    local t_inject_start = Probe.start("Inject", "批量注水", string.format("共%d章 (book_id: %s)", count, tostring(book_cache_id)))
-    local SkeletonEpub = require("Legado.Helper.SkeletonEpub")
-    local ok, err = SkeletonEpub.updateChapters(epub_path, chapters_map)
-    if ok then
-        Probe.done("Inject", "批量注水完成", string.format("共%d章 (book_id: %s)", count, tostring(book_cache_id)), t_inject_start, "200 OK")
-    else
-        Probe.fail("Inject", "批量注水失败", string.format("共%d章 (book_id: %s)", count, tostring(book_cache_id)), t_inject_start, tostring(err))
-    end
-    return ok, err
-end
-
-function M:syncChapterToVirtualBook(book_cache_id, chapter_idx, raw_content, book_name)
-    return self:syncChaptersToVirtualBook(book_cache_id, { [chapter_idx] = raw_content }, book_name)
-end
-
---- 针对支持 PR #2477 (LVContainerTransform / loadEpubWithEntryTransform) 的前向兼容钩子
-function M:createEpubTransformHook(book_cache_id)
-    local SkeletonEpub = require("Legado.Helper.SkeletonEpub")
-    return {
-        transformEntry = function(self_t, path)
-            local ch_idx = SkeletonEpub.parseChapterIndexFromEntryPath(path)
-            if ch_idx and self.dbManager then
-                local ch = self.dbManager:findChapterByIndex(book_cache_id, ch_idx)
-                local ch_cache = ch and self:getCacheChapterFilePath(ch, true)
-                local cache_file = (ch_cache and ch_cache.cacheFilePath) or (ch and ch.cacheFilePath)
-                if cache_file and util.fileExists(cache_file) then
-                    local raw = util.readFromFile(cache_file)
-                    if raw and raw ~= "" and not SkeletonEpub.isPlaceholderHtml(raw) then
-                        return SkeletonEpub.formatChapterXhtml(ch_idx, ch.title or ch.name, raw)
-                    end
-                end
-            end
-            return nil
-        end
-    }
+function M:ensureFullBookCacheOutputDir()
+    return ensure_directory(self:getFullBookCacheOutputDir())
 end
 
 function M:enforceRateLimit(last_time, limit_ms)
-    if last_time and time.since(last_time) < time.ms(limit_ms) then
+    local elapsed = last_time and time.since(last_time)
+    if elapsed and elapsed < time.ms(limit_ms) then
+        Probe.eventf("RateLimit", "请求被限频", nil,
+            "limit_ms=%s elapsed_ms=%s", tostring(limit_ms), tostring(time.to_ms(elapsed)))
         return true
     end
     return false
@@ -2226,7 +2658,9 @@ end
 function M:onExitClean()
     dbg.v('Backend call onExitClean')
     self._is_exiting = true
+    if preload_callbacks.hide_chapter_loading then preload_callbacks.hide_chapter_loading() end
     PlgState:cancelPreload("backend_exit_clean")
+    if preload_callbacks.cleanup then preload_callbacks.cleanup() end
     self:closeDbManager()
     collectgarbage()
     collectgarbage()

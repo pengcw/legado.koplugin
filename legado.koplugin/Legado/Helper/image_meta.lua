@@ -1,10 +1,6 @@
--- 图片格式识别与元数据（魔数嗅探 / 结构头尺寸 / 扩展名 / 合法性校验)
--- Legado 图片爬取来源复杂，每张使用 RenderImage 解码判断的话代价很大, 用本库先行检测
--- 只做 header validation（非完整解码）：无法可靠确认的数据一律返回 nil/false，不猜尺寸
 
 local M = {}
 
--- "img"：RenderImage 兜底路径的通用扩展名（sniff 不识别的冷门格式，如 JPEG2000）
 M.IMAGE_EXTENSIONS = { "jpg", "jpeg", "png", "webp", "bmp", "tiff", "gif", "svg", "img" }
 
 M.IMAGE_EXTENSIONS_MAP = {
@@ -31,7 +27,6 @@ M.MIME_TYPES = {
     img = "application/octet-stream",
 }
 
--- 尺寸安全：单边 ≤50000、总像素 ≤5 千万（50000×50000=2.5G 像素不应被接受）
 local MAX_IMAGE_DIM = 50000
 local MAX_IMAGE_PIXELS = 50000000
 M.MAX_IMAGE_DIM = MAX_IMAGE_DIM
@@ -70,7 +65,7 @@ end
 local function read_i32_le(data, offset)
     local v = read_u32_le(data, offset)
     if not v then return nil end
-    if v >= 0x80000000 then v = v - 0x100000000 end -- 解释为有符号
+    if v >= 0x80000000 then v = v - 0x100000000 end
     return v
 end
 
@@ -96,7 +91,7 @@ local function crc32(data)
         crc = bit.bxor(crc_table[bit.bxor(crc, string.byte(data, i)) % 256], bit.rshift(crc, 8))
     end
     crc = bit.bxor(crc, 0xFFFFFFFF)
-    if crc < 0 then crc = crc + 0x100000000 end -- bit 库返回有符号，转无符号比较
+    if crc < 0 then crc = crc + 0x100000000 end
     return crc
 end
 
@@ -113,7 +108,6 @@ function M.sniff_format(data)
     return nil
 end
 
--- 结构头解析宽高：无法可靠解析返回 nil（不猜）
 function M.parse_dimensions(data, format)
     if type(data) ~= "string" then return nil end
 
@@ -124,7 +118,6 @@ function M.parse_dimensions(data, format)
         local w = read_u32_be(data, 17)
         local h = read_u32_be(data, 21)
         if not w or not h then return nil end
-        -- IHDR CRC 覆盖 type+data（偏移 13..29，不含 length）
         if in_bounds(data, 30, 4) then
             local expect = read_u32_be(data, 30)
             if expect ~= crc32(string.sub(data, 13, 29)) then return nil end
@@ -132,20 +125,19 @@ function M.parse_dimensions(data, format)
         return w, h
 
     elseif format == "jpg" then
-        local i = 3 -- 跳过 SOI（1-2 字节）后从 3 开始
+        local i = 3
         while i <= #data do
             if string.byte(data, i) ~= 0xFF then
                 i = i + 1
             else
                 local marker = string.byte(data, i + 1)
                 if not marker then return nil end
-                if marker == 0xD8 then -- SOI
+                if marker == 0xD8 then
                     i = i + 2
-                elseif marker == 0xFF then -- 填充字节（T.81 允许），跳过继续扫描
+                elseif marker == 0xFF then
                     i = i + 1
                 elseif marker == 0xD9 or marker == 0x01
                         or (marker >= 0xD0 and marker <= 0xD7) then
-                    -- EOI / TEM / RSTn：无长度段
                     if marker == 0xD9 then break end
                     i = i + 2
                 else
@@ -155,7 +147,6 @@ function M.parse_dimensions(data, format)
                     end
                     if marker >= 0xC0 and marker <= 0xCF and marker ~= 0xC4
                             and marker ~= 0xC8 and marker ~= 0xCC then
-                        -- SOF 段最小长度 11（8 + 3×组件数），保证 h/w 位于段体内
                         if seglen < 11 or not in_bounds(data, i + 5, 4) then return nil end
                         local h = read_u16_be(data, i + 5)
                         local w = read_u16_be(data, i + 7)
@@ -166,16 +157,12 @@ function M.parse_dimensions(data, format)
                 end
             end
         end
-        return nil -- 未找到 SOF（无 SOF 的 JPEG 不合法）
+        return nil
 
     elseif format == "gif" then
-        -- GIF87a / GIF89a + 逻辑屏幕描述符宽高（LE）
-        -- 最小合法 GIF：头(6)+LSD(7)+图像描述符(10)+LZW块+终止+trailer ≥ 24 字节，
-        -- 仅含头的截断数据（无图像块）判定为非法
         if #data < 24 then return nil end
         local ver = string.sub(data, 4, 6)
         if ver ~= "87a" and ver ~= "89a" then return nil end
-        -- 偏移 14（1-based）应为图像分隔符 0x2C 或扩展块 0x21（仅头垃圾数据拒绝）
         local marker14 = string.byte(data, 14)
         if marker14 ~= 0x2C and marker14 ~= 0x21 then return nil end
         local w = read_u16_le(data, 7)
@@ -184,16 +171,15 @@ function M.parse_dimensions(data, format)
         return w, h
 
     elseif format == "bmp" then
-        -- BM + DIB header：宽度(有符号) + 高度(有符号，可负=top-down)
         if #data < 26 then return nil end
         local dib_size = read_u32_le(data, 15)
-        if not dib_size or dib_size < 40 then return nil end -- 仅支持 BITMAPINFOHEADER 及以上
+        if not dib_size or dib_size < 40 then return nil end
         if not in_bounds(data, 15, dib_size) then return nil end
         local w = read_i32_le(data, 19)
         local h = read_i32_le(data, 23)
         if not w or not h then return nil end
         if w <= 0 then return nil end
-        if h < 0 then h = -h end -- top-down BMP
+        if h < 0 then h = -h end
         return w, h
 
     elseif format == "webp" then
@@ -203,22 +189,17 @@ function M.parse_dimensions(data, format)
         local fourcc = string.sub(data, 13, 16)
         local chunk_size = read_u32_le(data, 17)
         if not chunk_size then return nil end
-        if 20 + chunk_size > #data then return nil end -- chunk 数据越界
+        if 20 + chunk_size > #data then return nil end
         if fourcc == "VP8 " then
-            -- 有损（静态图必须为 key frame）：帧标签 3 字节（bit7=key_frame 位）后
-            -- 跟 start code 0x9D 01 2A，再后 2 字节 14-bit 宽、2 字节 14-bit 高。
-            -- 帧标签首字节不固定为 0x9D（0x9D 只是 first_part_size 高位=001 的特例），
-            -- 写死 0x9D 会误杀 first_part_size ≥ 0x4000 或 version≠0 的合法关键帧
             if chunk_size < 10 then return nil end
-            local d = 21 -- 帧标签起始（20 是 chunk header 结束）
-            if bit.band(string.byte(data, d), 0x80) == 0 then return nil end -- 非关键帧拒绝
+            local d = 21
+            if bit.band(string.byte(data, d), 0x01) ~= 0 then return nil end
             if string.byte(data, d + 3) ~= 0x9D or string.byte(data, d + 4) ~= 0x01
-                    or string.byte(data, d + 5) ~= 0x2A then return nil end -- start code
+                    or string.byte(data, d + 5) ~= 0x2A then return nil end
             local w = string.byte(data, d + 6) + (string.byte(data, d + 7) % 0x40) * 256
             local h = string.byte(data, d + 8) + (string.byte(data, d + 9) % 0x40) * 256
             return w, h
         elseif fourcc == "VP8L" then
-            -- 无损：标志字节后 4 字节：14-bit(宽-1) + 14-bit(高-1)
             if chunk_size < 5 then return nil end
             local d = 21
             if string.byte(data, d) ~= 0x2F then return nil end
@@ -228,7 +209,6 @@ function M.parse_dimensions(data, format)
             local h = (math.floor(bits / 0x4000) % 0x4000) + 1
             return w, h
         elseif fourcc == "VP8X" then
-            -- 扩展：保留(1) + 标志(3) 后 24-bit(宽-1)、24-bit(高-1)
             if chunk_size < 10 then return nil end
             local d = 21
             local w = string.byte(data, d + 4) + string.byte(data, d + 5) * 256
@@ -237,7 +217,7 @@ function M.parse_dimensions(data, format)
                 + string.byte(data, d + 9) * 65536 + 1
             return w, h
         end
-        return nil -- 未知 chunk 类型（非法/不支持）
+        return nil
 
     elseif format == "tiff" then
         if #data < 8 then return nil end
@@ -260,11 +240,10 @@ function M.parse_dimensions(data, format)
         if not in_bounds(data, ifd_offset + 3, entry_count * 12) then return nil end
         local w, h
         for i = 0, entry_count - 1 do
-            local e = ifd_offset + 3 + i * 12 -- entry 起始
+            local e = ifd_offset + 3 + i * 12
             local tag = le and read_u16_le(data, e) or read_u16_be(data, e)
             local etype = le and read_u16_le(data, e + 2) or read_u16_be(data, e + 2)
             if not tag or not etype then return nil end
-            -- 尺寸字段仅接受 SHORT(3)/LONG(4) 且 count=1
             local count = le and read_u32_le(data, e + 4) or read_u32_be(data, e + 4)
             if not count then return nil end
             if (etype == 3 or etype == 4) and count == 1 then

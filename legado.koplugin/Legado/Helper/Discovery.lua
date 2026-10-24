@@ -1,7 +1,6 @@
 local bit = require("bit")
 local socket = require("socket")
 local logger = require("logger")
--- ffi/netinfo 仅 KOReader > 2025.8有
 local netinfo
 local net_info_ok = pcall(function()
     netinfo = require("ffi/netinfo")
@@ -35,6 +34,33 @@ local function swap32(n)
         + (math.floor(n / 16777216) % 256)
 end
 
+local function maskToPrefix(netmask)
+    local mask_n = ip2num(netmask or "255.255.255.0")
+    if not mask_n then return 24 end
+    local prefix = 0
+    for i = 31, 0, -1 do
+        local p = 2 ^ i
+        if mask_n >= p then
+            prefix = prefix + 1
+            mask_n = mask_n - p
+        else
+            break
+        end
+    end
+    return prefix
+end
+
+local function prefixToMask(prefix)
+    prefix = tonumber(prefix)
+    if not prefix or prefix < 0 or prefix > 32 then return "255.255.255.0" end
+    if prefix == 0 then return "0.0.0.0" end
+    local n = 0
+    for i = 31, 32 - prefix, -1 do
+        n = n + 2 ^ i
+    end
+    return num2ip(n)
+end
+
 function M:getNetmask(ip)
     local f = io.open("/proc/net/route")
     if not f then
@@ -66,7 +92,6 @@ function M:getNetmask(ip)
     return mask
 end
 
--- 多网卡时取实际上网接口
 local function getDefaultRouteIface()
     local f = io.open("/proc/net/route")
     if not f then return nil end
@@ -81,70 +106,197 @@ local function getDefaultRouteIface()
     return nil
 end
 
-function M:getLocalIPv4()
-    if net_info_ok and netinfo then
-        local ok, ifaces = pcall(function()
-            return netinfo:new():retrieve()
-        end)
-        if ok and type(ifaces) == "table" then
-            local default_iface = getDefaultRouteIface()
-            if default_iface then
-                for _, iface in ipairs(ifaces) do
-                    if iface.name == default_iface and type(iface.ipv4) == "string" then
-                        local ip = iface.ipv4:match("(%d+%.%d+%.%d+%.%d+)")
-                        if ip then
-                            logger.dbg("Discovery: 本机IP(netinfo)", iface.name, ip)
-                            return ip
-                        end
-                    end
-                end
-                logger.warn("Discovery: 默认路由接口 ", default_iface, " 未匹配到 IPv4，回退遍历")
-            end
-            for _, iface in ipairs(ifaces) do
-                if iface.name ~= "lo" and type(iface.ipv4) == "string" then
-                    local ip = iface.ipv4:match("(%d+%.%d+%.%d+%.%d+)")
-                    if ip then
-                        logger.dbg("Discovery: 本机IP(netinfo)", iface.name, ip)
-                        return ip
-                    end
-                end
-            end
-            logger.warn("Discovery: netinfo 未返回 IPv4 接口，尝试 UDP 兜底")
-        else
-            logger.warn("Discovery: netinfo 获取接口失败，尝试 UDP 兜底", tostring(ifaces))
-        end
-    end
-    -- UDP 兜底
-    local ok_u, udp = pcall(function() return socket.udp() end)
-    if ok_u and udp then
-        local ok_peer = pcall(function() return udp:setpeername("8.8.8.8", 80) end)
-        local ip = ok_peer and udp:getsockname() or nil
-        pcall(function() udp:close() end)
-        if ip and ip:match("^(%d+%.%d+%.%d+%.%d+)$") then
-            logger.dbg("Discovery: 本机IP(UDP兜底)", ip)
-            return ip
-        end
-        logger.warn("Discovery: UDP 兜底也失败", tostring(ip))
-    end
-    return nil
-end
-
-function M:getScanRange(ip, netmask)
+function M:getScanRange(ip, netmask, max_hosts)
     local ip_n = ip2num(ip)
     local mask_n = ip2num(netmask or "255.255.255.0")
     if not ip_n or not mask_n then
         logger.warn("Discovery: 无效 IP/掩码", tostring(ip), tostring(netmask))
         return nil
     end
-    local network = bit.band(bit.tobit(ip_n), bit.tobit(mask_n)) % MAX_U32
-    local broadcast = (network + (MAX_U32 - 1 - mask_n)) % MAX_U32
+    local effective_mask_n = mask_n
+    local network = bit.band(bit.tobit(ip_n), bit.tobit(effective_mask_n)) % MAX_U32
+    local broadcast = (network + (MAX_U32 - 1 - effective_mask_n)) % MAX_U32
+    local count = broadcast - network - 1
+    max_hosts = max_hosts or 512
+    if count > max_hosts then
+        logger.warn("Discovery: 网段包含 ", count, " 主机超过上限 ", max_hosts, "，收缩至当前 IP /24 邻居段")
+        effective_mask_n = ip2num("255.255.255.0")
+        network = bit.band(bit.tobit(ip_n), bit.tobit(effective_mask_n)) % MAX_U32
+        broadcast = (network + (MAX_U32 - 1 - effective_mask_n)) % MAX_U32
+    end
     logger.dbg("Discovery: 网段", num2ip(network), "~", num2ip(broadcast), "(本机", ip .. ")")
-    return { first = network + 1, last = broadcast - 1 }
+    local first = network + 1
+    local last = broadcast - 1
+    if first > last then
+        first = ip_n
+        last = ip_n
+    end
+    return {
+        first = first,
+        last = last,
+        network = network,
+        broadcast = broadcast,
+        netmask = num2ip(effective_mask_n),
+    }
+end
+
+function M:getNetworks(options)
+    options = options or {}
+    local candidates = {}
+    local seen_ips = {}
+    local default_iface = getDefaultRouteIface()
+
+    local function add_candidate(ip, netmask, iface, is_default)
+        if not ip or type(ip) ~= "string" then return end
+        local ip_match = ip:match("(%d+%.%d+%.%d+%.%d+)")
+        if not ip_match then return end
+        if ip_match:match("^127%.") or ip_match:match("^169%.254%.") or ip_match == "0.0.0.0" then
+            return
+        end
+        if seen_ips[ip_match] then return end
+        seen_ips[ip_match] = true
+
+        local mask = netmask or self:getNetmask(ip_match) or "255.255.255.0"
+        table.insert(candidates, {
+            ip = ip_match,
+            netmask = mask,
+            iface = iface,
+            is_default = is_default or (iface and default_iface and iface == default_iface) or false,
+        })
+    end
+
+    if options.ip then
+        add_candidate(options.ip, options.netmask, default_iface, true)
+    else
+        if net_info_ok and netinfo then
+            local ok, ifaces = pcall(function()
+                return netinfo:new():retrieve()
+            end)
+            if ok and type(ifaces) == "table" then
+                for _, iface in ipairs(ifaces) do
+                    if iface.name and not iface.name:match("^lo") and type(iface.ipv4) == "string" then
+                        local prefix = iface.ipv4:match("/(%d+)$")
+                        local mask = prefix and prefixToMask(prefix) or nil
+                        local is_def = (default_iface and iface.name == default_iface)
+                        add_candidate(iface.ipv4, mask, iface.name, is_def)
+                    end
+                end
+            end
+        end
+
+        local f = io.open("/proc/net/route")
+        if f then
+            for line in f:lines() do
+                local iface, dest, mask = line:match("^(%S+)%s+([%x]+)%s+[%x]+%s+[%x]+%s+%d+%s+%d+%s+%d+%s+([%x]+)")
+                if iface and dest and mask and not iface:match("^lo") then
+                    local dest_n = swap32(tonumber(dest, 16))
+                    local mask_n = swap32(tonumber(mask, 16))
+                    if dest_n ~= 0 and mask_n ~= 0 and mask_n ~= MAX_U32 - 1 then
+                        local target_probe_ip = num2ip(dest_n + 1)
+                        local ok_u, udp = pcall(function() return socket.udp() end)
+                        if ok_u and udp then
+                            local ok_peer = pcall(function() return udp:setpeername(target_probe_ip, 80) end)
+                            local ip = ok_peer and udp:getsockname() or nil
+                            pcall(function() udp:close() end)
+                            if ip and ip:match("^(%d+%.%d+%.%d+%.%d+)$") then
+                                local is_def = (default_iface and iface == default_iface)
+                                add_candidate(ip, num2ip(mask_n), iface, is_def)
+                            end
+                        end
+                    end
+                end
+            end
+            f:close()
+        end
+
+        if #candidates == 0 then
+            local ok_u, udp = pcall(function() return socket.udp() end)
+            if ok_u and udp then
+                local ok_peer = pcall(function() return udp:setpeername("8.8.8.8", 80) end)
+                local ip = ok_peer and udp:getsockname() or nil
+                pcall(function() udp:close() end)
+                if ip and ip:match("^(%d+%.%d+%.%d+%.%d+)$") then
+                    add_candidate(ip, nil, default_iface, true)
+                end
+            end
+        end
+    end
+
+    table.sort(candidates, function(a, b)
+        if a.is_default and not b.is_default then return true end
+        if not a.is_default and b.is_default then return false end
+        return (a.iface or "") < (b.iface or "")
+    end)
+
+    local max_hosts = options.max_hosts or 512
+    local results = {}
+    local seen_networks = {}
+
+    for _, cand in ipairs(candidates) do
+        local range = self:getScanRange(cand.ip, cand.netmask, max_hosts)
+        if range then
+            local network_key = range.network
+            if not seen_networks[network_key] then
+                seen_networks[network_key] = true
+                local effective_netmask = range.netmask or cand.netmask
+                local prefix = maskToPrefix(effective_netmask)
+                results[#results + 1] = {
+                    ip = cand.ip,
+                    netmask = effective_netmask,
+                    first = range.first,
+                    last = range.last,
+                    cidr = string.format("%s/%d", num2ip(range.network), prefix),
+                    iface = cand.iface,
+                    is_default = cand.is_default,
+                }
+                logger.dbg("Discovery: 发现网段", results[#results].cidr, "接口=", cand.iface or "unknown", "本机IP=", cand.ip)
+            end
+        end
+    end
+
+    return results
+end
+
+function M:getNetwork(options)
+    options = options or {}
+    if options.ip then
+        local ip = options.ip
+        local netmask = options.netmask or self:getNetmask(ip) or "255.255.255.0"
+        local range = self:getScanRange(ip, netmask, options.max_hosts)
+        if not range then return nil, "无法确定本机网络" end
+        local effective_netmask = range.netmask or netmask
+        return {
+            ip = ip,
+            netmask = effective_netmask,
+            first = range.first,
+            last = range.last,
+            cidr = string.format("%s/%d", num2ip(range.network), maskToPrefix(effective_netmask)),
+        }
+    end
+    local nets = self:getNetworks(options)
+    if nets and #nets > 0 then
+        return nets[1]
+    end
+    return nil, "无法确定本机网络"
+end
+
+function M:getLocalIPv4()
+    local net = self:getNetwork()
+    return net and net.ip or nil
+end
+
+function M:getLocalIPv4List()
+    local nets = self:getNetworks()
+    local list = {}
+    for _, n in ipairs(nets) do
+        table.insert(list, n.ip)
+    end
+    return list
 end
 
 local function probeHosts(ips, ports, options)
-    local results = {}      -- { ip = ip, port = port } 列表
-    local concurrency = options.concurrency or 32
+    local results = {}
+    local concurrency = options.concurrency or (math.min(64, math.max(32, math.floor(#ips / 8))))
     local wait = options.timeout or 0.3
     local total_timeout = options.total_timeout or 10
     local retry = options.retry or 2
@@ -154,14 +306,16 @@ local function probeHosts(ips, ports, options)
     logger.dbg("Discovery: 开始探测", #ips, "个IP x", #ports, "个端口, 并发", concurrency, "每轮", wait, "s, 总时限", total_timeout, "s")
 
     local queue = {}
-    for i = #ips, 1, -1 do
+    for _, ip in ipairs(ips) do
         for _, port in ipairs(ports) do
-            queue[#queue + 1] = { ip = ips[i], port = port }
+            queue[#queue + 1] = { ip = ip, port = port }
         end
     end
+    local queue_head = 1
+    local queue_tail = #queue
 
-    local socks = {}       -- 在途 socket
-    local info_of = {}     -- sock -> { ip, port }
+    local socks = {}
+    local info_of = {}
     local in_flight = 0
     local rounds = 0
     local diag_conn_errs = 0
@@ -175,52 +329,83 @@ local function probeHosts(ips, ports, options)
     end
 
     local function start_next()
-        while in_flight < concurrency and #queue > 0 do
-            local item = table.remove(queue)
+        while in_flight < concurrency and queue_head <= queue_tail do
+            local item = queue[queue_head]
+            queue[queue_head] = nil
+            queue_head = queue_head + 1
             local sock = socket.tcp()
-            sock:settimeout(0) -- 非阻塞
+            sock:settimeout(0)
             local ok, err = sock:connect(item.ip, item.port)
             if ok then
                 pcall(function() sock:close() end)
                 record(item.ip, item.port)
             else
-                -- 非阻塞 connect 的正常返回是 timeout（EINPROGRESS 等 select）；其他错误抽样记录
                 if err and err ~= "timeout" and err ~= "in progress" and diag_conn_errs < 3 then
                     diag_conn_errs = diag_conn_errs + 1
                     logger.warn("Discovery: connect 立即失败", item.ip, item.port, tostring(err))
                 end
+                item.deadline = socket.gettime() + wait
                 socks[#socks + 1] = sock
                 info_of[sock] = item
                 in_flight = in_flight + 1
             end
         end
     end
-    -- 未就绪的连接重新入队重试；就绪（连通或被拒）的不重试
+
     start_next()
-    while (in_flight > 0 or #queue > 0) and socket.gettime() < deadline do
+    while (in_flight > 0 or queue_head <= queue_tail) and socket.gettime() < deadline do
         rounds = rounds + 1
+        local now = socket.gettime()
+        local select_wait = wait
+        for _, s in ipairs(socks) do
+            local item = info_of[s]
+            if item and item.deadline then
+                local remain = item.deadline - now
+                if remain > 0 and remain < select_wait then
+                    select_wait = remain
+                end
+            end
+        end
+        if select_wait <= 0 then select_wait = 0.001 end
+
         local _, ready
         if #socks > 0 then
-            _, ready = socket.select(nil, socks, wait)
+            _, ready = socket.select(nil, socks, select_wait)
         end
         ready = ready or {}
         local ready_set = {}
         for _, s in ipairs(ready) do ready_set[s] = true end
+
+        now = socket.gettime()
+        local remaining_socks = {}
         for _, s in ipairs(socks) do
             local item = info_of[s]
             if ready_set[s] then
                 if s:getpeername() then record(item.ip, item.port) end
-            elseif (item.retries or 0) < retry then
-                item.retries = (item.retries or 0) + 1
-                queue[#queue + 1] = item
+                pcall(function() s:close() end)
+                info_of[s] = nil
+                in_flight = in_flight - 1
+            elseif now >= (item.deadline or 0) then
+                if (item.retries or 0) < retry then
+                    item.retries = (item.retries or 0) + 1
+                    queue_tail = queue_tail + 1
+                    queue[queue_tail] = item
+                end
+                pcall(function() s:close() end)
+                info_of[s] = nil
+                in_flight = in_flight - 1
+            else
+                remaining_socks[#remaining_socks + 1] = s
             end
-            pcall(function() s:close() end)
-            info_of[s] = nil
-            in_flight = in_flight - 1
         end
-        socks = {}
+        socks = remaining_socks
         start_next()
     end
+    for _, s in ipairs(socks) do
+        pcall(function() s:close() end)
+        info_of[s] = nil
+    end
+    socks = {}
     logger.dbg("Discovery: 探测完成", #results, "个命中, 共", rounds, "轮",
         (socket.gettime() >= deadline and "(已达总时限)" or ""))
     return results
@@ -230,17 +415,14 @@ local MAX_BODY = 4096
 local function httpGet(ip, port, path, timeout, max_body)
     local sock = socket.tcp()
     sock:settimeout(timeout or 1)
-    -- 清除 socketutil 注入的 total timeout（插件其他模块会留正值），避免慢响应被掐断
     pcall(function() sock:settimeout(-1, "t") end)
     local ok = sock:connect(ip, port)
     if not ok then pcall(function() sock:close() end) return nil end
-    -- Host 带端口（HTTP/1.1 规范，非默认端口时）
     local req = "GET " .. path .. " HTTP/1.1\r\n"
         .. "Host: " .. ip .. ":" .. port .. "\r\n"
         .. "Connection: close\r\n\r\n"
     local sent = sock:send(req)
     if not sent then pcall(function() sock:close() end) return nil end
-    -- 校验 status line：非 HTTP 服务（如 SSH banner）不误判为 HTTP
     local status_line = sock:receive("*l")
     if not status_line then pcall(function() sock:close() end) return nil end
     local code = status_line:match("^HTTP/%d+%.%d+%s+(%d%d%d)")
@@ -253,68 +435,51 @@ local function httpGet(ip, port, path, timeout, max_body)
         local k, v = line:match("^([^:]+):%s*(.*)$")
         if k and k:lower() == "content-length" then content_length = tonumber(v) end
     end
-    -- body 限长读取：探测场景只需响应前缀（如 isLegado 的 web/legado_test），
-    -- 避免 keep-alive/chunked/大 body 造成长时间读取
     local limit = max_body or MAX_BODY
     local body
-    if content_length and content_length <= limit then
+    if content_length and content_length >= 0 and content_length <= limit then
         body = sock:receive(content_length)
     else
-        body = sock:receive(limit) -- 读满 limit 或连接关闭/超时即返回已读部分
+        body = sock:receive(limit)
         if not body then body = sock:receive("*a") end
     end
     pcall(function() sock:close() end)
     return tonumber(code), body
 end
 
-local function maskToPrefix(netmask)
-    local mask_n = ip2num(netmask or "255.255.255.0")
-    local prefix = 0
-    for i = 31, 0, -1 do
-        local p = 2 ^ i
-        if mask_n >= p then
-            prefix = prefix + 1
-            mask_n = mask_n - p
-        else
-            break
-        end
-    end
-    return prefix
-end
-
-function M:getNetwork(options)
-    options = options or {}
-    local ip = options.ip or self:getLocalIPv4()
-    if not ip then return nil, "无法确定本机网络" end
-    local netmask = options.netmask or self:getNetmask(ip) or "255.255.255.0"
-    local range = self:getScanRange(ip, netmask)
-    if not range then return nil, "无法确定本机网络" end
-    -- CIDR 网络地址独立计算（getScanRange 的 first 已排除网络地址本身）
-    local network = bit.band(bit.tobit(ip2num(ip)), bit.tobit(ip2num(netmask))) % MAX_U32
-    logger.dbg("Discovery: 网络 ip=", ip, "netmask=", netmask)
-    return {
-        ip = ip,
-        netmask = netmask,
-        first = range.first,
-        last = range.last,
-        cidr = string.format("%s/%d", num2ip(network), maskToPrefix(netmask)),
-    }
-end
-
 function M:scan(port, options)
     options = options or {}
-    local net, err = self:getNetwork(options)
-    if not net then return nil, err end
-    local max_hosts = options.max_hosts or 512
-    local host_count = net.last - net.first + 1
-    if host_count > max_hosts then
-        logger.warn("Discovery: 网段过大（", host_count, " 主机）超过上限 ", max_hosts)
-        return nil, "network too large"
+    local nets
+    if options.ip then
+        local net, err = self:getNetwork(options)
+        if not net then return nil, err end
+        nets = { net }
+    else
+        nets = self:getNetworks(options)
+        if not nets or #nets == 0 then
+            if options.include_loopback ~= false then
+                return probeHosts({ "127.0.0.1" }, port or 80, options)
+            end
+            return nil, "无法确定本机网络"
+        end
     end
+
     local ips = {}
-    for n = net.first, net.last do
-        ips[#ips + 1] = num2ip(n)
+    local seen = {}
+    for _, net in ipairs(nets) do
+        for n = net.first, net.last do
+            local ip_str = num2ip(n)
+            if not seen[ip_str] then
+                seen[ip_str] = true
+                ips[#ips + 1] = ip_str
+            end
+        end
     end
+    if not options.ip and options.include_loopback ~= false and not seen["127.0.0.1"] then
+        ips[#ips + 1] = "127.0.0.1"
+    end
+
+    if #ips == 0 then return nil, "无可用探测地址" end
     return probeHosts(ips, port or 80, options)
 end
 
@@ -336,37 +501,69 @@ end
 
 function M:isLegado(ip, port, options)
     options = options or {}
-    local status, body = httpGet(ip, port, "/legado_test", options.timeout or 2)
+    local timeout = options.timeout or 8
+    local status, body = httpGet(ip, port, "/legado_test", timeout)
+    if not status and options.retry ~= false then
+        socket.sleep(0.3)
+        status, body = httpGet(ip, port, "/legado_test", timeout)
+    end
     return status == 200 and body ~= nil and body:find("web/legado_test", 1, true) ~= nil
 end
 
--- 扫描局域网 legado 服务：返回 { list = {"ip:port",...}, net = 网段信息 }（供手动/守卫共用）
 function M:scanLegadoServices(opts)
     opts = opts or {}
     local ports = opts.ports or { 1122 }
     local scan_timeout = opts.timeout or 0.4
-    local net = self:getNetwork({ timeout = 0.4 })
-    local scan_opts = { timeout = scan_timeout }
-    if net and net.ip and net.netmask then
-        scan_opts.ip = net.ip -- 复用已探测网段，scan 内部不再重复 getNetwork
-        scan_opts.netmask = net.netmask
+    local nets = self:getNetworks({ timeout = 0.4 })
+    if not nets or #nets == 0 then
+        nets = { { ip = "127.0.0.1", netmask = "255.255.255.255", cidr = "127.0.0.1/32" } }
     end
+    local primary_net = nets[1]
+    local cidrs = {}
+    for _, n in ipairs(nets) do
+        if n.cidr then table.insert(cidrs, n.cidr) end
+    end
+    local scope_cidr = #cidrs > 0 and table.concat(cidrs, ", ") or primary_net.cidr
+    local display_net = {
+        ip = primary_net.ip,
+        netmask = primary_net.netmask,
+        cidr = scope_cidr,
+    }
+
+    local scan_opts = {
+        timeout = scan_timeout,
+        total_timeout = opts.total_timeout or 10,
+    }
+    if opts.concurrency then
+        scan_opts.concurrency = opts.concurrency
+    end
+    if opts.ip then
+        scan_opts.ip = opts.ip
+        scan_opts.netmask = opts.netmask
+    end
+
     local hits = self:scan(ports, scan_opts)
-    if type(hits) ~= "table" then return { list = {}, net = net } end
+    if type(hits) ~= "table" then
+        return { list = {}, net = display_net, nets = nets }
+    end
     local list = {}
+    local loopback_items = {}
     for _, h in ipairs(hits) do
-        if self:isLegado(h.ip, h.port, { timeout = opts.legado_timeout or 2 }) then
-            table.insert(list, string.format("%s:%d", h.ip, h.port))
+        if self:isLegado(h.ip, h.port, { timeout = opts.legado_timeout or 8 }) then
+            local addr = string.format("%s:%d", h.ip, h.port)
+            if h.ip:match("^127%.") then
+                table.insert(loopback_items, addr)
+            else
+                table.insert(list, addr)
+            end
         end
     end
-    return { list = list, net = net }
+    for _, addr in ipairs(loopback_items) do
+        table.insert(list, addr)
+    end
+    return { list = list, net = display_net, nets = nets }
 end
 
--- 通断检测：任意 http/https URL，收到 HTTP 响应（任意状态码）即在线。
--- 走 socket.http（自动 TLS/SNI，支持重定向），区别于局域网 httpGet 的裸 TCP。
--- 用 HEAD 请求：socket.http 对 HEAD 不读 body（http.lua shouldreceivebody），
--- 避免 body 慢/不完整导致的误判；总时限由 socketutil.table_sink 强制
--- （socket 级 total 超时基本不触发，socketutil里面有注释）
 function M:check(url, options)
     options = options or {}
     local socketutil = require("socketutil")
@@ -378,7 +575,6 @@ function M:check(url, options)
         method = "HEAD",
         sink = socketutil.table_sink({}),
     })
-    -- 部分服务拒绝 HEAD（直接断开连接）→ GET 兜底重试一次（table_sink 有总时限兜底）
     if type(code) ~= "number" then
         code = socket.skip(1, http.request{
             url = url,

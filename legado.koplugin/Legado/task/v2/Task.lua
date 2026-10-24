@@ -24,15 +24,17 @@ function Task:new(job, opts)
     local obj = setmetatable({}, self)
     obj.id = opts.id or new_task_id()
     obj.job = job
-    obj.engine = opts.engine or "copas" -- "copas" | "process"
+    obj.engine = opts.engine or "copas"
     obj.channel = opts.channel or "default"
     obj.priority = opts.priority or 0
     obj.timeout = opts.timeout or nil
+    local retry = opts.retry
+    local retry_opts = type(retry) == "table" and retry or nil
     obj.retry = {
-        max = opts.retry and (opts.retry.max or opts.retry) or 0,
+        max = tonumber(retry_opts and retry_opts.max or retry) or 0,
         current = 0,
-        delay = opts.retry and opts.retry.delay or 1.0,
-        backoff = opts.retry and opts.retry.backoff or 1.5,
+        delay = tonumber(retry_opts and retry_opts.delay) or 1.0,
+        backoff = tonumber(retry_opts and retry_opts.backoff) or 1.5,
     }
     obj.state = Task.STATE.PENDING
     obj.result = nil
@@ -43,11 +45,21 @@ function Task:new(job, opts)
     obj.cancel_reason = nil
     obj.listeners = {}
     obj.engine_handle = nil
+    obj.children_group = nil
+    obj.parent_task = nil
+    obj._finalized = false
+    obj._slot_owned = false
+    obj._slot_released = false
+    obj._attempt_error = nil
     return obj
 end
 
 function Task:on(event, callback)
     if not event or type(callback) ~= "function" then return self end
+    if event == "done" and self:is_done() then
+        pcall(callback, self.state == Task.STATE.COMPLETED, self.result or self.error, self.state, self)
+        return self
+    end
     self.listeners[event] = self.listeners[event] or {}
     table.insert(self.listeners[event], callback)
     return self
@@ -88,20 +100,54 @@ function Task:is_cancelled()
 end
 
 function Task:is_paused()
-    return self.state == Task.STATE.PAUSED
+    return self.engine_handle and self.engine_handle.is_paused and self.engine_handle:is_paused() or false
 end
 
 function Task:get_result()
     return self.result, self.error
 end
 
-function Task:cancel(reason)
-    if self:is_done() then return false end
-    self.cancel_reason = reason or "user_cancelled"
-    self:transition(Task.STATE.CANCELLED, nil, self.cancel_reason)
-    if self.engine_handle and self.engine_handle.cancel then
-        self.engine_handle:cancel(self.cancel_reason)
+function Task:get_children_group()
+    if not self.children_group then
+        local TaskGroup = require("Legado.task.v2.TaskGroup")
+        self.children_group = TaskGroup:new(self)
     end
+    return self.children_group
+end
+
+function Task:add_child(task)
+    return self:get_children_group():add(task)
+end
+
+function Task:cancel(reason)
+    if self:is_done() or self.state == Task.STATE.CANCELLING then return false end
+    self.cancel_reason = reason or "user_cancelled"
+
+    if self.state == Task.STATE.PENDING then
+        if self.children_group then
+            self.children_group:cancel(self.cancel_reason)
+        end
+        self:transition(Task.STATE.CANCELLED, nil, self.cancel_reason)
+    else
+        self:transition(Task.STATE.CANCELLING)
+        if self.children_group then
+            self.children_group:cancel(self.cancel_reason)
+        end
+        if self.engine_handle and self.engine_handle.cancel then
+            self.engine_handle:cancel(self.cancel_reason)
+        end
+    end
+    return true
+end
+
+function Task:fail(err)
+    if self.retry.current < self.retry.max then
+        self.retry.current = self.retry.current + 1
+        self._attempt_error = err
+        self:emit("attempt_error", err, self.retry.current, self.retry.max, self)
+        return false
+    end
+    self:transition(Task.STATE.FAILED, nil, err)
     return true
 end
 
@@ -145,6 +191,11 @@ end
 
 function Task:transition(new_state, result, err)
     if self:is_done() and new_state ~= Task.STATE.PENDING then return end
+    if self._finalized and new_state ~= Task.STATE.PENDING then return end
+    if new_state == Task.STATE.CANCELLED and self.state == Task.STATE.RUNNING then
+        self.state = Task.STATE.CANCELLING
+        return
+    end
     local prev_state = self.state
     self.state = new_state
 
@@ -152,11 +203,13 @@ function Task:transition(new_state, result, err)
         self.started_at = socket.gettime()
         self:emit("start", self)
     elseif new_state == Task.STATE.COMPLETED then
+        self._finalized = true
         self.finished_at = socket.gettime()
         self.result = result
         self:emit("finish", result, self)
         self:emit("done", true, result, new_state, self)
     elseif new_state == Task.STATE.FAILED then
+        self._finalized = true
         self.finished_at = socket.gettime()
         local raw_err = err or result
         local clean_err = type(raw_err) == "table" and (raw_err[1] or raw_err.reason or raw_err.message or raw_err.error or raw_err.errorMsg or raw_err.err or raw_err.msg or tostring(raw_err)) or raw_err
@@ -164,6 +217,7 @@ function Task:transition(new_state, result, err)
         self:emit("error", clean_err, self)
         self:emit("done", false, clean_err, new_state, self)
     elseif new_state == Task.STATE.CANCELLED then
+        self._finalized = true
         self.finished_at = socket.gettime()
         local raw_reason = err or result or self.cancel_reason or "user_cancelled"
         local clean_reason = type(raw_reason) == "table" and (raw_reason.reason or raw_reason[1] or raw_reason.message or raw_reason.msg or tostring(raw_reason)) or raw_reason
@@ -171,6 +225,7 @@ function Task:transition(new_state, result, err)
         self:emit("cancel", clean_reason, self)
         self:emit("done", false, clean_reason, new_state, self)
     elseif new_state == Task.STATE.TIMEOUT then
+        self._finalized = true
         self.finished_at = socket.gettime()
         local clean_msg = "task_execution_timeout"
         self.error = { type = "timeout", message = clean_msg }
@@ -187,7 +242,6 @@ local function create_task_context(task, stream, copas_mod)
     local lock_mod = copas_mod and require("Legado.vendor.copas.lock")
     local sema_mod = copas_mod and require("Legado.vendor.copas.semaphore")
 
-    -- 进度汇报 (0.0 ~ 1.0)
     function ctx.progress(ratio, msg)
         if stream then
             stream:write(JSON.encode({ type = "__progress__", ratio = ratio, msg = msg }))
@@ -197,7 +251,38 @@ local function create_task_context(task, stream, copas_mod)
     end
     ctx.report_progress = ctx.progress
 
-    -- 增量事件推流
+    local rate_request_seq = 0
+    function ctx.acquire_rate_limit(key, rate)
+        if not stream or not stream.take_rate_grant then return true end
+        rate_request_seq = rate_request_seq + 1
+        local request_id = string.format("%s:%d", tostring(task.id), rate_request_seq)
+        ctx.throw_if_cancelled()
+        ctx.wait_if_paused()
+        local sent, send_err = stream:write(JSON.encode({
+            type = "__v2_rate_acquire__",
+            data = {
+                request_id = request_id,
+                key = key,
+                rate = rate,
+            },
+        }))
+        if not sent then error(send_err or "rate_acquire_send_failed") end
+
+        while true do
+            ctx.throw_if_cancelled()
+            if stream:take_rate_grant(request_id) then
+                ctx.throw_if_cancelled()
+                ctx.wait_if_paused()
+                return true
+            end
+            if copas_mod then
+                copas_mod.sleep(0.02)
+            else
+                socket.sleep(0.02)
+            end
+        end
+    end
+
     function ctx.emit(data_or_type, maybe_data)
         local payload
         if maybe_data ~= nil then
@@ -216,7 +301,6 @@ local function create_task_context(task, stream, copas_mod)
         end
     end
 
-    -- 智能休眠 (可被即时中断唤醒与协程调度)
     function ctx.sleep(sec)
         if copas_mod then
             local deadline = socket.gettime() + (sec or 0)
@@ -234,7 +318,6 @@ local function create_task_context(task, stream, copas_mod)
         end
     end
 
-    -- 检查是否已被取消
     function ctx.is_cancelled()
         if stream and stream.is_cancelled then
             return stream:is_cancelled()
@@ -243,7 +326,6 @@ local function create_task_context(task, stream, copas_mod)
     end
     ctx.cancelled = ctx.is_cancelled
 
-    -- 校验取消并抛出结构化 Cancelled 异常
     function ctx.throw_if_cancelled()
         if stream and stream.throw_if_cancelled then
             stream:throw_if_cancelled()
@@ -252,22 +334,30 @@ local function create_task_context(task, stream, copas_mod)
         end
     end
 
-    -- 暂停与等待恢复
     function ctx.is_paused()
         if stream and stream.is_paused then
             return stream:is_paused()
         end
-        return false
+        local handle = task.engine_handle
+        return handle and handle.is_paused and handle:is_paused() or false
     end
     ctx.paused = ctx.is_paused
 
     function ctx.wait_if_paused()
         if stream and stream.wait_if_paused then
             stream:wait_if_paused()
+            return
+        end
+        while ctx.is_paused() do
+            ctx.throw_if_cancelled()
+            if copas_mod then
+                copas_mod.sleep(0.05)
+            else
+                socket.sleep(0.05)
+            end
         end
     end
 
-    -- 双向交互会话：命令接收与路由
     function ctx.receive(to)
         if stream and stream.receive then
             local line = stream:receive("*l", to)
@@ -299,7 +389,6 @@ local function create_task_context(task, stream, copas_mod)
         end)
     end
 
-    -- Copas 专属并发原语扩展
     if copas_mod then
         function ctx.map(items, arg2, arg3)
             if not items or #items == 0 then return {} end
@@ -317,9 +406,11 @@ local function create_task_context(task, stream, copas_mod)
             local finished_count = 0
             local results = {}
 
-            for w = 1, concurrency do
-                copas_mod.addthread(function()
+            for _ = 1, concurrency do
+                local handle = copas_mod.addthread(function()
                     while true do
+                        ctx.throw_if_cancelled()
+                        ctx.wait_if_paused()
                         cur_idx = cur_idx + 1
                         local idx = cur_idx
                         if idx > total then break end
@@ -328,16 +419,27 @@ local function create_task_context(task, stream, copas_mod)
                     end
                     finished_count = finished_count + 1
                 end)
+
+                if not stream then
+                    task:get_children_group():add_handle({
+                        cancel = function() copas_mod.removethread(handle) end,
+                    })
+                end
             end
-            while finished_count < concurrency do copas_mod.sleep(0.01) end
+            while finished_count < concurrency do
+                ctx.throw_if_cancelled()
+                copas_mod.sleep(0.01)
+            end
             return results
         end
 
         function ctx.async(fn, ...)
             local args = { ... }
-            return future_mod.addthread(function()
+            local future = future_mod.addthread(function()
                 return fn(unpack(args))
             end)
+
+            return future
         end
 
         function ctx.all(futures_map)
@@ -350,22 +452,31 @@ local function create_task_context(task, stream, copas_mod)
         end
 
         function ctx.race(futures_map)
-            local winner_k, winner_res
-            while not winner_k do
+            if type(futures_map) ~= "table" or next(futures_map) == nil then
+                return nil, "race_empty"
+            end
+            local pending = 0
+            for _ in pairs(futures_map) do pending = pending + 1 end
+            local failures = {}
+            while pending > 0 do
+                if ctx.is_cancelled() then return nil, "cancelled" end
                 for k, f in pairs(futures_map) do
                     local status, res = f:try()
                     if status == true then
-                        winner_k = k
-                        winner_res = res
-                        break
+                        for other_k, other_f in pairs(futures_map) do
+                            if other_k ~= k then other_f:cancel() end
+                        end
+                        return k, res
+                    elseif status ~= future_mod.PENDING then
+                        if failures[k] == nil then
+                            failures[k] = res
+                            pending = pending - 1
+                        end
                     end
                 end
-                if not winner_k then copas_mod.sleep(0.01) end
+                if pending > 0 then copas_mod.sleep(0.01) end
             end
-            for k, f in pairs(futures_map) do
-                if k ~= winner_k then f:cancel() end
-            end
-            return winner_k, winner_res
+            return nil, failures
         end
 
         function ctx.semaphore(max, start, timeout)

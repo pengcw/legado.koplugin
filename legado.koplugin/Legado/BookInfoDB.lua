@@ -1,16 +1,12 @@
 local SQ3 = require("lua-ljsqlite3/init")
 local logger = require("logger")
-local dbg = require("dbg")
 local Device = require("device")
 local util = require("util")
 local H = require("Legado/Helper")
 local FS = require("Legado.Helper.FS")
+local BookSourceLogin = require("Legado.Helper.BookSourceLogin")
+local rapidjson = require("rapidjson")
 
-if not dbg.log then
-    dbg.log = logger.dbg
-end
-
-local custom_type_variable = {}
 local M = {
     dbPath = nil,
     db_conn = nil,
@@ -37,7 +33,85 @@ local function custom_concat(tbl, sep)
     return table.concat(result, sep)
 end
 
-local BOOKINFO_DB_VERSION = 20250328
+local BOOKINFO_DB_VERSION = 20261012
+
+local function encode_variable(value)
+    if value == nil then return nil end
+    if type(value) == "string" then return value end
+    if type(value) ~= "table" then return nil end
+    local ok, encoded = pcall(rapidjson.encode, value)
+    return ok and type(encoded) == "string" and encoded or nil
+end
+
+local BOOKINFO_DB_EXTENDED_SCHEMA = [[
+CREATE TABLE IF NOT EXISTS book_sources (
+    bookShelfId TEXT NOT NULL DEFAULT 'local',
+    bookSourceUrl TEXT NOT NULL,
+    bookSourceName TEXT NOT NULL,
+    bookSourceGroup TEXT DEFAULT NULL,
+    bookSourceType INTEGER DEFAULT 0,
+    customOrder INTEGER DEFAULT 0,
+    weight INTEGER DEFAULT 0,
+    enabled INTEGER DEFAULT 1,
+    enabledExplore INTEGER DEFAULT 1,
+    lastUpdateTime INTEGER DEFAULT 0,
+    dynamicHeader TEXT DEFAULT NULL,
+    dynamicVariables TEXT DEFAULT NULL,
+    loginData TEXT DEFAULT NULL,
+    session TEXT DEFAULT NULL,
+    concurrentRate TEXT DEFAULT NULL,
+    enabledCookieJar INTEGER DEFAULT 0,
+    enabledReview INTEGER DEFAULT 0,
+    respondTime INTEGER DEFAULT 0,
+    bookUrlPattern TEXT DEFAULT NULL,
+    header TEXT DEFAULT NULL,
+    loginUrl TEXT DEFAULT NULL,
+    loginCheckJs TEXT DEFAULT NULL,
+    jsLib TEXT DEFAULT NULL,
+    ext1 TEXT DEFAULT NULL,
+    ext2 TEXT DEFAULT NULL,
+    rawJson TEXT NOT NULL,
+    summaryJson TEXT DEFAULT NULL,
+    PRIMARY KEY (bookShelfId, bookSourceUrl)
+);
+
+CREATE TABLE IF NOT EXISTS text_transform_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bookShelfId TEXT NOT NULL DEFAULT 'local',
+    ruleKey TEXT NOT NULL,
+    name TEXT NOT NULL,
+    groupName TEXT DEFAULT NULL,
+    pattern TEXT NOT NULL,
+    replacement TEXT NOT NULL DEFAULT '',
+    scope TEXT DEFAULT NULL,
+    excludeScope TEXT DEFAULT NULL,
+    scopeTitle INTEGER DEFAULT NULL,
+    scopeContent INTEGER DEFAULT NULL,
+    isEnabled INTEGER NOT NULL DEFAULT 1,
+    isRegex INTEGER NOT NULL,
+    timeoutMs INTEGER DEFAULT NULL,
+    orderIndex INTEGER NOT NULL DEFAULT 0,
+    rawJson TEXT DEFAULT NULL,
+    UNIQUE (bookShelfId, ruleKey)
+);
+
+CREATE TABLE IF NOT EXISTS sync_records (
+    scopeType TEXT NOT NULL DEFAULT 'bookshelf',
+    scopeId TEXT NOT NULL,
+    resourceType TEXT NOT NULL,
+    resourceKey TEXT NOT NULL DEFAULT '',
+    lastAttemptAt INTEGER NOT NULL DEFAULT 0,
+    lastSuccessAt INTEGER NOT NULL DEFAULT 0,
+    lastItemCount INTEGER NOT NULL DEFAULT 0,
+    lastError TEXT DEFAULT NULL,
+    extraJson TEXT DEFAULT NULL,
+    PRIMARY KEY (scopeType, scopeId, resourceType, resourceKey)
+);
+
+CREATE INDEX IF NOT EXISTS idx_book_sources_shelf ON book_sources (bookShelfId, enabled, customOrder);
+CREATE INDEX IF NOT EXISTS idx_text_transform_rules_shelf ON text_transform_rules (bookShelfId, isEnabled, orderIndex);
+CREATE INDEX IF NOT EXISTS idx_sync_records_scope ON sync_records (scopeType, scopeId, resourceType, lastSuccessAt);
+]]
 
 local BOOKINFO_DB_SCHEMA = [[
 
@@ -61,6 +135,7 @@ CREATE TABLE IF NOT EXISTS books (
     
     intro TEXT,                                 
     kind TEXT,                                   
+    variable TEXT DEFAULT NULL,
     totalChapterNum INTEGER DEFAULT 0,          
     btype INTEGER NOT NULL DEFAULT 0,            
     wordCount TEXT,                              
@@ -88,7 +163,8 @@ CREATE TABLE IF NOT EXISTS chapters (
     bookCacheId TEXT NOT NULL,                    
     chapterIndex INTEGER NOT NULL,    
     title TEXT DEFAULT '',             
-    
+    chapterUrl TEXT DEFAULT NULL,
+    variable TEXT DEFAULT NULL,
     isVolume INTEGER DEFAULT 0, 
     
     
@@ -110,10 +186,10 @@ CREATE INDEX IF NOT EXISTS idx_chapters_chapterindex ON chapters (chapterIndex);
 CREATE INDEX IF NOT EXISTS idx_chapters_cachefilepath ON chapters (cacheFilePath);
 CREATE INDEX IF NOT EXISTS idx_chapters_bookcacheid_lastupdated ON chapters (bookCacheId, lastUpdated);
 CREATE INDEX IF NOT EXISTS idx_task_locks_expire ON task_locks (expire_time);
-]]
+]] .. BOOKINFO_DB_EXTENDED_SCHEMA
 
--- 查询字段的顺序必须与映射函数的 row[x] 索引完全一致
-local COLS_BOOK_FULL = "bookCacheId, name, author, bookUrl, origin, originName, originOrder, durChapterIndex, durChapterPos, durChapterTime, durChapterTitle, wordCount, intro, totalChapterNum, kind, sortOrder, cacheExt, coverUrl"
+local COLS_BOOK_FULL = "bookCacheId, name, author, bookUrl, origin, originName, originOrder, durChapterIndex, durChapterPos, durChapterTime, durChapterTitle, wordCount, intro, totalChapterNum, kind, sortOrder, cacheExt, coverUrl, btype, variable"
+local COLS_BOOK_INFO = COLS_BOOK_FULL .. ", bs.concurrentRate, bs.respondTime"
 local function _mapBookRow(row, bookShelfId)
     if not row then return nil end
     return {
@@ -135,11 +211,22 @@ local function _mapBookRow(row, bookShelfId)
         kind = row[15] or "",
         sortOrder = tonumber(row[16]) or 0,
         cacheExt = row[17],
-        coverUrl = row[18]
+        coverUrl = row[18],
+        btype = tonumber(row[19]),
+        variable = row[20]
     }
 end
 
-local COLS_CHAPTER_FULL = "c.chapterIndex, c.title, c.isRead, c.cacheFilePath, b.name, b.author, b.bookUrl, b.durChapterIndex, b.durChapterTime, b.totalChapterNum, b.cacheExt, b.origin"
+local function _mapBookInfoRow(row, bookShelfId)
+    local book = _mapBookRow(row, bookShelfId)
+    if book then
+        book.concurrentRate = row[21]
+        book.respondTime = tonumber(row[22]) or 0
+    end
+    return book
+end
+
+local COLS_CHAPTER_FULL = "c.chapterIndex, c.title, c.isRead, c.cacheFilePath, b.name, b.author, b.bookUrl, b.durChapterIndex, b.durChapterTime, b.totalChapterNum, b.cacheExt, b.origin, c.chapterUrl, c.isVolume, c.variable, b.variable"
 local function _mapChapterRow(row, bookCacheId)
     if not row then return nil end
     return {
@@ -156,7 +243,12 @@ local function _mapChapterRow(row, bookCacheId)
         durChapterTime = tonumber(row[9]) or 0,
         totalChapterNum = tonumber(row[10]) or 0,
         cacheExt = row[11],
-        origin = row[12]
+        origin = row[12],
+        url = row[13],
+        chapterUrl = row[13],
+        isVolume = row[14] == 1,
+        variable = row[15],
+        bookVariable = row[16]
     }
 end
 
@@ -172,7 +264,7 @@ local function _mapBookRowUI(row)
     }
 end
 
-local COLS_CHAPTER_UI = "c.chapterIndex, c.title, c.isRead, c.cacheFilePath, b.durChapterIndex"
+local COLS_CHAPTER_UI = "c.chapterIndex, c.title, c.isRead, c.cacheFilePath, b.durChapterIndex, c.isVolume"
 local function _mapChapterRowUI(row)
     if not row then return nil end
     return {
@@ -181,11 +273,12 @@ local function _mapChapterRowUI(row)
         isRead = row[3] == 1,
         isDownLoaded = not not row[4],
         durChapterIndex = tonumber(row[5]) or 0,
-        cacheFilePath = row[4]
+        cacheFilePath = row[4],
+        isVolume = row[6] == 1
     }
 end
 
-local COLS_CHAPTER_NOT_DOWNLOADED = "c.chapterIndex, c.title, b.bookUrl, b.name, b.origin"
+local COLS_CHAPTER_NOT_DOWNLOADED = "c.chapterIndex, c.title, b.bookUrl, b.name, b.origin, c.chapterUrl, c.variable, b.variable"
 local function _mapChapterNotDownloadedRow(row, bookCacheId)
     if not row then return nil end
     return {
@@ -195,6 +288,10 @@ local function _mapChapterNotDownloadedRow(row, bookCacheId)
         bookUrl = row[3],
         name = row[4],
         origin = row[5],
+        url = row[6],
+        chapterUrl = row[6],
+        variable = row[7],
+        bookVariable = row[8],
     }
 end
 
@@ -209,7 +306,9 @@ function M:new(o)
 end
 
 function M:init()
-    self:_initDB()
+    if not util.fileExists(self.dbPath) then
+        self:_initDB()
+    end
 end
 
 function M.nil_object()
@@ -242,9 +341,9 @@ function M:_setJournalMode()
         self.db:exec("PRAGMA journal_mode=" .. mode .. ";")
     end)
     if success then
-        dbg.v("Database journal mode set to: " .. mode)
+        logger.dbg("Database journal mode set to: " .. mode)
     else
-        dbg.log("Failed to set journal mode. Error: " .. tostring(err))
+        logger.dbg("Failed to set journal mode. Error: " .. tostring(err))
     end
 
 end
@@ -261,7 +360,7 @@ function M:_openDB()
         return SQ3.open(self.dbPath)
     end)
     if not success or not db then
-        dbg.log("Failed to open database at: " .. self.dbPath)
+        logger.dbg("Failed to open database at: " .. self.dbPath)
         error("Failed to open database at: " .. self.dbPath)
         return nil
     end
@@ -272,41 +371,151 @@ function M:_openDB()
 
     self.db:set_busy_timeout(5000)
 
-    dbg.v("Database opened successfully at: " .. self.dbPath)
+    logger.dbg("Database opened successfully at: " .. self.dbPath)
 
     self:_setJournalMode()
 
     return self.db
 end
 
+function M:initializeSchema()
+    self:getDB():exec(BOOKINFO_DB_SCHEMA)
+end
+
+local MIGRATION_COLUMNS = {
+    books = { "variable TEXT DEFAULT NULL" },
+    chapters = { "chapterUrl TEXT DEFAULT NULL", "variable TEXT DEFAULT NULL" },
+    book_sources = {
+        "concurrentRate TEXT DEFAULT NULL", "enabledCookieJar INTEGER DEFAULT 0",
+        "enabledReview INTEGER DEFAULT 0", "respondTime INTEGER DEFAULT 0",
+        "bookUrlPattern TEXT DEFAULT NULL", "header TEXT DEFAULT NULL",
+        "loginUrl TEXT DEFAULT NULL", "loginCheckJs TEXT DEFAULT NULL",
+        "jsLib TEXT DEFAULT NULL", "ext1 TEXT DEFAULT NULL", "ext2 TEXT DEFAULT NULL",
+        "session TEXT DEFAULT NULL", "summaryJson TEXT DEFAULT NULL",
+    },
+}
+
+local function _migrate_stage(conn, version, apply)
+    local cur = tonumber(conn:rowexec("PRAGMA user_version;")) or 0
+    if cur >= version then return end
+    conn:exec("BEGIN IMMEDIATE;")
+    local ok, err = pcall(function()
+        local locked_cur = tonumber(conn:rowexec("PRAGMA user_version;")) or 0
+        if locked_cur >= version then return end
+        apply()
+        conn:exec("PRAGMA user_version=" .. version .. ";")
+    end)
+    if ok then
+        ok, err = pcall(function() conn:exec("COMMIT;") end)
+    end
+    if not ok then
+        pcall(function() conn:exec("ROLLBACK;") end)
+        error(err, 0)
+    end
+end
+
+function M:_migrateDB()
+    local conn = (self.getDB and self:getDB()) or self.db
+    if not conn then return end
+    local current_ver = tonumber(conn:rowexec("PRAGMA user_version;")) or 0
+    if current_ver >= BOOKINFO_DB_VERSION then return end
+
+    _migrate_stage(conn, 20261010, function()
+        self:initializeSchema()
+        for table_name, definitions in pairs(MIGRATION_COLUMNS) do
+            local existing = {}
+            local stmt = conn:prepare("PRAGMA table_info(" .. table_name .. ");")
+            for row in stmt:rows() do existing[row[2]] = true end
+            stmt:close()
+            for _, definition in ipairs(definitions) do
+                local col_name = definition:match("^(%S+)")
+                if col_name and not existing[col_name] then
+                    conn:exec("ALTER TABLE " .. table_name .. " ADD COLUMN " .. definition .. ";")
+                end
+            end
+        end
+    end)
+
+    _migrate_stage(conn, 20261011, function()
+        while true do
+            local rows = self:execute([[SELECT bookShelfId, bookSourceUrl, rawJson
+                FROM book_sources WHERE summaryJson IS NULL LIMIT 32]])
+            if not rows or #rows == 0 then break end
+            for _, row in ipairs(rows) do
+                local decoded, source = pcall(rapidjson.decode, row[3])
+                local summary = "null"
+                if decoded and type(source) == "table" then
+                    summary = rapidjson.encode({
+                        exploreUrl = source.exploreUrl, loginUi = source.loginUi, loginUrl = source.loginUrl,
+                        session = BookSourceLogin.hasNonemptyValue(source.session) and 1 or nil,
+                        loginData = BookSourceLogin.hasNonemptyValue(source.loginData) and 1 or nil,
+                    })
+                end
+                self:execute([[UPDATE book_sources SET summaryJson = ?
+                    WHERE bookShelfId = ? AND bookSourceUrl = ?]], { summary, row[1], row[2] })
+            end
+        end
+    end)
+
+    _migrate_stage(conn, 20261012, function()
+        conn:exec([[
+            UPDATE books SET
+                durChapterIndex = (SELECT chapterIndex FROM chapters
+                    WHERE bookCacheId = books.bookCacheId AND isRead = 1
+                    ORDER BY lastUpdated DESC, chapterIndex DESC LIMIT 1),
+                durChapterTitle = (SELECT title FROM chapters
+                    WHERE bookCacheId = books.bookCacheId AND isRead = 1
+                    ORDER BY lastUpdated DESC, chapterIndex DESC LIMIT 1),
+                durChapterTime = (SELECT COALESCE(lastUpdated, 0) * 1000 FROM chapters
+                    WHERE bookCacheId = books.bookCacheId AND isRead = 1
+                    ORDER BY lastUpdated DESC, chapterIndex DESC LIMIT 1)
+            WHERE COALESCE(durChapterTime, 0) = 0 AND COALESCE(durChapterIndex, 0) = 0
+                AND EXISTS (SELECT 1 FROM chapters WHERE bookCacheId = books.bookCacheId AND isRead = 1);
+        ]])
+    end)
+end
+
+local function _is_corrupt_error(err)
+    if not err then return false end
+    local s = tostring(err):lower()
+    return s:find("not a database", 1, true) ~= nil
+        or s:find("malformed", 1, true) ~= nil
+        or s:find("corrupt", 1, true) ~= nil
+        or s:find("unsupported file format", 1, true) ~= nil
+end
+
 function M:_initDB(is_repair)
     local db
     local success, rc = pcall(function()
         db = self:_openDB()
-        db:exec(string.format("PRAGMA user_version=%d;", BOOKINFO_DB_VERSION))
-        return db:exec(BOOKINFO_DB_SCHEMA)
+        db:exec(BOOKINFO_DB_SCHEMA)
+        return db:exec("PRAGMA user_version=" .. BOOKINFO_DB_VERSION .. ";")
     end)
     if success then
-        dbg.v("Database schema initialized successfully.")
+        logger.dbg("Database schema initialized successfully.")
         self.dbCreated = true
         self:closeDB()
     else
-        dbg.log("Failed to initialize database schema. Return code: " .. tostring(rc))
+        logger.dbg("Failed to initialize database schema. Return code: " .. tostring(rc))
+        self:closeDB()
         local last_backup_db = self.dbPath .. ".bak"
         local has_backup = util.fileExists(last_backup_db)
         if has_backup then
             FS.copyFileFromTo(last_backup_db, self.dbPath)
             util.removeFile(last_backup_db)
-            dbg.log("The backup database has been restored")
+            if util.fileExists(self.dbPath .. "-wal") then util.removeFile(self.dbPath .. "-wal") end
+            if util.fileExists(self.dbPath .. "-shm") then util.removeFile(self.dbPath .. "-shm") end
+            logger.dbg("The backup database has been restored")
         else
             if util.fileExists(self.dbPath) then
                 util.removeFile(self.dbPath)
-                dbg.log("Removed corrupt database file")
+                if util.fileExists(self.dbPath .. "-wal") then util.removeFile(self.dbPath .. "-wal") end
+                if util.fileExists(self.dbPath .. "-shm") then util.removeFile(self.dbPath .. "-shm") end
+                logger.dbg("Removed corrupt database file")
             end
-        end
-        if not is_repair then
-            self:closeDB()
-            self:_initDB(true)
+            if not is_repair then
+                self:_initDB(true)
+            end
         end
     end
 end
@@ -316,23 +525,46 @@ function M:closeDB()
         return
     end
 
-    local success, err = pcall(function()
+    local success = pcall(function()
         return self.db:close()
     end)
     if not success then
-        dbg.log("closing database: " .. tostring(err))
     end
     self.db = nil
     self.isConnected = nil
 end
 
 function M:getDB()
-
+    if self.is_closing or self._suppress_db then
+        return nil
+    end
     if not util.fileExists(self.dbPath) then
         self:_initDB()
     end
     if not self.isConnected or not self.db then
-        return self:_openDB()
+        local ok, db_or_err = pcall(function()
+            local d = self:_openDB()
+            self:_migrateDB()
+            return d
+        end)
+        if not ok then
+            local err_str = tostring(db_or_err)
+            if not self._in_repair and _is_corrupt_error(err_str) then
+                logger.warn("BookInfoDB: detected corrupt database, triggering repair:", err_str)
+                self._in_repair = true
+                self:closeDB()
+                self:_initDB()
+                if not util.fileExists(self.dbPath) then
+                    self:_initDB()
+                end
+                self._in_repair = nil
+                local clean_db = self:_openDB()
+                self:_migrateDB()
+                return clean_db
+            end
+            error(db_or_err, 0)
+        end
+        return db_or_err
     end
     return self.db
 end
@@ -341,70 +573,49 @@ function M:transaction(write_func, opts)
     return function(...)
         local conn = self:getDB()
         if not (conn and self.isConnected) then
-            return nil, "Database connection not available"
+            error("Database connection not available", 0)
         end
-        opts = opts or {}
-        
-        self._txn_depth = self._txn_depth or 0
-        local is_nested = (self._txn_depth > 0) or (self.in_transaction == true)
-        local savepoint_name
+        local depth = self._txn_depth or 0
+        self._txn_depth = depth
+        local nested = depth > 0 or self.in_transaction == true
+        local savepoint = nested and string.format("sp_%08x", math.random(0x7fffffff))
+        local begin = nested and ("SAVEPOINT " .. savepoint)
+            or ("BEGIN " .. ((opts and opts.transaction_type) or "IMMEDIATE") .. " TRANSACTION")
 
-        if is_nested then
-            self._txn_depth = self._txn_depth + 1
-            savepoint_name = string.format("sp_%08x", math.random(0x7fffffff))
-            local ok_sp, err_sp = pcall(function() return conn:exec(string.format("SAVEPOINT %s", savepoint_name)) end)
-            if not ok_sp then
-                if tostring(err_sp):find("closed") then
-                    self._txn_depth = 0
-                    self.in_transaction = false
-                    return nil, err_sp
-                end
-                logger.warn("[DB] Failed to create SAVEPOINT:", tostring(err_sp))
-            end
-        else
-            self._txn_depth = 1
-            local txn_type = opts.transaction_type or "IMMEDIATE"
-            local ok_begin, err_begin = pcall(function() return conn:exec(string.format("BEGIN %s TRANSACTION", txn_type)) end)
-            if not ok_begin then
-                if tostring(err_begin):find("closed") then
-                    self._txn_depth = 0
-                    self.in_transaction = false
-                    return nil, err_begin
-                end
-                logger.warn("[DB] BEGIN TRANSACTION failed, falling back to SAVEPOINT:", tostring(err_begin))
-                savepoint_name = string.format("sp_%08x", math.random(0x7fffffff))
-                pcall(function() return conn:exec(string.format("SAVEPOINT %s", savepoint_name)) end)
-                is_nested = true
-            else
-                self.in_transaction = true
-            end
-        end
-
+        conn:exec(begin)
+        self._txn_depth = depth + 1
+        self.in_transaction = true
         local ok, result = xpcall(function(...)
             return write_func(...)
         end, function(err)
             return debug.traceback(tostring(err), 2)
         end, ...)
 
-        if is_nested then
-            self._txn_depth = math.max(0, self._txn_depth - 1)
-            if savepoint_name then
-                if ok then
-                    pcall(function() return conn:exec(string.format("RELEASE %s", savepoint_name)) end)
-                else
-                    pcall(function() return conn:exec(string.format("ROLLBACK TO %s", savepoint_name)) end)
-                end
-            end
-        else
-            self._txn_depth = 0
-            local status = ok and "COMMIT" or "ROLLBACK"
-            pcall(function() return conn:exec(status) end)
-            self.in_transaction = false
+        if ok then
+            local finished, finish_err = pcall(function()
+                conn:exec(nested and ("RELEASE " .. savepoint) or "COMMIT")
+            end)
+            if not finished then ok, result = false, finish_err end
         end
-
         if not ok then
-            error(result, 0)
+            local cleaned, cleanup_err = pcall(function()
+                if nested then
+                    conn:exec("ROLLBACK TO " .. savepoint)
+                    conn:exec("RELEASE " .. savepoint)
+                else
+                    conn:exec("ROLLBACK")
+                end
+            end)
+            if not cleaned then
+                self:closeDB()
+                self._txn_depth = 0
+                self.in_transaction = false
+                error(tostring(result) .. "\nRollback failed: " .. tostring(cleanup_err), 0)
+            end
         end
+        self._txn_depth = depth
+        self.in_transaction = nested
+        if not ok then error(result, 0) end
         return result
     end
 end
@@ -543,8 +754,6 @@ function M:execute(sql, params, options)
         else
 
             local result = {}
-            local row = {}
-
             local i = 1
             for row in stmt:rows() do
 
@@ -598,7 +807,7 @@ end
 
 function M:upsertBooks(bookShelfId, legado_data, isUpdate)
     if not H.is_str(bookShelfId) or not H.is_tbl(legado_data) then
-        dbg.log('BookInfoDB:upsertBooks Incorrect input parameters')
+        logger.dbg('BookInfoDB:upsertBooks Incorrect input parameters')
         return false
     end
 
@@ -606,8 +815,8 @@ function M:upsertBooks(bookShelfId, legado_data, isUpdate)
     INSERT INTO books (
     bookShelfId, bookCacheId, name, author, bookUrl, origin, originName, originOrder, 
     durChapterIndex, durChapterPos, durChapterTime, durChapterTitle, wordCount, 
-    coverUrl, intro, totalChapterNum, btype, isEnabled, kind
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    coverUrl, intro, totalChapterNum, btype, isEnabled, kind, variable
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
     name = CASE WHEN excluded.name != books.name THEN excluded.name ELSE books.name END,
     author = CASE WHEN excluded.author != books.author THEN excluded.author ELSE books.author END,
@@ -615,17 +824,22 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
     origin = CASE WHEN excluded.origin != books.origin THEN excluded.origin ELSE books.origin END,
     originName = CASE WHEN excluded.originName != books.originName THEN excluded.originName ELSE books.originName END,
     originOrder = CASE WHEN excluded.originOrder != books.originOrder THEN excluded.originOrder ELSE books.originOrder END,
-    durChapterIndex = CASE WHEN excluded.durChapterIndex != books.durChapterIndex THEN excluded.durChapterIndex ELSE books.durChapterIndex END,
-    durChapterPos = CASE WHEN excluded.durChapterPos != books.durChapterPos THEN excluded.durChapterPos ELSE books.durChapterPos END,
-    durChapterTime = CASE WHEN excluded.durChapterTime != books.durChapterTime THEN excluded.durChapterTime ELSE books.durChapterTime END,
-    durChapterTitle = CASE WHEN excluded.durChapterTitle != books.durChapterTitle THEN excluded.durChapterTitle ELSE books.durChapterTitle END,
+    durChapterIndex = CASE WHEN COALESCE(excluded.durChapterTime, 0) >= COALESCE(books.durChapterTime, 0) THEN excluded.durChapterIndex ELSE books.durChapterIndex END,
+    durChapterPos = CASE WHEN COALESCE(excluded.durChapterTime, 0) >= COALESCE(books.durChapterTime, 0) THEN excluded.durChapterPos ELSE books.durChapterPos END,
+    durChapterTime = CASE WHEN COALESCE(excluded.durChapterTime, 0) >= COALESCE(books.durChapterTime, 0) THEN excluded.durChapterTime ELSE books.durChapterTime END,
+    durChapterTitle = CASE WHEN COALESCE(excluded.durChapterTime, 0) >= COALESCE(books.durChapterTime, 0) THEN excluded.durChapterTitle ELSE books.durChapterTitle END,
     wordCount = CASE WHEN excluded.wordCount != books.wordCount THEN excluded.wordCount ELSE books.wordCount END,
     coverUrl = CASE WHEN excluded.coverUrl != books.coverUrl THEN excluded.coverUrl ELSE books.coverUrl END,
     intro = CASE WHEN excluded.intro != books.intro THEN excluded.intro ELSE books.intro END,
     totalChapterNum = CASE WHEN excluded.totalChapterNum != books.totalChapterNum THEN excluded.totalChapterNum ELSE books.totalChapterNum END,
-    btype = CASE WHEN excluded.btype != books.btype THEN excluded.btype ELSE books.btype END,
+    btype = CASE WHEN excluded.btype >= 0 AND excluded.btype != books.btype THEN excluded.btype ELSE books.btype END,
     isEnabled = CASE WHEN excluded.isEnabled != books.isEnabled THEN excluded.isEnabled ELSE books.isEnabled END,
-    kind = CASE WHEN excluded.kind != books.kind THEN excluded.kind ELSE books.kind END, 
+    kind = CASE WHEN excluded.kind != books.kind THEN excluded.kind ELSE books.kind END,
+    variable = CASE
+        WHEN excluded.origin != books.origin THEN excluded.variable
+        WHEN excluded.variable IS NOT NULL AND excluded.variable != '' THEN excluded.variable
+        ELSE books.variable
+    END,
     lastUpdated = CASE WHEN (
     excluded.bookUrl != books.bookUrl OR
     excluded.wordCount != books.wordCount
@@ -635,13 +849,10 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
     local batch_data = {}
     for _, item in ipairs(legado_data) do
         local name = H.is_str(item.name) and util.trim(item.name) or ""
-        -- 修复进度上传, 作者不处理空格
         local author = tostring(item.author)
         local bookUrl = item.bookUrl
-        
+
         if name ~= "" and H.is_str(bookUrl) then
-            -- 修复进度上传, 这里可能导致作者不一致
-            -- if author == "" then author = "未知" end
             local show_book_title = ("%s (%s)"):format(name, author)
             item.cache_id = tostring(H.md5(show_book_title))
 
@@ -650,7 +861,8 @@ ON CONFLICT(bookShelfId, bookCacheId) DO UPDATE SET
                 item.originName or "", item.originOrder or 0, item.durChapterIndex or 0,
                 item.durChapterPos or 0, item.durChapterTime or 0, item.durChapterTitle or "",
                 item.wordCount or "", item.coverUrl or "", item.intro or "", item.totalChapterNum or 0,
-                item.type or 0, 1, item.kind or ''
+                item.type ~= nil and item.type or (item.btype ~= nil and item.btype or -1), 1, item.kind or '',
+                encode_variable(item.variable)
             })
         end
     end
@@ -701,38 +913,109 @@ function M:getBookinfo(bookShelfId, bookCacheId)
     if not H.is_str(bookShelfId) or not H.is_str(bookCacheId) then
         return {}
     end
-    local sql_stmt = string.format("SELECT %s FROM books WHERE isEnabled = 1 AND bookShelfId = ? AND bookCacheId = ?;", COLS_BOOK_FULL)
+    local sql_stmt = string.format([[
+        SELECT %s
+        FROM books AS b
+        LEFT JOIN book_sources AS bs
+            ON bs.bookShelfId = b.bookShelfId AND bs.bookSourceUrl = b.origin
+        WHERE b.isEnabled = 1 AND b.bookShelfId = ? AND b.bookCacheId = ?;
+    ]], COLS_BOOK_INFO)
     local result = self:execute(sql_stmt, {bookShelfId, bookCacheId})
-    
+
     if result and #result > 0 then
-        return _mapBookRow(result[1], bookShelfId)
+        return _mapBookInfoRow(result[1], bookShelfId)
     end
 
     return {}
 end
 
+function M:getAllBookCacheInfo()
+    local infos = {}
+    local book_rows = self:execute([[
+        SELECT bookCacheId, name, author, totalChapterNum
+        FROM books
+        ORDER BY isEnabled DESC, id DESC;
+    ]])
+    for _, row in ipairs(book_rows or {}) do
+        local cache_id = row[1]
+        if H.is_str(cache_id) and not infos[cache_id] then
+            infos[cache_id] = {
+                cache_id = cache_id,
+                name = row[2],
+                author = row[3],
+                total_count = tonumber(row[4]) or 0,
+            }
+        end
+    end
+
+    local chapter_rows = self:execute([[
+        SELECT bookCacheId, COUNT(*)
+        FROM chapters
+        GROUP BY bookCacheId;
+    ]])
+    for _, row in ipairs(chapter_rows or {}) do
+        local cache_id = row[1]
+        if H.is_str(cache_id) then
+            local info = infos[cache_id] or {
+                cache_id = cache_id,
+                total_count = 0,
+            }
+            info.total_count = math.max(info.total_count, tonumber(row[2]) or 0)
+            infos[cache_id] = info
+        end
+    end
+    return infos
+end
+
+function M:getChapterCachePaths(bookCacheId)
+    if not H.is_str(bookCacheId) then return {} end
+    local rows = self:execute([[
+        SELECT cacheFilePath
+        FROM chapters
+        WHERE bookCacheId = ? AND cacheFilePath IS NOT NULL;
+    ]], { bookCacheId })
+    local paths = {}
+    for _, row in ipairs(rows or {}) do
+        if H.is_str(row[1]) then table.insert(paths, row[1]) end
+    end
+    return paths
+end
+
+function M:clearChapterCachePaths(bookCacheId)
+    if not H.is_str(bookCacheId) then return false end
+    self:execute([[
+        UPDATE chapters SET cacheFilePath = NULL WHERE bookCacheId = ?;
+    ]], { bookCacheId })
+    return true
+end
+
 function M:upsertChapters(bookCacheId, chapters)
     if not H.is_str(bookCacheId) or not H.is_tbl(chapters) then
-        dbg.log('BookInfoDB:upsertChapters Incorrect input parameters')
-        return false
+        logger.dbg('BookInfoDB:upsertChapters Incorrect input parameters')
+        return false, 0
     end
 
     local sql_stmt = [[
-        INSERT INTO chapters (bookCacheId, chapterIndex, title, isVolume)
-VALUES (?, ?, ?, ?)
+        INSERT INTO chapters (bookCacheId, chapterIndex, title, isVolume, chapterUrl, variable)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(bookCacheId, chapterIndex) DO UPDATE SET
     title = CASE WHEN excluded.title != chapters.title THEN excluded.title ELSE chapters.title END,
-    isVolume = CASE WHEN excluded.isVolume != chapters.isVolume THEN excluded.isVolume ELSE chapters.isVolume END;
+    isVolume = CASE WHEN excluded.isVolume != chapters.isVolume THEN excluded.isVolume ELSE chapters.isVolume END,
+    chapterUrl = CASE WHEN excluded.chapterUrl IS NOT NULL AND excluded.chapterUrl != '' THEN excluded.chapterUrl ELSE chapters.chapterUrl END,
+    variable = excluded.variable;
     ]]
 
     local batch_data = {}
     for _, chapter in pairs(chapters) do
-        if chapter.index ~= nil then
+        if type(chapter) == "table" and chapter.index ~= nil then
 
             if not H.is_str(chapter.title) or chapter.title == '' then
                 chapter.title = string.format('第%s章', chapter.index)
             end
-            table.insert(batch_data, {bookCacheId, chapter.index, chapter.title, chapter.isVolume})
+            table.insert(batch_data, {
+                bookCacheId, chapter.index, chapter.title, chapter.isVolume and 1 or 0,
+                chapter.url or chapter.chapterUrl, encode_variable(chapter.variable)
+            })
 
         end
     end
@@ -742,19 +1025,20 @@ ON CONFLICT(bookCacheId, chapterIndex) DO UPDATE SET
         self:batch_insert(sql_stmt, batch_data, 0)
     end
 
-    return true
+    return true, #batch_data
 end
 
-function M:getAllChapters(bookCacheId)
+function M:getAllChapters(bookCacheId, readable_only)
     if not H.is_str(bookCacheId) then
         return {}
     end
+    local filter = (readable_only == true) and " AND (c.isVolume IS NULL OR c.isVolume = 0) " or ""
     local sql_stmt = string.format([[
     SELECT %s 
-    FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId 
-    WHERE b.isEnabled = 1 AND c.bookCacheId = ? 
+    FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId
+    WHERE b.isEnabled = 1 AND c.bookCacheId = ? %s
     ORDER BY c.chapterIndex ASC;
-    ]], COLS_CHAPTER_FULL)
+    ]], COLS_CHAPTER_FULL, filter)
 
     local result = self:execute(sql_stmt, bookCacheId)
     local chapters = {}
@@ -765,6 +1049,10 @@ function M:getAllChapters(bookCacheId)
     end
 
     return chapters
+end
+
+function M:getReadableChapters(bookCacheId)
+    return self:getAllChapters(bookCacheId, true)
 end
 
 function M:getAllChaptersByUI(bookCacheId, is_desc_sort)
@@ -788,11 +1076,12 @@ function M:getAllChaptersByUI(bookCacheId, is_desc_sort)
     return chapters
 end
 
-function M:getChapterCount(bookCacheId)
+function M:getChapterCount(bookCacheId, readable_only)
     if not H.is_str(bookCacheId) then
         return 0
     end
-    local sql_stmt = "SELECT count(*) as total_num FROM chapters WHERE bookCacheId = ?;"
+    local filter = (readable_only == true) and " AND (isVolume IS NULL OR isVolume = 0) " or ""
+    local sql_stmt = string.format("SELECT count(*) as total_num FROM chapters WHERE bookCacheId = ? %s;", filter)
     local result = self:execute(sql_stmt, {bookCacheId})
     if result and result[1] and result[1][1] then
         return tonumber(result[1][1])
@@ -801,21 +1090,12 @@ function M:getChapterCount(bookCacheId)
 end
 
 function M:getLastReadChapter(bookCacheId)
-    if not H.is_str(bookCacheId) then
-        return 0
-    end
-    local sql_stmt = [[
-        SELECT COALESCE(chapterIndex, 0) AS chapterIndex
-        FROM chapters
-        WHERE lastUpdated IS NOT NULL AND bookCacheId = ?
-        ORDER BY lastUpdated DESC
-        LIMIT 1;
-    ]]
-    local result = self:execute(sql_stmt, {bookCacheId})
-    if result and result[1] and result[1][1] then
-        return tonumber(result[1][1]) or 0
-    end
-    return 0
+    if not H.is_str(bookCacheId) then return 0 end
+    local rows = self:execute([[
+        SELECT COALESCE(durChapterIndex, 0) FROM books
+        WHERE bookCacheId = ? ORDER BY durChapterTime DESC LIMIT 1
+    ]], { bookCacheId })
+    return rows[1] and tonumber(rows[1][1]) or 0
 end
 
 function M:getChapterLastUpdateTime(bookCacheId)
@@ -834,18 +1114,18 @@ end
 
 function M:getChapterInfo(bookCacheId, chapterIndex)
     if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
-        dbg.log('getChapterInfo Incorrect input parameters')
+        logger.dbg('getChapterInfo Incorrect input parameters')
         return {}
     end
 
     local sql_stmt = string.format([[
     SELECT %s 
-    FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId 
+    FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId
     WHERE b.isEnabled = 1 AND c.bookCacheId = ? AND c.chapterIndex = ?;
     ]], COLS_CHAPTER_FULL)
 
     local result = self:execute(sql_stmt, {bookCacheId, chapterIndex})
-    
+
     if result and #result > 0 then
         return _mapChapterRow(result[1], bookCacheId)
     end
@@ -856,7 +1136,7 @@ end
 function M:getcompleteReadAheadChapters(current_chapter)
 
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('getcompleteReadAheadChapters:', current_chapter)
+        logger.dbg('getcompleteReadAheadChapters:', current_chapter)
         return 0
     end
 
@@ -876,11 +1156,13 @@ WHERE
   c.chapterIndex > ?
   AND c.cacheFilePath IS NOT NULL
   AND c.bookCacheId = ?
+  AND (c.isVolume IS NULL OR c.isVolume = 0)
   AND c.chapterIndex < COALESCE(
       (SELECT MIN(chapterIndex)
        FROM chapters
        WHERE chapterIndex > ?
          AND cacheFilePath IS NULL
+         AND (isVolume IS NULL OR isVolume = 0)
          AND bookCacheId = ?
       ),
       (SELECT MAX(chapterIndex) + 1
@@ -902,11 +1184,13 @@ WHERE
   c.chapterIndex < ?
   AND c.cacheFilePath IS NOT NULL
   AND c.bookCacheId = ?
+  AND (c.isVolume IS NULL OR c.isVolume = 0)
   AND c.chapterIndex > COALESCE(
       (SELECT MAX(chapterIndex)
        FROM chapters
        WHERE chapterIndex < ?
          AND cacheFilePath IS NULL
+         AND (isVolume IS NULL OR isVolume = 0)
          AND bookCacheId = ?
       ),
       (SELECT MIN(chapterIndex) - 1
@@ -930,9 +1214,44 @@ WHERE
     return 0
 end
 
-function M:findChapterNotDownLoadLittle(current_chapter, count)
+function M:getReadableAheadIndexes(current_chapter, count)
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('findChapterNotDownLoadLittle:', current_chapter)
+        return {}
+    end
+
+    count = math.max(0, math.floor(tonumber(count) or 0))
+    if count == 0 then return {} end
+
+    local bookCacheId = current_chapter.book_cache_id
+    local current_chapters_index = current_chapter.chapters_index
+    local call_event_type = current_chapter.call_event or 'next'
+    local comparator = call_event_type == 'next' and '>' or '<'
+    local order = call_event_type == 'next' and 'ASC' or 'DESC'
+    local sql_stmt = string.format([[
+        SELECT c.chapterIndex
+        FROM chapters AS c
+        INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId
+        WHERE c.bookCacheId = ?
+          AND b.isEnabled = 1
+          AND (c.isVolume IS NULL OR c.isVolume = 0)
+          AND c.chapterIndex %s ?
+        ORDER BY c.chapterIndex %s
+        LIMIT %d;
+    ]], comparator, order, count)
+
+    local result = self:execute(sql_stmt, {bookCacheId, current_chapters_index})
+    if not result then return nil end
+
+    local indexes = {}
+    for i = 1, #result do
+        indexes[i] = tonumber(result[i][1])
+    end
+    return indexes
+end
+
+function M:findChapterNotDownLoadLittle(current_chapter, count, include_read)
+    if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
+        logger.dbg('findChapterNotDownLoadLittle:', current_chapter)
         return {}
     end
 
@@ -947,14 +1266,15 @@ function M:findChapterNotDownLoadLittle(current_chapter, count)
         call_event_type = 'next'
     end
 
+    local read_filter = include_read == true and "" or "AND c.isRead = 0"
     local sql_stmt = string.format([[
         SELECT %s
         FROM chapters AS c
         INNER JOIN books AS b
             ON c.bookCacheId = b.bookCacheId
         WHERE
-             c.bookCacheId = ? AND b.isEnabled = 1 AND c.isRead = 0 AND c.cacheFilePath IS NULL
-             ]], COLS_CHAPTER_NOT_DOWNLOADED)
+             c.bookCacheId = ? AND b.isEnabled = 1 %s AND (c.isVolume IS NULL OR c.isVolume = 0) AND c.cacheFilePath IS NULL
+             ]], COLS_CHAPTER_NOT_DOWNLOADED, read_filter)
 
     local suffix = "  AND c.chapterIndex > ?  ORDER BY c.chapterIndex ASC LIMIT "
 
@@ -979,7 +1299,7 @@ end
 
 function M:findNextChapterInfo(current_chapter, is_downloaded)
     if not H.is_tbl(current_chapter) or current_chapter.book_cache_id == nil or current_chapter.chapters_index == nil then
-        dbg.log('findNextChapterInfo:', current_chapter)
+        logger.dbg('findNextChapterInfo:', current_chapter)
         return {}
     end
 
@@ -992,8 +1312,8 @@ function M:findNextChapterInfo(current_chapter, is_downloaded)
 
     local sql_stmt = string.format([[
         SELECT %s 
-        FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId 
-        WHERE c.bookCacheId = ? AND b.isEnabled = 1 ]], COLS_CHAPTER_FULL)
+        FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId
+        WHERE c.bookCacheId = ? AND b.isEnabled = 1 AND (c.isVolume IS NULL OR c.isVolume = 0) ]], COLS_CHAPTER_FULL)
 
     if is_downloaded == false then
         sql_stmt = sql_stmt .. ' AND c.cacheFilePath IS NULL '
@@ -1045,16 +1365,26 @@ function M:updateReadingProgress(bookShelfId, bookCacheId, chapterIndex, chapter
     if H.is_str(bookShelfId) then
         conditions.bookShelfId = bookShelfId
     end
-    return self:dynamicUpdate('books', {
+    local update = {
         durChapterIndex = chapterIndex,
         durChapterTitle = chapterTitle or "",
         durChapterPos = durChapterPos or 0,
         durChapterTime = now_ms,
         sortOrder = now_ms,
-    }, conditions)
+    }
+    if conditions.bookShelfId then
+        local result = self:dynamicUpdate('books', update, conditions)
+        if result and tonumber(result.changes) > 0 then return result end
+    end
+    local matches = self:execute("SELECT bookShelfId FROM books WHERE bookCacheId = ? LIMIT 2", { bookCacheId })
+    if #matches ~= 1 then return false end
+    conditions.bookShelfId = matches[1][1]
+    local result = self:dynamicUpdate('books', update, conditions)
+    if result and tonumber(result.changes) > 0 then return result end
+    return false
 end
 
-function M:updateChapterReadDownLoad(bookCacheId, chapterIndex, isRead, isDownloaded)
+function M:updateChapterReadDownLoad(bookCacheId, chapterIndex, isRead, _)
     if not (H.is_str(bookCacheId) and H.is_num(chapterIndex)) then
         return false
     end
@@ -1095,7 +1425,7 @@ end
 
 function M:disableBookShelf(bookShelfId)
     if not H.is_str(bookShelfId) then
-        dbg.log('DB disableBookShelf error')
+        logger.dbg('DB disableBookShelf error')
         return false
     end
 
@@ -1110,15 +1440,13 @@ end
 function M:clearBook(bookShelfId, bookCacheId)
 
     if not H.is_str(bookShelfId) or not H.is_str(bookCacheId) then
-        dbg.log('DB clearBook error')
+        logger.dbg('DB clearBook error')
         return false
     end
 
-    local update_book_sql = "UPDATE books SET isEnabled = 0 WHERE bookCacheId = ?"
     local del_chapters_sql = "DELETE FROM chapters WHERE bookCacheId = ?"
     return self:transaction(function()
         self:execute(del_chapters_sql, {bookCacheId})
-        self:execute(update_book_sql, {bookCacheId})
         return true
     end, {
         enable_savepoint = false
@@ -1127,7 +1455,7 @@ end
 
 function M:dynamicUpdateChapters(chapter, updateData)
     if not H.is_tbl(updateData) or not H.is_tbl(chapter) then
-        dbg.log('dynamicUpdateChapters Required parameter error')
+        logger.dbg('dynamicUpdateChapters Required parameter error')
         return
     end
 
@@ -1135,7 +1463,7 @@ function M:dynamicUpdateChapters(chapter, updateData)
     local chapterIndex = chapter.chapters_index
 
     if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
-        dbg.log('dynamicUpdateChapters Required parameter error')
+        logger.dbg('dynamicUpdateChapters Required parameter error')
         error('dynamicUpdateChapters Required parameter error')
         return
     end
@@ -1149,7 +1477,7 @@ end
 
 function M:dynamicUpdateBooks(book, updateData)
     if not H.is_tbl(updateData) or not H.is_tbl(book) then
-        dbg.log('dynamicUpdateBooks An error occurred when calling the parameter')
+        logger.dbg('dynamicUpdateBooks An error occurred when calling the parameter')
         return
     end
 
@@ -1157,7 +1485,7 @@ function M:dynamicUpdateBooks(book, updateData)
     local bookShelfId = book.bookShelfId
 
     if not H.is_str(bookCacheId) or not H.is_str(bookShelfId) then
-        dbg.log('dynamicUpdateBooks Error parameters')
+        logger.dbg('dynamicUpdateBooks Error parameters')
         error('dynamicUpdateBooks Error parameters')
         return
     end
@@ -1219,16 +1547,14 @@ function M:dynamicUpdate(tableName, updateData, conditions)
 
     local sql_stmt = table.concat({"UPDATE ", tableName, " SET ", table.concat(set_clause, ", "), where_clause})
 
-    -- logger.info(sql_stmt)
     return self:execute(sql_stmt, params)
 end
 
 function M:resortBooksByLastRead(bookShelfId)
     if not H.is_str(bookShelfId) then
-        dbg.log('DB resortBooksByLastRead error: invalid bookShelfId')
+        logger.dbg('DB resortBooksByLastRead error: invalid bookShelfId')
         return false
     end
-    -- app unread books durChapterTime = 0
     local sql_stmt = [[
         UPDATE books
         SET sortOrder = durChapterTime
@@ -1239,11 +1565,10 @@ end
 
 function M:setBooksTopStatus(bookShelfId, book_cache_id, current_sort_order, isPinnedByTime)
     if not (H.is_str(bookShelfId) and H.is_str(book_cache_id)) then
-        dbg.log('DB setBooksTopStatus error: invalid parameters')
+        logger.dbg('DB setBooksTopStatus error: invalid parameters')
         return false
     end
 
-     -- 手动置顶 (优先)
     if current_sort_order ~= nil then
         if current_sort_order ~= 0 then
             return self:dynamicUpdate('books', {
@@ -1253,7 +1578,6 @@ function M:setBooksTopStatus(bookShelfId, book_cache_id, current_sort_order, isP
                 bookShelfId = bookShelfId
             })
         else
-            -- 如果当前排序是 0, 则取消手动置顶
             return self:dynamicUpdate('books', {
                 sortOrder = {
                     _set = "= durChapterTime"
@@ -1261,15 +1585,12 @@ function M:setBooksTopStatus(bookShelfId, book_cache_id, current_sort_order, isP
             }, {
                 bookCacheId = book_cache_id,
                 bookShelfId = bookShelfId,
-                -- 只对当前被置顶的书籍（手动或按时间）进行操作
                 sortOrder = {
                     _where = '!= durChapterTime'
                 }
             })
         end
     elseif isPinnedByTime == true then
-         -- 按打开书籍目录时间置顶, 无需取消 
-         -- 检查是否已经是最新阅读的书，避免不必要的写入
         local sql_stmt = [[
             SELECT bookCacheId FROM books 
             WHERE isEnabled = 1 AND bookShelfId = ? AND sortOrder > 0 
@@ -1277,7 +1598,6 @@ function M:setBooksTopStatus(bookShelfId, book_cache_id, current_sort_order, isP
         ]]
         local result = self:execute(sql_stmt, {bookShelfId})
         if result and result[1] and result[1][1] and result[1][1] == book_cache_id then
-            -- 如果已经是第一本
             return true
         end
         return self:dynamicUpdate('books', {
@@ -1311,9 +1631,604 @@ function M:removeBookShelf(bookShelfId)
         self:execute(delete_chapters_sql, {targetShelfId})
         local delete_books_sql = "DELETE FROM books WHERE bookShelfId = ?"
         self:execute(delete_books_sql, {targetShelfId})
-        return true 
+        return true
     end)
     return perform_delete(bookShelfId)
+end
+
+function M:tryStartSync(scope_id, resource_type, interval, resource_key)
+    if not (H.is_str(scope_id) and scope_id ~= "") then return false end
+    if not (H.is_str(resource_type) and resource_type ~= "") then return false end
+
+    resource_key = resource_key or ""
+    if not H.is_str(resource_key) then return false end
+
+    interval = tonumber(interval) or 0
+    if interval ~= interval or interval < 0 then interval = 0 end
+    interval = math.floor(interval)
+
+    local now = os.time()
+    local allowed = false
+    local ok, err = pcall(function()
+        self:transaction(function()
+            local rows = self:execute([[
+                SELECT lastAttemptAt, lastSuccessAt
+                FROM sync_records
+                WHERE scopeType = ? AND scopeId = ?
+                  AND resourceType = ? AND resourceKey = ?
+                LIMIT 1
+            ]], { "bookshelf", scope_id, resource_type, resource_key })
+            if type(rows) == "table" and rows[1] then
+                local last_attempt = tonumber(rows[1][1]) or 0
+                local last_success = tonumber(rows[1][2]) or 0
+                local last_sync = math.max(last_attempt, last_success)
+                if last_sync > 0 and now - last_sync < interval then
+                    return
+                end
+            end
+
+            self:execute([[
+                INSERT INTO sync_records
+                    (scopeType, scopeId, resourceType, resourceKey, lastAttemptAt)
+                VALUES (?, ?, ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
+                ON CONFLICT(scopeType, scopeId, resourceType, resourceKey) DO UPDATE SET
+                    lastAttemptAt = CAST(strftime('%s', 'now') AS INTEGER)
+            ]], { "bookshelf", scope_id, resource_type, resource_key })
+            allowed = true
+        end)()
+    end)
+    if not ok then
+        logger.warn("BookInfoDB: tryStartSync failed:", tostring(err))
+        return false
+    end
+    return allowed
+end
+
+local function record_sync_success(self, scope_id, resource_type, item_count, resource_key)
+    self:execute([[
+        INSERT INTO sync_records
+            (scopeType, scopeId, resourceType, resourceKey,
+             lastAttemptAt, lastSuccessAt, lastItemCount, lastError)
+        VALUES (?, ?, ?, ?,
+                CAST(strftime('%s', 'now') AS INTEGER),
+                CAST(strftime('%s', 'now') AS INTEGER), ?, NULL)
+        ON CONFLICT(scopeType, scopeId, resourceType, resourceKey) DO UPDATE SET
+            lastAttemptAt = excluded.lastAttemptAt,
+            lastSuccessAt = excluded.lastSuccessAt,
+            lastItemCount = excluded.lastItemCount,
+            lastError = NULL
+    ]], { "bookshelf", scope_id, resource_type, resource_key or "", tonumber(item_count) or 0 })
+end
+
+local function decode_source_row(row)
+    if type(row) ~= "table" then return nil end
+    local ok, source = pcall(rapidjson.decode, row[1])
+    if not ok or type(source) ~= "table" then return nil end
+    source.customOrder = tonumber(row[2]) or 0
+    source.enabled = tonumber(row[3]) == 1
+    source.enabledExplore = tonumber(row[4]) == 1
+    source.bookSourceGroup = row[5]
+
+    local function apply_text(field, value)
+        if value ~= nil and value ~= "" then
+            source[field] = value
+        end
+    end
+    apply_text("header", row[6])
+    apply_text("dynamicHeader", row[7])
+    apply_text("dynamicVariables", row[8])
+    apply_text("concurrentRate", row[9])
+    source.enabledCookieJar = tonumber(row[10]) == 1 or source.enabledCookieJar == true
+    source.enabledReview = tonumber(row[11]) == 1 or source.enabledReview == true
+    local respond_time = tonumber(row[12])
+    source.respondTime = respond_time and respond_time ~= 0 and respond_time or tonumber(source.respondTime) or 0
+    apply_text("bookUrlPattern", row[13])
+    apply_text("loginUrl", row[14])
+    apply_text("loginCheckJs", row[15])
+    apply_text("jsLib", row[16])
+    if type(row[17]) == "string" and row[17] ~= "" then
+        local session_ok, session = pcall(rapidjson.decode, row[17])
+        if session_ok and type(session) == "table" then
+            source.session = session
+        end
+    end
+    if type(row[18]) == "string" and row[18] ~= "" then
+        local login_ok, login_data = pcall(rapidjson.decode, row[18])
+        if login_ok and type(login_data) == "table" then
+            source.loginData = login_data
+        end
+    end
+    return source
+end
+
+local function encode_source_summary(source)
+    return rapidjson.encode({
+        exploreUrl = source.exploreUrl,
+        loginUi = source.loginUi,
+        loginUrl = source.loginUrl,
+        session = BookSourceLogin.hasNonemptyValue(source.session) and 1 or nil,
+        loginData = BookSourceLogin.hasNonemptyValue(source.loginData) and 1 or nil,
+    }, { sort_keys = true })
+end
+
+function M:getEnabledBookSourceSummaries(bookShelfId)
+    bookShelfId = bookShelfId or "local"
+    local rows = self:execute([[SELECT bookSourceName, bookSourceUrl, bookSourceGroup,
+        enabledExplore, loginUrl, summaryJson, session, loginData FROM book_sources
+        WHERE enabled = 1 AND bookShelfId = ? ORDER BY customOrder ASC, weight DESC]], { bookShelfId })
+    local summaries = {}
+    for _, row in ipairs(rows) do
+        local ok, source = pcall(rapidjson.decode, row[6])
+        if ok and type(source) == "table" then
+            source.bookSourceName, source.bookSourceUrl, source.bookSourceGroup = row[1], row[2], row[3]
+            source.enabled, source.enabledExplore = true, tonumber(row[4]) == 1
+            if type(row[5]) == "string" and row[5] ~= "" then source.loginUrl = row[5] end
+            for index, field in pairs({ [7] = "session", [8] = "loginData" }) do
+                if type(row[index]) == "string" and row[index] ~= "" then
+                    local valid, value = pcall(rapidjson.decode, row[index])
+                    if valid and type(value) == "table" then source[field] = value end
+                end
+            end
+            source.hasLogin = BookSourceLogin.hasLogin(source) and true or false
+            source.loginUi, source.session, source.loginData = nil, nil, nil
+            summaries[#summaries + 1] = source
+        end
+    end
+    return summaries
+end
+
+function M:importBookSources(bookShelfId, sources)
+    bookShelfId = bookShelfId or "local"
+    if type(sources) ~= "table" then return 0 end
+    if type(sources) == "table" then
+        local list = sources.bookSourceUrl and { sources } or sources
+        for _, source in ipairs(list) do
+            if type(source) == "table" and type(source.exploreUrl) == "boolean" then
+                error("收到书源摘要而非完整书源，请重新同步完整书源", 0)
+            end
+        end
+    end
+    if not sources[1] then sources = { sources } end
+
+    local count = 0
+    local sql = [[
+        INSERT INTO book_sources
+        (bookShelfId, bookSourceUrl, bookSourceName, bookSourceGroup, bookSourceType,
+         customOrder, weight, enabled, enabledExplore, lastUpdateTime, dynamicHeader,
+         dynamicVariables, concurrentRate, enabledCookieJar, enabledReview, respondTime,
+         bookUrlPattern, header, loginUrl, loginCheckJs, jsLib, rawJson, summaryJson)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bookShelfId, bookSourceUrl) DO UPDATE SET
+            bookSourceName = excluded.bookSourceName,
+            bookSourceGroup = excluded.bookSourceGroup,
+            bookSourceType = excluded.bookSourceType,
+            customOrder = excluded.customOrder,
+            weight = excluded.weight,
+            enabled = excluded.enabled,
+            enabledExplore = excluded.enabledExplore,
+            lastUpdateTime = excluded.lastUpdateTime,
+            dynamicHeader = CASE
+                WHEN excluded.dynamicHeader IS NOT NULL AND excluded.dynamicHeader != ''
+                    THEN excluded.dynamicHeader
+                ELSE book_sources.dynamicHeader
+            END,
+            dynamicVariables = CASE
+                WHEN excluded.dynamicVariables IS NOT NULL AND excluded.dynamicVariables != ''
+                    THEN excluded.dynamicVariables
+                ELSE book_sources.dynamicVariables
+            END,
+            concurrentRate = excluded.concurrentRate,
+            enabledCookieJar = excluded.enabledCookieJar,
+            enabledReview = excluded.enabledReview,
+            respondTime = excluded.respondTime,
+            bookUrlPattern = excluded.bookUrlPattern,
+            header = excluded.header,
+            loginUrl = excluded.loginUrl,
+            loginCheckJs = excluded.loginCheckJs,
+            jsLib = excluded.jsLib,
+            rawJson = excluded.rawJson,
+            summaryJson = excluded.summaryJson
+        -- 独立字段也参与比较，保证远端同步仍能纠正本地启用、排序等修改。
+        WHERE (book_sources.rawJson, book_sources.summaryJson,
+               book_sources.bookSourceName, book_sources.bookSourceGroup, book_sources.bookSourceType,
+               book_sources.customOrder, book_sources.weight, book_sources.enabled, book_sources.enabledExplore,
+               book_sources.lastUpdateTime, book_sources.concurrentRate, book_sources.enabledCookieJar,
+               book_sources.enabledReview, book_sources.respondTime, book_sources.bookUrlPattern,
+               book_sources.header, book_sources.loginUrl, book_sources.loginCheckJs, book_sources.jsLib)
+           IS NOT (excluded.rawJson, excluded.summaryJson,
+                   excluded.bookSourceName, excluded.bookSourceGroup, excluded.bookSourceType,
+                   excluded.customOrder, excluded.weight, excluded.enabled, excluded.enabledExplore,
+                   excluded.lastUpdateTime, excluded.concurrentRate, excluded.enabledCookieJar,
+                   excluded.enabledReview, excluded.respondTime, excluded.bookUrlPattern,
+                   excluded.header, excluded.loginUrl, excluded.loginCheckJs, excluded.jsLib)
+           OR (excluded.dynamicHeader != '' AND book_sources.dynamicHeader IS NOT excluded.dynamicHeader)
+           OR (excluded.dynamicVariables != '' AND book_sources.dynamicVariables IS NOT excluded.dynamicVariables)
+    ]]
+    self:transaction(function()
+        for _, source in ipairs(sources) do
+            if type(source) == "table" and source.bookSourceUrl and source.bookSourceName then
+                local snapshot = source
+                if source.session ~= nil or source.loginData ~= nil then
+                    snapshot = {}
+                    for key, value in pairs(source) do
+                        if key ~= "session" and key ~= "loginData" then
+                            snapshot[key] = value
+                        end
+                    end
+                end
+                local enc_ok, raw_json = pcall(rapidjson.encode, snapshot, { sort_keys = true })
+                if enc_ok and type(raw_json) == "string" then
+                    self:execute(sql, {
+                        bookShelfId,
+                        source.bookSourceUrl,
+                        source.bookSourceName,
+                        source.bookSourceGroup or "",
+                        tonumber(source.bookSourceType) or 0,
+                        tonumber(source.customOrder) or 0,
+                        tonumber(source.weight) or 0,
+                        source.enabled == false and 0 or 1,
+                        source.enabledExplore == false and 0 or 1,
+                        tonumber(source.lastUpdateTime) or 0,
+                        source.dynamicHeader or "",
+                        source.dynamicVariables or "",
+                        source.concurrentRate or "",
+                        source.enabledCookieJar == true and 1 or 0,
+                        source.enabledReview == true and 1 or 0,
+                        tonumber(source.respondTime) or 0,
+                        source.bookUrlPattern or "",
+                        source.header or "",
+                        source.loginUrl or "",
+                        source.loginCheckJs or "",
+                        source.jsLib or "",
+                        raw_json,
+                        encode_source_summary(snapshot)
+                    })
+                    count = count + 1
+                else
+                    logger.warn("importBookSources: skip invalid source " .. tostring(source.bookSourceUrl))
+                end
+            end
+        end
+    end)()
+    return count
+end
+
+function M:syncBookSources(bookShelfId, sources)
+    bookShelfId = bookShelfId or "local"
+    return self:transaction(function()
+        local imported = self:importBookSources(bookShelfId, sources)
+        if type(sources) ~= "table" then return imported end
+        if not sources[1] then sources = { sources } end
+
+        local urls = {}
+        for _, source in ipairs(sources) do
+            if type(source) == "table" and source.bookSourceUrl then
+                urls[source.bookSourceUrl] = true
+            end
+        end
+        local local_sources = self:execute("SELECT bookSourceUrl FROM book_sources WHERE bookShelfId = ?", { bookShelfId })
+        if type(local_sources) == "table" then
+            for _, row in ipairs(local_sources) do
+                if not urls[row[1]] then
+                    self:execute("DELETE FROM book_sources WHERE bookShelfId = ? AND bookSourceUrl = ?", { bookShelfId, row[1] })
+                end
+            end
+        end
+        record_sync_success(self, bookShelfId, "book_sources", imported)
+        return imported
+    end)()
+end
+
+function M:getEnabledBookSources(bookShelfId)
+    bookShelfId = bookShelfId or "local"
+    local sources = {}
+    local sql = "SELECT rawJson, customOrder, enabled, enabledExplore, bookSourceGroup, header, dynamicHeader, dynamicVariables, concurrentRate, enabledCookieJar, enabledReview, respondTime, bookUrlPattern, loginUrl, loginCheckJs, jsLib, session, loginData FROM book_sources WHERE enabled = 1 AND bookShelfId = ? ORDER BY customOrder ASC, weight DESC"
+    local results = self:execute(sql, { bookShelfId })
+    if type(results) == "table" then
+        for _, row in ipairs(results) do
+            local source = decode_source_row(row)
+            if source then sources[#sources + 1] = source end
+        end
+    end
+    return sources
+end
+
+function M:getBookSourceByUrl(bookShelfId, bookSourceUrl, allow_fallback)
+    bookShelfId = bookShelfId or "local"
+    if type(bookSourceUrl) ~= "string" or bookSourceUrl == "" then return nil end
+    local sql = "SELECT rawJson, customOrder, enabled, enabledExplore, bookSourceGroup, header, dynamicHeader, dynamicVariables, concurrentRate, enabledCookieJar, enabledReview, respondTime, bookUrlPattern, loginUrl, loginCheckJs, jsLib, session, loginData FROM book_sources WHERE bookShelfId = ? AND bookSourceUrl = ? LIMIT 1"
+    local results = self:execute(sql, { bookShelfId, bookSourceUrl })
+    if type(results) == "table" and #results > 0 then
+        return decode_source_row(results[1])
+    end
+    if allow_fallback == true then
+        local fallback_sql = "SELECT rawJson, customOrder, enabled, enabledExplore, bookSourceGroup, header, dynamicHeader, dynamicVariables, concurrentRate, enabledCookieJar, enabledReview, respondTime, bookUrlPattern, loginUrl, loginCheckJs, jsLib, session, loginData FROM book_sources WHERE bookSourceUrl = ? LIMIT 2"
+        local fallback_results = self:execute(fallback_sql, { bookSourceUrl })
+        if type(fallback_results) == "table" and #fallback_results > 1 then
+            return nil, "该书源 URL 在多个书架存在，无法安全选择跨书架配置"
+        end
+        if type(fallback_results) == "table" and #fallback_results == 1 then
+            return decode_source_row(fallback_results[1])
+        end
+    end
+    return nil
+end
+
+function M:saveBookSourceSession(bookShelfId, bookSourceUrl, session)
+    if type(bookShelfId) ~= "string" or type(bookSourceUrl) ~= "string" or bookSourceUrl == "" then
+        return false, "invalid book source session key"
+    end
+
+    local encoded
+    if session == nil then
+        encoded = self.nil_object()
+    else
+        local ok, value = pcall(rapidjson.encode, session)
+        if not ok or type(value) ~= "string" then
+            return false, "failed to encode book source session"
+        end
+        encoded = value
+    end
+
+    local ok, err = pcall(function()
+        self:execute(
+            "UPDATE book_sources SET session = ? WHERE bookShelfId = ? AND bookSourceUrl = ?",
+            { encoded, bookShelfId, bookSourceUrl }
+        )
+    end)
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+function M:saveBookSourceLoginData(bookShelfId, bookSourceUrl, loginData)
+    if type(bookShelfId) ~= "string" or type(bookSourceUrl) ~= "string" or bookSourceUrl == "" then
+        return false, "invalid book source login key"
+    end
+
+    local encoded
+    if loginData == nil then
+        encoded = self.nil_object()
+    else
+        if type(loginData) ~= "table" then return false, "login data must be an object" end
+        local ok, value = pcall(rapidjson.encode, loginData)
+        if not ok or type(value) ~= "string" then
+            return false, "failed to encode book source login data"
+        end
+        encoded = value
+    end
+
+    local ok, err = pcall(function()
+        self:execute(
+            "UPDATE book_sources SET loginData = ? WHERE bookShelfId = ? AND bookSourceUrl = ?",
+            { encoded, bookShelfId, bookSourceUrl }
+        )
+        if tonumber(self:getDB():rowexec("SELECT changes()")) == 0 then
+            error("书源不存在，未保存凭证", 0)
+        end
+    end)
+    if not ok then return false, tostring(err) end
+    return true
+end
+
+function M:clearBookSourceState(bookShelfId, url, kind)
+    if kind ~= "cache" and kind ~= "cookie" then return false, "未知书源清理操作" end
+    local ok, session = pcall(self:transaction(function()
+        local rows = self:execute("SELECT session FROM book_sources WHERE bookShelfId = ? AND bookSourceUrl = ?", {bookShelfId, url})
+        if #rows == 0 then error("书源不存在", 0) end
+        local cleaned
+        if type(rows[1][1]) == "string" then
+            cleaned = rapidjson.decode(rows[1][1])
+            if type(cleaned) ~= "table" then error("书源会话格式错误", 0) end
+        end
+        if cleaned then
+            if kind == "cache" then
+                if type(cleaned.variables) == "table" then
+                    cleaned.variables.__reader_js_cache_v1 = nil
+                end
+            else
+                cleaned.cookies, cleaned.cookieJar, cleaned.header = nil, nil, nil
+                if type(cleaned.variables) == "table" then
+                    cleaned.variables["userInfo_" .. url] = nil
+                end
+            end
+        end
+        local saved, err = self:saveBookSourceSession(bookShelfId, url, cleaned)
+        if saved ~= true then error(err, 0) end
+        if kind == "cookie" then
+            saved, err = self:saveBookSourceLoginData(bookShelfId, url, nil)
+            if saved ~= true then error(err, 0) end
+        end
+        return cleaned
+    end))
+    if not ok then return false, tostring(session) end
+    return true, session
+end
+
+function M:getBookSourceGroupsSummary(bookShelfId)
+    bookShelfId = bookShelfId or "local"
+    local groups = {}
+    local sql = "SELECT bookSourceGroup, COUNT(1) FROM book_sources WHERE bookShelfId = ? GROUP BY bookSourceGroup ORDER BY COUNT(1) DESC"
+    local results = self:execute(sql, { bookShelfId })
+    if type(results) == "table" then
+        for _, row in ipairs(results) do
+            groups[#groups + 1] = { group = row[1], count = tonumber(row[2]) or 0 }
+        end
+    end
+    return groups
+end
+
+local function optional_text(value)
+    return type(value) == "string" and value or nil
+end
+
+local function normalize_text_transform_rule(rule, dialect, order_index)
+    if type(rule) ~= "table" or type(rule.name) ~= "string" or type(rule.pattern) ~= "string" then
+        return nil
+    end
+
+    local is_reader3 = dialect == "reader3"
+    local remote_id = rule.id
+    local rule_key
+    if remote_id ~= nil and tostring(remote_id) ~= "" then
+        rule_key = "id:" .. tostring(remote_id)
+    else
+        rule_key = "name:" .. rule.name
+    end
+
+    local is_regex = rule.isRegex
+    if is_regex == nil then is_regex = not is_reader3 end
+
+    local scope_title, scope_content, exclude_scope, timeout_ms
+    if not is_reader3 then
+        scope_title = rule.scopeTitle == true and 1 or 0
+        scope_content = rule.scopeContent == false and 0 or 1
+        exclude_scope = rule.excludeScope or rule.exclude_scope
+        timeout_ms = tonumber(rule.timeoutMillisecond or rule.timeoutMs) or 3000
+    end
+
+    local ok, raw_json = pcall(rapidjson.encode, rule)
+    if not ok or type(raw_json) ~= "string" then raw_json = nil end
+
+    return {
+        ruleKey = rule_key,
+        name = rule.name,
+        groupName = optional_text(rule.group) or optional_text(rule.groupname) or optional_text(rule.groupName),
+        pattern = rule.pattern,
+        replacement = type(rule.replacement) == "string" and rule.replacement or "",
+        scope = optional_text(rule.scope),
+        excludeScope = optional_text(exclude_scope),
+        scopeTitle = scope_title,
+        scopeContent = scope_content,
+        isEnabled = rule.isEnabled == false and 0 or 1,
+        isRegex = is_regex == true and 1 or 0,
+        timeoutMs = timeout_ms,
+        orderIndex = order_index,
+        rawJson = raw_json,
+    }
+end
+
+function M:syncTextTransformRules(bookShelfId, rules, dialect)
+    bookShelfId = bookShelfId or "local"
+    if dialect ~= "reader3" and dialect ~= "legado" and dialect ~= "qread" then
+        error("Unsupported text transform dialect: " .. tostring(dialect))
+    end
+    local valid, err = require("Legado.Helper.TextTransformRules").validateSnapshot(rules)
+    if not valid then error(err) end
+
+    local normalized, keys = {}, {}
+    for index, rule in ipairs(rules) do
+        local item = normalize_text_transform_rule(rule, dialect, index)
+        if item then
+            normalized[#normalized + 1] = item
+            keys[item.ruleKey] = true
+        end
+    end
+
+    local sql = [[
+        INSERT INTO text_transform_rules
+        (bookShelfId, ruleKey, name, groupName, pattern, replacement, scope, excludeScope,
+         scopeTitle, scopeContent, isEnabled, isRegex, timeoutMs, orderIndex, rawJson)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bookShelfId, ruleKey) DO UPDATE SET
+            name = excluded.name,
+            groupName = excluded.groupName,
+            pattern = excluded.pattern,
+            replacement = excluded.replacement,
+            scope = excluded.scope,
+            excludeScope = excluded.excludeScope,
+            scopeTitle = excluded.scopeTitle,
+            scopeContent = excluded.scopeContent,
+            isEnabled = excluded.isEnabled,
+            isRegex = excluded.isRegex,
+            timeoutMs = excluded.timeoutMs,
+            orderIndex = excluded.orderIndex,
+            rawJson = excluded.rawJson
+    ]]
+
+    local null = M.nil_object()
+    self:transaction(function()
+        for _, item in ipairs(normalized) do
+            self:execute(sql, {
+                bookShelfId, item.ruleKey, item.name, item.groupName or null, item.pattern, item.replacement,
+                item.scope or null, item.excludeScope or null, item.scopeTitle or null, item.scopeContent or null,
+                item.isEnabled, item.isRegex, item.timeoutMs or null, item.orderIndex, item.rawJson or null,
+            })
+        end
+
+        local existing = self:execute(
+            "SELECT ruleKey FROM text_transform_rules WHERE bookShelfId = ?",
+            { bookShelfId }
+        )
+        if type(existing) == "table" then
+            for _, row in ipairs(existing) do
+                if not keys[row[1]] then
+                    self:execute(
+                        "DELETE FROM text_transform_rules WHERE bookShelfId = ? AND ruleKey = ?",
+                        { bookShelfId, row[1] }
+                    )
+                end
+            end
+        end
+        record_sync_success(self, bookShelfId, "text_transform_rules", #normalized)
+    end)()
+
+    return #normalized
+end
+
+local function text_rule_bool(value)
+    if value == nil then return nil end
+    return tonumber(value) == 1
+end
+
+function M:getEnabledTextTransformRules(bookShelfId)
+    bookShelfId = bookShelfId or "local"
+    local rules = {}
+    local sql = [[
+        SELECT id, ruleKey, name, groupName, pattern, replacement, scope, excludeScope,
+               scopeTitle, scopeContent, isRegex, timeoutMs, orderIndex, rawJson
+        FROM text_transform_rules
+        WHERE isEnabled = 1 AND bookShelfId = ?
+        ORDER BY orderIndex ASC, id ASC
+    ]]
+    local results = self:execute(sql, { bookShelfId })
+    if type(results) == "table" then
+        for _, row in ipairs(results) do
+            rules[#rules + 1] = {
+                dbId = tonumber(row[1]),
+                ruleKey = row[2],
+                name = row[3],
+                group = row[4],
+                pattern = row[5],
+                replacement = row[6],
+                scope = row[7],
+                excludeScope = row[8],
+                scopeTitle = text_rule_bool(row[9]),
+                scopeContent = text_rule_bool(row[10]),
+                isRegex = tonumber(row[11]) == 1,
+                timeoutMs = tonumber(row[12]),
+                orderIndex = tonumber(row[13]) or 0,
+                rawJson = row[14],
+                isEnabled = true,
+            }
+        end
+    end
+    return rules
+end
+
+function M:deleteBookSource(bookShelfId, url)
+    if not url then return false end
+    bookShelfId = bookShelfId or "local"
+    self:execute("DELETE FROM book_sources WHERE bookShelfId = ? AND bookSourceUrl = ?", { bookShelfId, url })
+    return true
+end
+
+function M:toggleBookSourceEnable(bookShelfId, url, is_enabled)
+    if not url then return false end
+    bookShelfId = bookShelfId or "local"
+    self:execute("UPDATE book_sources SET enabled = ? WHERE bookShelfId = ? AND bookSourceUrl = ?", {
+        is_enabled and 1 or 0, bookShelfId, url
+    })
+    return true
 end
 
 return M

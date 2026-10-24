@@ -6,6 +6,7 @@ local safe_pcall = require("Legado.Helper.Error").pcall
 local LegadoSpec = require("Legado.spore.base")
 local bookutil = require("Legado.spore.bookutil")
 local Probe = require("Legado.Helper.Probe")
+local TextTransformRules = require("Legado.Helper.TextTransformRules")
 
 local M = LegadoSpec:extend{
   name = "qread",
@@ -22,7 +23,7 @@ function M:reader3Login()
     local reader3_un = self.settings.reader3_un
     local reader3_pwd = self.settings.reader3_pwd
 
-    if not (H.is_str(reader3_un) and H.is_str(reader3_pwd) and 
+    if not (H.is_str(reader3_un) and H.is_str(reader3_pwd) and
                     reader3_pwd ~= "" and reader3_un ~= "") then
         return false, '认证信息设置不全'
     end
@@ -119,16 +120,14 @@ function M:getBookshelfNew(callback)
     return all_books
 end
 
-
 function M:getChapterListNew(bookinfo, callback)
-    if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then 
+    if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then
       return nil, "参数错误"
     end
-  
+
     local bookUrl = bookinfo.bookUrl
     local bookSourceUrl = bookinfo.origin
     local bookname = H.is_str(bookinfo.name) and bookinfo.name or (H.is_str(bookinfo.bookname) and bookinfo.bookname or "")
-    -- refresh=true：仅清除缓存场景绕过 24h 目录缓存
     local needRefresh = bookinfo.refresh == true and 1 or 0
     return self:handleResponse(function()
           return self.client:getChapterListNew({
@@ -151,23 +150,21 @@ function M:getBookContentNew(chapter, callback)
   local bookUrl = chapter.bookUrl
   local down_chapters_index = chapter.chapters_index
   local bookSourceUrl = chapter.origin
-  -- 书名统一用 name 字段
   local bookname = H.is_str(chapter.name) and chapter.name or ""
 
   local ret, err_msg = self:handleResponse(function()
-      -- data={rules, text}
       return self.client:getBookContentNew({
           url = bookUrl,
           index = down_chapters_index,
           bookSourceUrl = bookSourceUrl,
           useReplaceRule = 1,
-          bookname = bookname, -- 用于查找净化替换规则
-          type = 0, --1表示强制不走缓存
+          bookname = bookname,
+          type = 0,
       })
   end, callback, {
       timeouts = {18, 25}
   }, 'getBookContent')
-  
+
   if not H.is_tbl(ret) then
         return nil, err_msg and tostring(err_msg) or "未知错误"
   end
@@ -214,7 +211,7 @@ function M:getBookSourcesListNew(callback)
         end
     end
 
-    if #errors > 0 and #all_sources == 0 then
+    if #errors > 0 then
         return nil, table.concat(errors, "; ")
     end
 
@@ -260,9 +257,8 @@ function M:saveBook(bookinfo, callback)
         H.is_str(bookinfo.originName)) then
         return nil, "saveBook参数错误"
     end
-  
+
     return self:handleResponse(function()
-        -- data=bookinfo
         return self.client:saveBook({
             name = bookinfo.name,
             author = bookinfo.author,
@@ -280,17 +276,17 @@ function M:saveBook(bookinfo, callback)
             kind = bookinfo.kind or '',
             type = bookinfo.type or 0
         })
-  
+
     end, callback, {
         timeouts = {10, 12}
     }, 'saveBook')
   end
-  
+
   function M:deleteBook(bookinfo, callback)
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl)) then
         return nil, "deleteBook参数错误"
     end
-  
+
     return self:handleResponse(function()
         return self.client:deleteBook({
             name = bookinfo.name,
@@ -315,7 +311,46 @@ function M:saveBook(bookinfo, callback)
   end
 
 function M:getBookSourcesList(callback)
-    return self:getBookSourcesListNew(callback)
+    local summaries, err = self:getBookSourcesListNew()
+    if not summaries then return nil, err end
+    local json = require("json")
+    local sources = {}
+    for first = 1, #summaries, 50 do
+        local ids, metadata = {}, {}
+        for index = first, math.min(first + 49, #summaries) do
+            local item = summaries[index]
+            if type(item.bookSourceUrl) ~= "string" or item.bookSourceUrl == "" then
+                return nil, "书源摘要缺少 URL"
+            end
+            ids[#ids + 1] = item.bookSourceUrl
+            metadata[item.bookSourceUrl] = item
+        end
+        local raw, fetch_err = self:handleResponse(function()
+            return self.client:getBookSourceJson({ spore_payload = ids })
+        end, nil, { timeouts = {20, 30} }, 'getBookSourceJson')
+        local ok, batch = pcall(json.decode, raw or "")
+        if not ok or type(batch) ~= "table" or #batch ~= #ids then
+            return nil, fetch_err or "完整书源批量数据异常"
+        end
+        local by_url = {}
+        for _, source in ipairs(batch) do
+            if type(source) ~= "table" or not metadata[source.bookSourceUrl]
+                    or by_url[source.bookSourceUrl] then
+                return nil, "完整书源批量 URL 不匹配"
+            end
+            by_url[source.bookSourceUrl] = source
+        end
+        for _, id in ipairs(ids) do
+            local source, summary = by_url[id], metadata[id]
+            if not source then return nil, "完整书源批量缺项" end
+            source.enabled = summary.enabled
+            source.enabledExplore = summary.enabledExplore
+            source.bookSourceGroup = summary.bookSourceGroup
+            sources[#sources + 1] = source
+        end
+    end
+    if H.is_func(callback) then return callback({ isSuccess = true, data = sources }) end
+    return sources
 end
 
 function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
@@ -356,7 +391,6 @@ function M:getAvailableBookSource2(options, _)
     if ret == nil then
         return nil, err_msg or "未知错误"
     else
-        -- 只返回了一个源数据?
         if H.is_tbl(ret) and not H.is_tbl(ret[1]) then
             return {list = {ret}}
         end
@@ -365,7 +399,7 @@ function M:getAvailableBookSource2(options, _)
 end
 
 function M:getAvailableBookSource(options, on_finish, on_chunk)
-    if not (H.is_tbl(options) and H.is_str(options.book_url) and 
+    if not (H.is_tbl(options) and H.is_str(options.book_url) and
             H.is_str(options.name) and options.name~= "" ) then
         if H.is_func(on_finish) then on_finish(false, '获取可用书源参数错误') end
         return nil
@@ -376,7 +410,6 @@ function M:getAvailableBookSource(options, on_finish, on_chunk)
     local book_name = options.name
     local book_author = options.author
 
-    -- 按 origin 去重（服务器模糊搜索返回同源重复；同名异作者靠 UI 区分）
     local cancel_func
     local finish_sent = false
     local all_results = {}
@@ -418,7 +451,7 @@ function M:getAvailableBookSource(options, on_finish, on_chunk)
 end
 
 function M:searchBookSingle(options, callback)
-    if not (H.is_tbl(options) and H.is_str(options.search_text) and 
+    if not (H.is_tbl(options) and H.is_str(options.search_text) and
             options.search_text ~= '' and H.is_str(options.book_source_url)) then
         return nil, "searchBookSingle参数错误"
     end
@@ -427,7 +460,6 @@ function M:searchBookSingle(options, callback)
     local bookSourceUrl = options.book_source_url
 
     return self:handleResponse(function()
-        -- data = bookinfolist
         return self.client:searchBook({
             key = search_text,
             bookSourceUrl = bookSourceUrl,
@@ -439,15 +471,12 @@ function M:searchBookSingle(options, callback)
 end
 
 function M:changeBookSource(new_book_source, callback)
-    -- origin = bookSourceUrl
-    -- return bookinfo
     if not H.is_tbl(new_book_source) or not H.is_str(new_book_source.bookUrl) or not H.is_str(new_book_source.newUrl) or
         not H.is_str(new_book_source.bookSourceUrl) then
         return nil, '更换书源参数错误'
     end
 
     return self:handleResponse(function()
-        -- data=bookinfo
         return self.client:setBookSource({
             bookUrl = new_book_source.bookUrl,
             bookSourceUrl = new_book_source.bookSourceUrl,
@@ -481,14 +510,12 @@ function M:saveBookProgress(chapter, callback)
     local chapters_index = chapter.chapters_index
     local bookUrl = chapter.bookUrl
     local title = chapter.title
-    -- {"isSuccess":true,"errorMsg":"success","data":",0,1,2,3,4,5,6,7,8,9"}
-    -- {"isSuccess":true,"errorMsg":"success"}
     return self:handleResponse(function()
         return self.client:saveBookProgress({
             index = chapters_index,
             url = bookUrl,
             title = title,
-            pos = 0, --pos 0.2
+            pos = 0,
         })
     end, callback, {
         timeouts = {3, 5}
@@ -505,29 +532,30 @@ function M:getReplaceRules(callback)
             return nil, "获取替换规则分页信息失败"
         end
         local meta = page_response.data
-        if not (type(meta.page) == "number" and type(meta.md5) == "string") then
+        local total_pages = tonumber(meta.page)
+        if not (total_pages and total_pages >= 0 and total_pages < math.huge
+            and total_pages == math.floor(total_pages) and type(meta.md5) == "string") then
             if callback then callback({ type = "ERROR", message = "替换规则分页数据格式异常" }) end
             return nil, "替换规则分页数据格式异常"
         end
 
         local all_rules = {}
         local errors = {}
-        for p = 1, meta.page do
+        for p = 1, total_pages do
             local rules_data, rules_err = self:handleResponse(function()
                 return self.client:getReplaceRulesNew({ md5 = meta.md5, page = tostring(p), v = os.time() })
             end)
-            if rules_data and type(rules_data) == "table" then
+            local valid, validation_err = TextTransformRules.validateSnapshot(rules_data)
+            if valid then
                 for _, rule in ipairs(rules_data) do
-                    rule.order = rule.ruleorder or rule.order or 0
-                    rule.group = rule.groupname or rule.group or ""
                     table.insert(all_rules, rule)
                 end
             else
-                table.insert(errors, tostring(rules_err))
+                table.insert(errors, tostring(rules_err or validation_err))
             end
         end
 
-        if #errors > 0 and #all_rules == 0 then
+        if #errors > 0 then
             if callback then callback({ type = "ERROR", message = "拉取替换规则失败: " .. table.concat(errors, "; ") }) end
             return nil, table.concat(errors, "; ")
         end
@@ -560,7 +588,6 @@ function M:getProxyImageUrl(_, img_src)
     if string.sub(img_src, 1, 11) == "data:image/" then
         return img_src
     end
-    -- 暂不支持段评
     if string.sub(img_src, 1, 3) == "dp:"  then
         return ""
     end
@@ -574,6 +601,15 @@ function M:getProxyImageUrl(_, img_src)
         return server_address .. url_path
     end
     return server_address .. '/proxypng?url=' .. util.urlEncode(img_src)
+end
+
+function M:_getSearchBookSources()
+    if H.is_func(self.source_summary_loader) then
+        local ok, sources = pcall(self.source_summary_loader)
+        if ok and type(sources) == "table" then return sources end
+        if not ok then logger.warn("qread: 读取书源摘要失败，回退远端摘要:", tostring(sources)) end
+    end
+    return self:getBookSourcesListNew()
 end
 
 function M:searchBookMulti(options, on_chunk, on_finish)
@@ -593,9 +629,11 @@ function M:searchBookMulti(options, on_chunk, on_finish)
         return nil
     end
 
-    local book_sources, err_msg = self:getBookSourcesList()
+    local book_sources, err_msg = self:_getSearchBookSources()
     if not (H.is_tbl(book_sources) and H.is_tbl(book_sources[1])) then
-        if H.is_func(on_finish) then on_finish(false, err_msg or "获取书源列表失败") end
+        if H.is_func(on_finish) then
+            on_finish(false, err_msg or (H.is_tbl(book_sources) and "没有启用的书源" or "获取书源列表失败"))
+        end
         return nil
     end
 
@@ -642,7 +680,7 @@ function M:searchBookMulti(options, on_chunk, on_finish)
             inst.tokenManager:set(token)
         end
 
-        ctx.map(active_sources, function(src, idx)
+        ctx.map(active_sources, function(src)
             if ctx.is_cancelled() then return end
             local status, ret = pcall(function()
                 return inst:handleResponse(function()
@@ -679,7 +717,7 @@ function M:searchBookMulti(options, on_chunk, on_finish)
     end
 
     if H.is_func(on_finish) then
-        task:on("done", function(ok, res, state)
+        task:on("done", function(ok, res)
             if ok then
                 on_finish(true, nil)
             else

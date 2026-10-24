@@ -88,7 +88,6 @@ function CbzExporter:package()
         }
     end
 
-    -- 合并所有章节的图片到一个 CBZ
     local current_progress = 0
     local image_index = 1
     local total_pages = 0
@@ -96,7 +95,6 @@ function CbzExporter:package()
     for _, cache_chapter in ipairs(self.cache_chapters) do
 
         if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
-            -- 如果是 CBZ 文件，需要解压并提取图片
             if cache_chapter.cacheFilePath:match("%.cbz$") then
                 local chapter_reader = ZipUtil.Reader:new()
                 if chapter_reader and chapter_reader:open(cache_chapter.cacheFilePath) then
@@ -121,7 +119,6 @@ function CbzExporter:package()
                     logger.warn("无法解压章节 CBZ（无可用解压库）:", cache_chapter.cacheFilePath)
                 end
             end
-            -- 章节也可能是单图片
             else
                 local img_ext = get_image_ext(cache_chapter.cacheFilePath)
                 if H.is_str(img_ext) and util.fileExists(cache_chapter.cacheFilePath) then
@@ -166,7 +163,6 @@ local M = {
     bookinfo = nil,
     chapter_count = nil,
     chapter_cache_status = nil,
-    -- 临时禁用多线程（本次会话）
     temp_disable_multithread = nil,
 }
 
@@ -192,7 +188,7 @@ end
 function M:showExportSuccessDialog(result, open_callback)
     local filename = result.path and result.path:match("([^/\\]+)$") or "未知"
     local output_dir = result.path and result.path:match("(.+)[/\\]") or Env.getHomeDir()
-    
+
     MessageBox:confirm(
         string.format("导出成功！\n\n文件：%s\n位置：%s", filename, output_dir),
         function(open_file)
@@ -230,7 +226,6 @@ function M:showExportErrorDialog(error_info, retry_callback)
     )
 end
 
--- 回调函数：准备需要的章节缓存
 function M:prepareChaptersForExport(bookinfo, only_cached, completion_callback)
     if not H.is_func(completion_callback) then
         completion_callback = function(success, result) end
@@ -241,13 +236,11 @@ function M:prepareChaptersForExport(bookinfo, only_cached, completion_callback)
 
     local book_cache_id = bookinfo.cache_id
     local chapter_count = self:_getChapterCount(book_cache_id)
-    
+
     if not chapter_count or chapter_count == 0 then
         return completion_callback(false, { error = "该书没有章节, 请刷新目录" })
     end
 
-    -- 检查缓存状态
-    -- { total_count = 0, cached_count = 0, uncached_count = 0, cached_chapters = {}, uncached_chapters = {} }
     local cache_status
     if H.is_tbl(self.chapter_cache_status) then
         cache_status = self.chapter_cache_status
@@ -258,19 +251,16 @@ function M:prepareChaptersForExport(bookinfo, only_cached, completion_callback)
         end
     end
 
-    -- 如果只需要缓存的章节，直接返回
     if only_cached then
         return completion_callback(true, { chapters = cache_status.cached_chapters, total_count = chapter_count })
     end
 
-    -- 如果没有缺失的章节，直接返回
     if cache_status.uncached_count == 0 then
         return completion_callback(true, { chapters = cache_status.cached_chapters, total_count = chapter_count })
     end
 
     local down_completion_callback = function(is_complete)
         if is_complete == true then
-            -- 重新获取所有章节（包含新缓存的）
             local final_chapters = Backend:getBookChapterPlusCache(book_cache_id)
             completion_callback(true, { chapters = final_chapters, total_count = chapter_count })
         else
@@ -301,11 +291,11 @@ function M:cacheAllChapters(completion_callback)
         local chapter_count = response.total_count
         local cached_count = response.cached_count
         local uncached_count = response.uncached_count
-    
+
         if uncached_count == 0 then
             return MessageBox:success(string.format("%s 个章节已全部缓存！",chapter_count))
         end
-    
+
         MessageBox:confirm(string.format(
             "书名：<<%s>>\n作者：%s\n\n总章节：%d\n已缓存：%d\n待缓存：%d\n\n是否开始缓存全书？",
             bookinfo.name or "未命名",
@@ -314,7 +304,7 @@ function M:cacheAllChapters(completion_callback)
             cached_count,
             uncached_count
         ), function(result)
-            if not result then return completion_callback(false) end -- 用户点击取消
+            if not result then return completion_callback(false) end
             self:startCacheChapters(bookinfo, response.uncached_chapters or {}, chapter_count, nil, completion_callback)
         end, {
             ok_text = "开始缓存",
@@ -335,7 +325,7 @@ function M:cacheSelectedChapters(start_chapter_index, down_chapter_count, comple
     local book_cache_id = bookinfo.cache_id
     local start_index = tonumber(start_chapter_index)
     local actual_chapter_count = self:_getChapterCount(book_cache_id )
-    
+
     if start_index < 0 then start_index = 0 end
     if not (H.is_num(actual_chapter_count) and actual_chapter_count > 0) then
         return MessageBox:error("该书章节列表为空，请手动刷新目录后再缓存")
@@ -345,18 +335,14 @@ function M:cacheSelectedChapters(start_chapter_index, down_chapter_count, comple
         return MessageBox:notice("已经是最后一章")
     end
 
-    -- 确定目标章节数
     local target_chapter_count
     if H.is_num(down_chapter_count) then
-        -- start_chapter_index 从0开始，所以 +1
         target_chapter_count = start_index + down_chapter_count + 1
-        -- 处理超出总章数的情况
         if target_chapter_count > actual_chapter_count then
             target_chapter_count = actual_chapter_count
             MessageBox:notice(string.format("超出书籍总章数，将缓存至最后一章。实际缓存章节数：%d", target_chapter_count - start_index))
         end
     else
-        -- 如果没有指定下载章数，则缓存到最后一章
         target_chapter_count = actual_chapter_count
     end
 
@@ -366,8 +352,7 @@ function M:cacheSelectedChapters(start_chapter_index, down_chapter_count, comple
         if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
             return MessageBox:error("查询章节缓存状态出错")
         end
-        
-        -- 筛选出从当前章节到目标章节的未缓存章节
+
         local uncached_in_range = {}
         local total_in_range = target_chapter_count - start_index
         local cached_in_range = 0
@@ -379,7 +364,6 @@ function M:cacheSelectedChapters(start_chapter_index, down_chapter_count, comple
             end
         end
 
-        -- 计算范围内已缓存数量
         cached_in_range = total_in_range - #uncached_in_range
         if #uncached_in_range == 0 then
             return MessageBox:success(string.format("选定章节已全部缓存！\n选定章节：%d", total_in_range))
@@ -400,7 +384,7 @@ function M:cacheSelectedChapters(start_chapter_index, down_chapter_count, comple
             ok_text = "开始缓存",
             cancel_text = "取消"
         })
-    end)   
+    end)
 end
 
 function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_count, completion_callback, skip_cache_integrity_check)
@@ -432,9 +416,9 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
     })
 
     if not retry_count then retry_count = 0 end
-    local retry_func = function()
+    local retry_func = function(retry_chapters)
         retry_count = retry_count + 1
-        self:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_count, completion_callback, skip_cache_integrity_check)
+        self:startCacheChapters(bookinfo, retry_chapters or uncached_chapters, chapter_count, retry_count, completion_callback, skip_cache_integrity_check)
     end
 
     local cache_complete = false
@@ -456,7 +440,7 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
         end
     end
 
-    local showRetryDialog = function(err_msg)
+    local showRetryDialog = function(err_msg, retry_chapters)
         local error_title = "⚠ 缓存出错"
         local is_timeout = err_msg:find("超时")
         local is_toc_empty = err_msg:find("目录为空") or err_msg:find("TOC") or err_msg:find("章节列表")
@@ -467,9 +451,8 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
             error_title = "⚠ 目录为空"
         end
 
-            -- 检查是否启用了多线程
             local settings = Backend:getSettings()
-            local current_threads = tonumber(settings.download_threads) or 2
+            local current_threads = Backend:normalizeDownloadThreads(settings.download_threads)
             local has_multithread = current_threads > 1 and not self.temp_disable_multithread
 
             local other_buttons_list = {{
@@ -477,32 +460,29 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
                     text = "查看已缓存",
                     callback = function()
                         self:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, function()
-                            retry_func()
+                            retry_func(retry_chapters)
                         end)
                     end
                 }
             }}
 
-            -- 如果启用了多线程，添加"停用多线程并重试"按钮
             if has_multithread then
                 table.insert(other_buttons_list[1], {
                     text = "停用多线程并重试",
                     callback = function()
                         self.temp_disable_multithread = true
                         logger.info("User disabled multi-threading for this session")
-                        retry_func()
+                        retry_func(retry_chapters)
                     end
                 })
             end
 
-            -- 所有错误统一提供重试选项
             MessageBox:confirm(
-                string.format("%s\n\n%s\n\n已自动重试%s次仍失败，是否继续重试？", error_title, err_msg, retry_count),
+                string.format("%s\n\n%s\n\n已重试%s次，是否继续重试？", error_title, err_msg, retry_count),
                 function(result)
                     if result then
-                        retry_func()
+                        retry_func(retry_chapters)
                     else
-                        -- 用户取消重试，调用完成回调
                         if H.is_func(completion_callback) then
                             completion_callback(false)
                         end
@@ -517,30 +497,20 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
     end
 
     local cache_progress_callback
-    local handleCacheError = function(err_msg)
-        -- 首次出错：静默重试，不关闭进度条，不弹新窗口
-        if retry_count == 0 then
-            retry_count = 1
-            UIManager:scheduleIn(1, function()
-                Backend:preLoadingChapters(uncached_chapters, nil, cache_progress_callback, self.temp_disable_multithread)
-            end)
-            return
-        end
-
-        -- 重试后仍失败，关闭进度条并显示重试对话框
+    local handleCacheError = function(err_msg, failed_chapters)
         if cache_msg and cache_msg.close then
             cache_msg:close()
         end
         cache_complete = true
-        showRetryDialog(err_msg)
+        showRetryDialog(err_msg, failed_chapters)
     end
 
-    cache_progress_callback = function(progress, err_msg)
+    cache_progress_callback = function(progress, err_msg, failed_chapters)
         if progress == false or progress == true then
             if progress == true then
                 handleCacheSuccess()
             elseif err_msg then
-                handleCacheError(err_msg)
+                handleCacheError(err_msg, failed_chapters)
             end
         elseif H.is_num(progress) then
             if cache_msg and cache_msg.reportProgress then
@@ -563,7 +533,7 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, ret
         if not (state == true and H.is_tbl(cache_status) and H.is_tbl(cache_status.cached_chapters) and H.is_tbl(cache_status.uncached_chapters)) then
             return MessageBox:error("查询章节缓存状态出错")
         end
-        
+
         local cached_count = cache_status.cached_count
         local missing_count = cache_status.uncached_count
 
@@ -574,7 +544,6 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, ret
                     chapter_count,
                     cached_count),
                 function()
-                    -- 用户点击确定后，调用完成回调
                     if H.is_func(completion_callback) then completion_callback(true) end
                 end,
                 {
@@ -583,7 +552,6 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, ret
                 }
             )
         else
-            -- 构建缺失章节列表文本
             local missing_text = ""
             local max_display = 10
             for i, missing in ipairs(cache_status.uncached_chapters) do
@@ -676,7 +644,7 @@ function M:_buildEpubFile(bookinfo, chapters, export_settings)
         output_path = output_path,
         book_cache_id = book_cache_id
     })
-    
+
     local ok, build_result = pcall(function()
         return exporter:build()
     end)
@@ -782,7 +750,7 @@ function M:exportBook()
         local cached_count = self.chapter_cache_status.cached_count
         local is_comic = Backend:isBookTypeComic(book_cache_id)
         local export_type = is_comic and "CBZ" or "EPUB"
-    
+
         local export_select_callback = function(only_cached)
             if only_cached and cached_count == 0 then
                 self:showExportErrorDialog("没有已缓存的章节")
@@ -792,7 +760,7 @@ function M:exportBook()
                 self:_generateBookFile(bookinfo, only_cached, is_comic)
             end)
         end
-    
+
         MessageBox:confirm(string.format(
             "是否导出 <<%s>> 为 %s 文件？\n\n作者：%s\n总章节数：%d\n已缓存章节：%d\n\n全书导出需要下载所有章节，可能需要一些时间",
             bookinfo.name or "未命名",
