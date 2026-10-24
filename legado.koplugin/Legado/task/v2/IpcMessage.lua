@@ -9,7 +9,6 @@ local zmq, czmq
 pcall(function() zmq = ffi.loadlib("zmq", "5") end)
 pcall(function() czmq = ffi.loadlib("czmq", "4") end)
 
--- 安卓被裁减, 无导出函数
 pcall(ffi.cdef, [[
 int zmq_setsockopt(void *, int, const void *, size_t);
 zmsg_t *zmsg_recv(void *);
@@ -47,7 +46,6 @@ function M.is_available()
     return czmq ~= nil and zmq ~= nil
 end
 
--- 安卓其实 zmq_setsockopt 这个也没有
 local function set_socket_linger(sock, linger_ms)
     if not (sock and czmq and zmq) then return end
     pcall(function()
@@ -201,7 +199,7 @@ local zmsg_recv_fn = nil
 local zframe_more_fn = nil
 if czmq then
     pcall(function() zmsg_recv_fn = czmq.zmsg_recv end)
-    pcall(function() zframe_more_fn = czmq.zframe_more end) -- 新增
+    pcall(function() zframe_more_fn = czmq.zframe_more end)
 end
 
 local function frame_to_string(frame)
@@ -226,7 +224,6 @@ function M:recv()
     if is_null(self.socket) or czmq == nil then return nil end
     local id = nil
     local body = nil
-    -- 优先使用 zmsg_recv
     if zmsg_recv_fn then
         local msg = zmsg_recv_fn(self.socket)
         if msg == nil then return nil end
@@ -244,7 +241,6 @@ function M:recv()
             destroy_frame(body_frame)
         end
         czmq.zmsg_destroy(zmsg_ptr_t(msg))
-    -- fallback：逐帧接收
     else
         if self.is_server then
             local id_frame = czmq.zframe_recv(self.socket)

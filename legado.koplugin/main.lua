@@ -3,6 +3,7 @@ local Dispatcher = require("dispatcher")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local Backend = require("Legado/Backend")
+local SkeletonBook = require("Legado.Skeleton.Book")
 local LibraryView = require("Legado/LibraryView")
 local Patcher = require("Legado.patches")
 local DocumentRegistry = require("document/documentregistry")
@@ -17,17 +18,15 @@ local Legado = WidgetContainer:extend({
 })
 
 function Legado:init()
-    -- on open FileManager or ReaderUI
     if not PlgState.plg_name then
         PlgState.plg_name = "legado"
         if self.path then
-            -- fix Android path
             local path = self.path:gsub("/+", "/")
             PlgState.plg_path = path
         end
     end
     if not Backend.settings_data then
-        Backend:initialize()
+        Backend:initialize(SkeletonBook:preloadCallbacks())
     end
     if self.ui then
         EventHandlers:register(self)
@@ -38,15 +37,16 @@ function Legado:init()
     self:registerDocumentRegistryAuxProvider()
     self:onDispatcherRegisterActions()
     CreDocument:register(DocumentRegistry)
-    Patcher.install(self)
+    Patcher.install(self, EventHandlers:readerEventRules(self))
+    require("Legado.spore.local.js_cache_cleaner").start()
 end
 
 function Legado:onDispatcherRegisterActions()
     Dispatcher:registerAction("show_legado_libraryview", {
         category = "none",
         event = "ShowLegadoLibraryView",
-        title = _("Legado 书目"),
-        filemanager = true,
+        title = _("Legado：书架"),
+        general = true,
     })
     Dispatcher:registerAction("return_legado_chapterlisting", {
         category = "none",
@@ -69,14 +69,14 @@ function Legado:onDispatcherRegisterActions()
 end
 
 function Legado:isFileTypeSupported(file)
-    return self:isBrowserBook(file)
+    return self:isSkeletonEpub(file)
 end
 
 function Legado:registerDocumentRegistryAuxProvider()
     DocumentRegistry:addAuxProvider({
         provider_name = "开源阅读",
         provider = "legado",
-        order = 50, -- order in OpenWith dialog
+        order = 50,
         disable_file = true,
         disable_type = true,
     })
@@ -84,7 +84,7 @@ end
 
 function Legado:addToMainMenu(menu_items)
     if not (self.ui and menu_items) then return end
-    if not self.ui.document then -- FileManager menu only
+    if not self.ui.document then
         local is_low_version = PlgState.is_low_version
         if is_low_version == nil then
             local ko_version = require("version"):getNormalizedCurrentVersion()
@@ -119,9 +119,9 @@ function Legado:isCachePath(file_path, instance)
     return Env.is_legado_book(file_path, instance)
 end
 
-function Legado:isBrowserBook(file_path, instance)
+function Legado:isSkeletonEpub(file_path, instance)
     if not (file_path and instance) then instance = self.ui end
-    return Env.is_legado_browser_book(file_path, instance)
+    return Env.is_legado_skeleton_epub(file_path, instance)
 end
 
 return Legado

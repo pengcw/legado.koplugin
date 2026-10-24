@@ -1,10 +1,3 @@
--- ZipUtil.lua
---   ffi.archiver（新版 koreader）      -> 流式重写、增量 patch（truncate）、zlib crc32 全可用
---   ffi.zipwriter（旧版 koreader）     -> 仅基础写入；crc32 用 bit 备份；
---                                       增量 patch 禁用（truncate 不可用，SkeletonEpub 回退全量重写）；
---                                       流式重写禁用（can_stream=false，走全内存 extractToMemory）；
---                                       读取依赖 unzip CLI（无 archiver 时）
---   unzip CLI fallback                 -> 无 archiver 时的读取/解压路径
 
 local bit = require("bit")
 local ffi = require("ffi")
@@ -21,12 +14,28 @@ local rewrite_buff, rewrite_size, rewrite_offs
 local truncate_c
 if ok_archiver  and type(archiver) == "table" and archiver.Writer then
     has_archiver = true
-    -- 流式复制缓冲（rewriteWithUpdates 使用）
     rewrite_buff = ffi.new("const void *[1]")
     rewrite_size = ffi.new("size_t[1]")
-    rewrite_offs = ffi.new("int64_t[1]") -- 与 libarchive 的 la_int64_t（=int64_t）兼容
-    pcall(ffi.cdef, "int truncate(const char *pathname, long long length);")
-    truncate_c = ffi.C.truncate
+    rewrite_offs = ffi.new("int64_t[1]")
+    if ffi.abi("64bit") then
+        pcall(ffi.cdef, "int truncate(const char *pathname, int64_t length);")
+        truncate_c = function(path, len)
+            return ffi.C.truncate(path, len)
+        end
+    else
+        local ok_64 = pcall(ffi.cdef, "int truncate64(const char *pathname, int64_t length);")
+        local has_64, sym_64 = pcall(function() return ffi.C.truncate64 end)
+        if ok_64 and has_64 and sym_64 then
+            truncate_c = function(path, len)
+                return sym_64(path, len)
+            end
+        else
+            pcall(ffi.cdef, "int truncate(const char *pathname, long length);")
+            truncate_c = function(path, len)
+                return ffi.C.truncate(path, tonumber(len))
+            end
+        end
+    end
 end
 
 local ZipUtil = {}
@@ -42,11 +51,10 @@ function Writer:new()
         backend = nil,
         backend_type = nil,
         closed = true,
-        _last_method = nil, -- avoid repeated set
+        _last_method = nil,
     }
     setmetatable(o, Writer)
     do
-        -- require may return true on missing module, check type
         if has_archiver then
             local w_ok, writer = pcall(
                 archiver.Writer.new,
@@ -127,7 +135,6 @@ function Writer:add(
     if type(content) ~= "string" then return false, "content must be a string" end
     local ok, result
     if self.backend_type == "archiver" then
-        -- set compression before addFileFromMemory()
         local method = no_compression and "store" or "deflate"
         ok, result = pcall(
             function()
@@ -144,18 +151,13 @@ function Writer:add(
             end
         )
     else
-        -- zipwriter.add handles store/deflate internally
-        ok, result = pcall(
-            self.backend.add,
-            self.backend,
-            in_zip_filepath,
-            content,
-            no_compression
-        )
+        ok, result = pcall(function()
+            self.backend:add(in_zip_filepath, content, no_compression)
+            local flushed, err = self.backend.ziphandle:flush()
+            if not flushed then error(err) end
+        end)
     end
     if not ok then return false, result end
-    -- archiver: true=ok, nil/false=fail
-    -- zipwriter add(): no return, always ok
     if self.backend_type == "archiver" and result ~= true then
         return false, self.backend.err or "add failed"
     end
@@ -170,7 +172,6 @@ function Writer:close()
     if not ok then
         return false, result
     end
-    -- archiver.Writer.close no return value
     if result == false then
         return false, self.backend.err or "close failed"
     end
@@ -194,14 +195,11 @@ local function shell_escape(s)
     return tostring(s or ""):gsub("'", "'\\''")
 end
 
--- libarchive may shift zip perm bits (0644 -> 0o1204; &0777 -> 0204),
--- leaving extracted files unreadable. chmod only when open fails;
--- normal files are untouched (a failed open may just mean a missing file)
 local function ensure_file_readable(path)
     local f = io.open(path, "rb")
     if f then
         f:close()
-        return -- readable, nothing to fix
+        return
     end
     os.execute(string.format("chmod 0644 '%s' 2>/dev/null", shell_escape(path)))
 end
@@ -248,7 +246,6 @@ function Reader:new()
     return nil, "no zip reader available"
 end
 
--- true or nil, err
 function Reader:open(path)
     if type(path) ~= "string" or path == "" then
         return nil, "invalid zip file path"
@@ -263,7 +260,6 @@ function Reader:open(path)
         self._path = path
         return true
     end
-    -- open only stores path; re-open cleans old temp dir and resets state.
     if self._tmp_dir and util.directoryExists(self._tmp_dir) then
         ffi_util.purgeDir(self._tmp_dir)
     end
@@ -278,7 +274,7 @@ local function ensure_extracted(self)
     if not self._path then return nil, "zip not opened" end
     if not self._tmp_dir then
         local f = os.tmpname()
-        os.remove(f) -- tmpname path usually doesn't exist, remove just in case.
+        os.remove(f)
         self._tmp_dir = f
     end
     local make_ok, make_err = util.makePath(self._tmp_dir)
@@ -295,8 +291,6 @@ local function ensure_extracted(self)
     return true
 end
 
--- Iterate entries; callback(entry) returning false early terminates (unzip_cli doesn't support early termination)
--- entry: { path = relative_path, mode = "file"|"directory"|"other", size = bytes }
 function Reader:iterate(callback)
     if type(callback) ~= "function" then return end
     if self._mode == "archiver" then
@@ -307,7 +301,6 @@ function Reader:iterate(callback)
     end
     local ok, err = ensure_extracted(self)
     if not ok then error(err) end
-    -- 必须递归（epub 的 OEBPS/Text 等为嵌套结构），否则 fallback 路径会漏掉嵌套条目
     util.findFiles(self._tmp_dir, function(path, fname, attr)
         local rel = path:sub(#self._tmp_dir + 2)
         local mode = (attr and attr.mode == "directory") and "directory" or "file"
@@ -317,8 +310,6 @@ end
 
 function Reader:extractToMemory(path)
     if self._mode == "archiver" then
-        -- archiver's seek relies on an entries cache (filled only by iterate);
-        -- iterate once first, otherwise entries are never found
         if self._archive.entries and not next(self._archive.entries) then
             for _ in self._archive:iterate() do end
         end
@@ -333,7 +324,6 @@ function Reader:extractToMemory(path)
     local target = self._tmp_dir .. "/" .. path
     local data = util.readFromFile(target, "rb")
     if not data then
-        -- maybe unreadable: chmod then retry once
         ensure_file_readable(target)
         data = util.readFromFile(target, "rb")
         if not data then
@@ -343,13 +333,10 @@ function Reader:extractToMemory(path)
     return data
 end
 
--- Full extract to dir, supports exclude_patterns (string or table, plain match)
--- returns extract_ok, extract_err
--- 简单保护路径穿越
 local function is_safe_entry_path(p)
     if not p or p == "" then return false end
-    if p:byte(1) == 47 then return false end -- '/'
-    if p:match("^%a:") then return false end -- C:\
+    if p:byte(1) == 47 then return false end
+    if p:match("^%a:") then return false end
     for seg in p:gmatch("[^/\\]+") do
         if seg == ".." then return false end
     end
@@ -405,7 +392,6 @@ function Reader:extractAll(dest_dir, exclude_patterns)
                         if not self._archive:extractToPath(entry.path, target_full_path) then
                             error(self._archive.err or ("failed to extract " .. entry.path))
                         end
-                        -- write_disk may restore unreadable perms; ensure readable after extract
                         ensure_file_readable(target_full_path)
                     end
                 end
@@ -421,8 +407,6 @@ function Reader:extractAll(dest_dir, exclude_patterns)
         return extract_ok, extract_err
     end
 
-    -- unzip -x uses wildcard matching, different from archiver branch's plain substring semantics
-    -- 路径穿越：Info-ZIP unzip 默认拒绝含 ".." 或绝对路径的条目（解压时跳过并告警），无需另行校验
     local exclude_args = ""
     if #patterns > 0 then
         local escaped = {}
@@ -435,7 +419,6 @@ function Reader:extractAll(dest_dir, exclude_patterns)
         shell_escape(self._path), shell_escape(dest_dir), exclude_args)
     local result = os.execute(cmd)
     if result == 0 or result == true then
-        -- Empty archive check (target dir should have no files)
         local count = 0
         util.findFiles(dest_dir, function() count = count + 1 end, true)
         if count == 0 then return false, "压缩包为空，没有提取到任何文件" end
@@ -465,10 +448,6 @@ end
 
 ZipUtil.Reader = Reader
 
--- ==========================================
--- ComicInfo.xml for CBZ (appended at the end of the zip)
--- bookinfo optional: { name, author, kind, intro }; missing fields left empty
--- ==========================================
 function ZipUtil.createComicInfo(bookinfo, total_pages)
     bookinfo = bookinfo or {}
     local function escape_xml(str)
@@ -501,16 +480,6 @@ function ZipUtil.createComicInfo(bookinfo, total_pages)
     )
 end
 
--- ==========================================
--- 原地增量 patch（追加式）
--- 不重写未变化条目：新条目 local header+data 追加到文件末尾，
--- 然后重写中央目录（被替换条目的旧记录删除）+ EOCD。
--- 全部 store（method=0）写入，纯 Lua 实现，不依赖任何 C 库。
--- 读取器只会看到唯一版本（中央目录无重复路径），文件只增不减，
--- 旧版本数据成为垃圾，由全量重写（rewriteWithUpdates）回收。
--- ==========================================
-
--- crc32 备份表（bit 表驱动；libz 未声明 crc32 的版本差异时使用）
 local CRC32_TABLE
 local function build_crc32_table()
     local t = {}
@@ -532,7 +501,6 @@ function ZipUtil.crc32(data)
     if libz and  libz.crc32 then
         return tonumber(libz.crc32(0, data, #data)) % 4294967296
     end
-    -- 备份：bit 表驱动（zlib 版本差异时）
     CRC32_TABLE = CRC32_TABLE or build_crc32_table()
     local c = 0xFFFFFFFF
     for i = 1, #data do
@@ -541,9 +509,9 @@ function ZipUtil.crc32(data)
     return bit.band(bit.bnot(c), 0xFFFFFFFF) % 4294967296
 end
 
-local EOCD_SIG = "\80\75\5\6"  -- PK\x05\x06
-local CD_SIG = "\80\75\1\2"    -- PK\x01\x02
-local LFH_SIG = "\80\75\3\4"   -- PK\x03\x04
+local EOCD_SIG = "\80\75\5\6"
+local CD_SIG = "\80\75\1\2"
+local LFH_SIG = "\80\75\3\4"
 
 local function le16(s, off)
     return s:byte(off) + s:byte(off + 1) * 256
@@ -564,28 +532,26 @@ local function u32(v)
     return string.char(v % 256, math.floor(v / 256) % 256, math.floor(v / 65536) % 256, math.floor(v / 16777216) % 256)
 end
 
--- store 模式 local file header + data
 local function build_lfh(path, data)
     local crc = ZipUtil.crc32(data)
     local lfh = LFH_SIG
-        .. u16(20) .. u16(0) .. u16(0)          -- version, flags, method=store
-        .. u16(0) .. u16(0)                      -- time, date
-        .. u32(crc) .. u32(#data) .. u32(#data)  -- crc, csize, usize
-        .. u16(#path) .. u16(0)                  -- fname len, extra len
+        .. u16(20) .. u16(0) .. u16(0)
+        .. u16(0) .. u16(0)
+        .. u32(crc) .. u32(#data) .. u32(#data)
+        .. u16(#path) .. u16(0)
         .. path
     return lfh .. data
 end
 
--- 中央目录记录（store）
 local function build_cd(path, data, local_offset)
     local crc = ZipUtil.crc32(data)
     return CD_SIG
-        .. u16(20) .. u16(20) .. u16(0) .. u16(0)  -- made by, needed, flags, method
-        .. u16(0) .. u16(0)                        -- time, date
-        .. u32(crc) .. u32(#data) .. u32(#data)    -- crc, csize, usize
-        .. u16(#path) .. u16(0) .. u16(0)          -- fname, extra, comment len
-        .. u16(0) .. u16(0) .. u32(0)              -- disk, internal attrs, external attrs
-        .. u32(local_offset)                       -- local header offset
+        .. u16(20) .. u16(20) .. u16(0) .. u16(0)
+        .. u16(0) .. u16(0)
+        .. u32(crc) .. u32(#data) .. u32(#data)
+        .. u16(#path) .. u16(0) .. u16(0)
+        .. u16(0) .. u16(0) .. u32(0)
+        .. u32(local_offset)
         .. path
 end
 
@@ -595,10 +561,18 @@ local function build_eocd(total_entries, cd_size, cd_offset)
         .. u32(cd_size) .. u32(cd_offset) .. u16(0)
 end
 
--- 截断文件到指定长度（方案 A 需要：先删掉旧中央目录+旧 EOCD，避免中部残留 EOCD 被 crengine 误判为文件尾）
--- 64 位 length（long long）：32 位平台 long 只有 32 位，2GB+ 的 length 会截断
 local truncate_file = truncate_c and function(path, length)
-    if truncate_c(path, length) == 0 then return true end
+    if truncate_c(path, length) == 0 then
+        local f = io.open(path, "rb")
+        if f then
+            local actual_size = f:seek("end")
+            f:close()
+            if actual_size ~= length then
+                return nil, string.format("truncate size mismatch: expected %s, got %s", tostring(length), tostring(actual_size))
+            end
+        end
+        return true
+    end
     return nil, "errno " .. tostring(ffi.errno())
 end
 
@@ -608,17 +582,16 @@ Patcher.__index = Patcher
 function Patcher:new()
     local o = {
         filepath = nil,
-        entries = nil,   -- { {path, raw, local_offset, csize}, ... } 中央目录记录（含变长字段）
+        entries = nil,
         cd_offset = nil,
         cd_size = nil,
         entry_count = nil,
-        waste_bytes = 0, -- 垃圾字节估算（文件大小 - 逻辑数据量）
+        waste_bytes = 0,
     }
-    setmetatable(o, self)
+    setmetatable(o, self or Patcher)
     return o
 end
 
--- 解析 EOCD 与中央目录；失败返回 nil, err
 function Patcher:open(filepath)
     local f = io.open(filepath, "rb")
     if not f then return nil, "cannot open file: " .. tostring(filepath) end
@@ -628,7 +601,6 @@ function Patcher:open(filepath)
         return nil, "file too small to be a zip"
     end
 
-    -- 从文件尾向前扫描 EOCD（含注释最大 65557 字节）
     local scan_len = math.min(fsize, 65557)
     f:seek("set", fsize - scan_len)
     local tail = f:read(scan_len)
@@ -654,7 +626,6 @@ function Patcher:open(filepath)
     local cd_size = le32(eocd, 13)
     local cd_offset = le32(eocd, 17)
 
-    -- 读中央目录
     local cd
     if cd_size > 0 then
         f:seek("set", cd_offset)
@@ -671,7 +642,6 @@ function Patcher:open(filepath)
     local entries = {}
     local p = 1
     while p <= #cd do
-        -- 固定字段区（46 字节）必须完整，否则 le16/le32 越界返回 nil 会抛算术错误
         if p + 45 > #cd then
             return nil, "truncated central directory record at offset " .. tostring(p - 1)
         end
@@ -701,11 +671,9 @@ function Patcher:open(filepath)
     self.cd_offset = cd_offset
     self.cd_size = cd_size
     self.entry_count = entry_count
-    -- 中央目录实际记录数与 EOCD 声明数不一致说明 zip 损坏
     if entry_count ~= #entries then
         return nil, string.format("central directory entry count mismatch (%d vs %d)", #entries, entry_count)
     end
-    -- 垃圾估算：文件大小 - (数据区逻辑大小 + 中央目录 + EOCD)
     local logical_data = 0
     for _, e in ipairs(entries) do
         logical_data = logical_data + e.csize
@@ -714,13 +682,6 @@ function Patcher:open(filepath)
     return true
 end
 
--- 增量更新：updates 为 { [entry_path] = new_content }
--- 同名条目替换（旧中央目录记录删除）。
--- 采用"先 truncate 到旧中央目录偏移、再追加"的布局：
---   [旧 local 数据][新条目 local+data][新中央目录][新 EOCD]
--- 文件中部不再残留旧 EOCD（crengine 顺序解析 zip 会把中部 EOCD 当作文件尾，导致新条目读不到）。
--- 返回 true / nil, err, intact：intact 表示文件未被修改（调用方可安全回退全量重写）；
--- 写入阶段失败时 intact 为 false（文件可能已损坏，不应再读取）。
 function Patcher:commit(updates)
     if not self.filepath then return nil, "patcher not opened", true end
     if type(updates) ~= "table" or not next(updates) then return true end
@@ -741,17 +702,14 @@ function Patcher:commit(updates)
             total_entries = total_entries + 1
         end
     end
-    -- 删除被替换条目的旧记录
     for _, e in ipairs(self.entries) do
         if replaced[e.path] then total_entries = total_entries - 1 end
     end
     if total_entries > 65535 then return nil, "too many entries for classic zip", true end
     if not truncate_file then
-        -- 无 truncate（纯 Lua 环境）：无法消除中部 EOCD，交由调用方回退全量重写
         return nil, "truncate not available (ffi missing)", true
     end
 
-    -- 构造新条目 local 数据 + 中央目录记录（新条目 local offset 从旧 cd_offset 起）
     local new_local = {}
     local new_cd_recs = {}
     local append_pos = self.cd_offset
@@ -766,7 +724,6 @@ function Patcher:commit(updates)
         append_pos = append_pos + #lfh
     end
 
-    -- 保留的旧记录原样写回
     for _, e in ipairs(self.entries) do
         if not replaced[e.path] then
             table.insert(new_cd_recs, e.raw)
@@ -780,13 +737,11 @@ function Patcher:commit(updates)
     end
     local eocd = build_eocd(total_entries, #cd_bytes, cd_offset_new)
 
-    -- 1) truncate 到旧 cd_offset（删除旧中央目录 + 旧 EOCD），2) 追加新条目 + 新 cd + 新 EOCD
     local f = io.open(self.filepath, "r+b")
     if not f then return nil, "cannot open file for writing", true end
     local ok_t, err_t = truncate_file(self.filepath, self.cd_offset)
     if not ok_t then
         f:close()
-        -- truncate 要么全部成功要么原子失败，失败时文件未动，可安全回退全量重写
         return nil, "truncate failed: " .. tostring(err_t), true
     end
     f:seek("set", self.cd_offset)
@@ -794,7 +749,6 @@ function Patcher:commit(updates)
     f:close()
     if not ok_w then return nil, "write failed: " .. tostring(err_w), false end
 
-    -- 重新解析以保持内部状态一致（供下一次 commit 使用）
     local ok_reopen, err_reopen = self:open(self.filepath)
     if not ok_reopen then return nil, err_reopen, false end
     return true
@@ -802,16 +756,6 @@ end
 
 ZipUtil.Patcher = Patcher
 
--- ==========================================
--- 全量重写（流式，store 模式）
--- 用于垃圾回收 / 无法增量 patch 的场景。
--- archiver 可用时：未变化条目以 archive_read_data_block 流式复制，
--- 只把待更新条目（单章）解压进内存，内存峰值 O(单章)。
--- unzip_cli fallback：退化为全量读内存（与旧行为一致）。
--- updates: { [entry_path] = new_content }
--- ==========================================
--- 流式复制一个条目（archiver backend）
--- writer_backend: ffi.archiver.Writer 实例；reader_archive: ffi.archiver Reader 实例
 local function copy_entry_stream(writer, reader, entry, archive_lib)
     local backend = writer.backend
     local entry_ae = ffi.gc(archive_lib.archive_entry_new(), archive_lib.archive_entry_free)
@@ -835,7 +779,6 @@ local function copy_entry_stream(writer, reader, entry, archive_lib)
     return true
 end
 
--- 返回 true / nil, err
 function ZipUtil.rewriteWithUpdates(src_path, dst_path, updates)
     updates = updates or {}
     local reader = ZipUtil.Reader:new()
@@ -863,7 +806,7 @@ function ZipUtil.rewriteWithUpdates(src_path, dst_path, updates)
 
     local function add_entry(path, data)
         if not ok then return end
-        local r = writer:add(path, data, true) -- 统一 store
+        local r = writer:add(path, data, true)
         if not r then
             ok, err = false, "failed to write " .. tostring(path)
         end
@@ -909,6 +852,70 @@ function ZipUtil.rewriteWithUpdates(src_path, dst_path, updates)
     if not ok then return nil, err end
     if not ok_close then return nil, err_close end
     return true
+end
+
+function ZipUtil.readMemoryEntry(data, path)
+    if type(data) ~= "string" or #data > 512 * 1024 then return nil, "invalid archive input" end
+    if type(path) ~= "string" or #path > 1024 or path:find("\0", 1, true)
+        or path:find("\\", 1, true) or not is_safe_entry_path(path) then
+        return nil, "invalid entry path"
+    end
+    if not has_archiver then return nil, "memory ZIP reader unavailable" end
+    local loaded, library = pcall(function()
+        ffi.cdef[[
+            int archive_read_open_memory(struct archive *, const void *, size_t);
+            int archive_read_support_format_zip(struct archive *);
+        ]]
+        local lib = ffi.loadlib("archive", "13")
+        local _ = lib.archive_read_open_memory
+        _ = lib.archive_read_support_format_zip
+        return lib
+    end)
+    if not loaded then return nil, "memory ZIP reader unavailable" end
+    local archive = library.archive_read_new()
+    if archive == nil then return nil, "archive allocation failed" end
+    archive = ffi.gc(archive, library.archive_free)
+    local entry = ffi.gc(library.archive_entry_new(), library.archive_entry_free)
+    if entry == nil then
+        ffi.gc(archive, nil); library.archive_free(archive)
+        return nil, "archive allocation failed"
+    end
+    local buffer = ffi.new("unsigned char[?]", #data + 1)
+    ffi.copy(buffer, data, #data)
+    local ok, result, err = pcall(function()
+        if library.archive_read_support_format_zip(archive) ~= 0
+            or library.archive_read_open_memory(archive, buffer, #data) ~= 0 then
+            return nil, "invalid ZIP archive"
+        end
+        for index = 1, 256 do
+            local status = library.archive_read_next_header2(archive, entry)
+            if status == 1 then return nil, "entry not found" end
+            if status ~= 0 then return nil, "invalid ZIP header" end
+            local name = library.archive_entry_pathname(entry)
+            if name ~= nil and ffi.string(name) == path then
+                if library.archive_entry_filetype(entry) ~= library.AE_IFREG then
+                    return nil, "unsupported ZIP entry type"
+                end
+                local size = tonumber(library.archive_entry_size(entry))
+                if size > 256 * 1024 then return nil, "entry output too large" end
+                local parts, total = {}, 0
+                local output = ffi.new("unsigned char[32768]")
+                while true do
+                    local count = tonumber(library.archive_read_data(archive, output, 32768))
+                    if count < 0 then return nil, "invalid ZIP data" end
+                    if count == 0 then return table.concat(parts) end
+                    total = total + count
+                    if total > 256 * 1024 then return nil, "entry output too large" end
+                    parts[#parts + 1] = ffi.string(output, count)
+                end
+            end
+        end
+        return nil, "ZIP entry count limit exceeded"
+    end)
+    ffi.gc(entry, nil); library.archive_entry_free(entry)
+    ffi.gc(archive, nil); library.archive_free(archive)
+    if not ok then return nil, "memory ZIP operation failed" end
+    return result, err
 end
 
 return ZipUtil

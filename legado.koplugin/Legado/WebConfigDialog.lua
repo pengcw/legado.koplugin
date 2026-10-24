@@ -3,7 +3,6 @@ local UIManager = require("ui/uimanager")
 
 local util = require("util")
 
-
 local ButtonDialog = require("ui/widget/buttondialog")
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
@@ -22,13 +21,13 @@ function M:openWebConfigTypeSelector()
         self:openWebConfigEditorWithType(nil, nil, server_type)
     end
     dialog = ButtonDialog:new{
-        title = "选择配置类型 (新建)",
+        title = "选择服务类型(新建)",
         title_align = "center",
         buttons = {{{
-            text = "手机 APP", callback = function()
+            text = "手机阅读", callback = function()
                 on_select(1)
         end,}}, {{
-            text = "轻阅读后端", callback = function()
+            text = "轻阅读服务", callback = function()
                 on_select(3)
         end,}}, {{
             text = "Reader3/Rust 服务", callback = function()
@@ -51,7 +50,6 @@ function M:openWebConfigManager(callback)
     if callback then
         self.refresh_library = callback
     end
-    -- 无参数刷新
     if not callback and self.manager_menu then
         UIManager:close(self.manager_menu)
     end
@@ -107,7 +105,7 @@ function M:openWebConfigManager(callback)
     }})
 
     self.manager_menu = ButtonDialog:new{
-        title = "Legado WEB 配置管理",
+        title = "服务设置",
         title_align = "center",
         buttons = config_buttons,
     }
@@ -117,9 +115,9 @@ end
 function M:openWebConfigEditorWithType(config_name, config, server_type, is_current, prefill_url)
     local is_edit = config_name ~= nil
     local type_names = {
-        [1] = "手机 APP",
+        [1] = "手机阅读",
         [2] = "Reader3/Rust 服务",
-        [3] = "轻阅读后端"
+        [3] = "轻阅读服务"
     }
 
     local name_input = config_name or ""
@@ -128,7 +126,6 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
     local username_input = config and config.user or ""
     local password_input = config and config.pwd or ""
 
-    -- 根据编辑模式获取当前类型，否则使用传入的类型
     local current_type = is_edit and (config and config.type or 1) or server_type
 
     local title = string.format("%s WEB 配置 - %s",
@@ -216,7 +213,6 @@ function M:openWebConfigEditorWithType(config_name, config, server_type, is_curr
         focused_field_idx = is_edit and 2 or 1,
     }
     if is_edit then
-        -- 编辑模式, 配置名称不可修改, 字段设为只读
         local name_field = dialog.input_fields[1]
         if name_field then
             name_field.readonly = true
@@ -233,7 +229,6 @@ function M:handleConfigSave(dialog, current_conf_name, old_config, server_type, 
     local description = util.trim(fields[3] or "")
     local user, pwd
 
-    -- 根据类型获取
     if server_type == 2 or server_type == 3 then
         user = util.trim(fields[4] or "")
         pwd = util.trim(fields[5] or "")
@@ -273,29 +268,31 @@ function M:scanLanServers(dialog, config_name, config, server_type, is_edit)
         end)
     end
 
-
     TaskProg.loading("正在检测服务", function()
         local current_url = config and config.url
         if current_url and current_url:match("^https?://") then
-            if Discovery:check(current_url, { timeout = 3 }) then
+            local pcall_ok, chk_ok = pcall(function()
+                return Discovery:check(current_url, { timeout = 3 })
+            end)
+            if pcall_ok and chk_ok then
                 return "current_ok"
             end
         end
         return Discovery:scanLegadoServices({ timeout = 0.4 })
     end, function(ok, result)
         if not ok then
-            return MessageBox:notice("未在局域网发现开源阅读服务")
+            return MessageBox:notice("未发现阅读服务。请确认设备连接同一局域网，并已开启 Web 服务。")
         end
         if result == "current_ok" then
             return MessageBox:notice("当前服务可正常访问，无需扫描")
         end
         if type(result) ~= "table" or not result.list or #result.list == 0 then
             local scope = type(result) == "table" and result.net and result.net.cidr or nil
-            return MessageBox:notice(string.format("未在 %s 网段发现开源阅读服务",
+            return MessageBox:notice(string.format("未在 %s 发现阅读服务。请确认设备连接同一局域网，并已开启 Web 服务。",
                 scope and tostring(scope) or "局域网"))
         end
         self:showScanResults(dialog, config_name, config, server_type, is_edit, result.list)
-    end, { timeout = 20 })
+    end, { timeout = 45 })
 end
 
 function M:showScanResults(dialog, config_name, config, server_type, is_edit, results)

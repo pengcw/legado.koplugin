@@ -59,7 +59,6 @@ local BookDetails = FocusManager:extend{
 function BookDetails:init()
     if not H.is_tbl(self.bookinfo) then return end
 
-    -- The book id may not be generated yet
     if not self.bookinfo.cache_id then
         self.bookinfo.name = util.trim(self.bookinfo.name)
         self.bookinfo.author = util.trim(self.bookinfo.author or "")
@@ -74,7 +73,6 @@ function BookDetails:init()
     self.small_font = Font:getFace("smallffont")
     self.medium_font = Font:getFace("ffont")
     self.large_font = Font:getFace("largeffont")
-    -- "portrait" - 竖屏模式 "landscape" - 横屏模式
     self.screen_mode = Screen:getScreenMode()
     self.screen_size = Screen:getSize()
 
@@ -112,7 +110,6 @@ function BookDetails:getDetailsContent(width)
     local header = self:getHeader("简介")
     local description = self:getDescriptionContent()
 
-    -- Calculate the height of all elements except the button group
     local other_elements_height = title_bar:getSize().h +
                                   book_details:getSize().h +
                                   header:getSize().h +
@@ -151,7 +148,7 @@ function BookDetails:getButtonGroup(other_elements_height)
             text = "刷新封面",
             callback = function()
                 if self.is_downloading then return end
-                local image_path = Backend:get_default_cover_cache(self.bookinfo.cache_id)  
+                local image_path = Backend:get_default_cover_cache(self.bookinfo.cache_id)
                 if H.is_str(image_path) and util.fileExists(image_path) then
                     pcall(util.removeFile, image_path)
                 end
@@ -162,11 +159,11 @@ function BookDetails:getButtonGroup(other_elements_height)
                     end
                 end
                 UIManager:nextTick(function()
-                    if not H.is_str(image_path) or not util.fileExists(image_path) then 
-                        self:_reload() 
+                    if not H.is_str(image_path) or not util.fileExists(image_path) then
+                        self:_reload()
                         if self.lnk_file then Backend:emitMetadataChanged(self.lnk_file) end
                     end
-                end)  
+                end)
             end,
         })
     end
@@ -201,7 +198,6 @@ function BookDetails:getButtonGroup(other_elements_height)
         end,
     })
 
-    -- Create vertical button layout first to check height
     local vertical_buttons = {}
     for _, btn in ipairs(buttons) do
         table.insert(vertical_buttons, {btn})
@@ -214,18 +210,16 @@ function BookDetails:getButtonGroup(other_elements_height)
         shrink_min_width = self.screen_size.w * Constants.BUTTON_GROUP_SHRINK_MIN_WIDTH_RATIO,
     }
 
-    -- Calculate remaining height
     local remaining_height = self.screen_size.h - other_elements_height
 
-    -- If too tall, switch to horizontal layout
     if button_table:getSize().h > remaining_height then
         button_table = ButtonTable:new {
             width = self.screen_size.w,
-            buttons = {buttons}, -- Single row for horizontal layout
+            buttons = {buttons},
             show_parent = self,
         }
     end
-    
+
     return CenterContainer:new{
         dimen = Geom:new{ w = self.screen_size.w, h = remaining_height },
         FrameContainer:new{
@@ -241,8 +235,6 @@ function BookDetails:_createCoverImage(cover_bb, max_width, max_height, min_fram
     min_frame_height = min_frame_height or 0
     local actual_w, actual_h
     if not cover_bb then
-        -- Do not delete placeholder image
-        -- pcall(util.removeFile, image_path)
         cover_bb = self:getCoverimage()
         if not cover_bb then
             actual_w, actual_h = max_width, max_height
@@ -268,9 +260,6 @@ function BookDetails:_createCoverImage(cover_bb, max_width, max_height, min_fram
         alpha = true,
     }
 
-    -- The final container height must be at least min_frame_height.
-    -- The container's height is determined by its child (CenterContainer) + padding, margin, and border.
-    -- So, we need to calculate the required height for the CenterContainer.
     local non_content_h = (Constants.COVER_IMAGE_PADDING * 2) + (Constants.COVER_IMAGE_MARGIN * 2) + (Constants.COVER_IMAGE_BORDER_SIZE * 2)
     local min_center_container_h = min_frame_height - non_content_h
     local center_container_h = math.max(scaled_h, min_center_container_h)
@@ -281,7 +270,7 @@ function BookDetails:_createCoverImage(cover_bb, max_width, max_height, min_fram
         padding = Constants.COVER_IMAGE_PADDING,
         CenterContainer:new{
             dimen = Geom:new{
-                w = container_w, -- Use full available width to center the image
+                w = container_w,
                 h = center_container_h,
             },
             image_widget
@@ -325,7 +314,6 @@ function BookDetails:getBookDetails()
     local img_width = screen_width * img_width_ratio
     local img_max_height = screen_height * Constants.COVER_MAX_HEIGHT_RATIO
 
-    -- Create metadata group
     local book_author_string = self.bookinfo.author or "Unknown Author"
     local book_metadata_group = VerticalGroup:new{
         align = "left",
@@ -347,19 +335,17 @@ function BookDetails:getBookDetails()
     }
     table.insert(book_metadata_group, self:_createMetadataGroup(metadata_table))
 
-    -- Ensure cover image is at least as tall as the metadata
     local metadata_height = book_metadata_group:getSize().h
     img_max_height = math.max(img_max_height, metadata_height)
 
     local final_cover_component
     local cover_bitmap = self:getCoverimage(self.lnk_file, self.bookinfo.cache_id)
-    
+
     if not ( cover_bitmap and H.is_func(cover_bitmap.getWidth) ) then
-        
+
         local book_cache_id = self.bookinfo.cache_id
         local cover_url = self.bookinfo.coverUrl
 
-        -- Create placeholder image container
         cover_bitmap = self:getCoverimage()
         local placeholder_container, _ = self:_createCoverImage(cover_bitmap, img_width, img_max_height, metadata_height)
 
@@ -369,7 +355,6 @@ function BookDetails:getBookDetails()
             fgcolor = Blitbuffer.COLOR_GRAY_9
         }
 
-        -- Combine placeholder and text widget
         local cover_group = OverlapGroup:new{
                     placeholder_container,
                     CenterContainer:new{
@@ -380,10 +365,9 @@ function BookDetails:getBookDetails()
                         self.loading_text_widget,
                     }
             }
-        
+
         final_cover_component = cover_group
-        
-        -- 没有文件才进行下载
+
         if not Backend:get_default_cover_cache(book_cache_id) then
             self.is_downloading = true
             Backend:launchProcess(function()
@@ -404,7 +388,7 @@ function BookDetails:getBookDetails()
             self.loading_text_widget:setText("资源损坏")
             UIManager:setDirty("all", "partial")
             UIManager:forceRePaint()
-        end 
+        end
     else
         local cover_image_container, cover_image_widget = self:_createCoverImage(cover_bitmap, img_width, img_max_height, metadata_height)
         self.cover_image_widget = cover_image_widget
@@ -434,7 +418,7 @@ function BookDetails:getHeader(title)
     }
     local padding_span = HorizontalSpan:new{ width = self.padding }
     local line_width = (width - header_title:getSize().w) / 2 - self.padding * 2
-    line_width = math.max(0, line_width) -- ensure line_width is not negative
+    line_width = math.max(0, line_width)
     local line_container = LeftContainer:new{
         dimen = Geom:new{ w = line_width, h = height },
         LineWidget:new{
@@ -474,10 +458,16 @@ end
 function BookDetails:getDescriptionContent()
     local screen_width = self.screen_size.w
     local screen_height = self.screen_size.h
-    
+    local intro = self.bookinfo.intro
+    if type(intro) ~= "string" then
+        if intro ~= nil then
+            logger.warn("BookDetailsDialog: ignoring non-string book intro:", type(intro))
+        end
+        intro = ""
+    end
+
     local text = ScrollTextWidget:new{
-        text = self:decodeHtmlEntities(self.bookinfo.intro or ""),
-        --face = self.medium_font,
+        text = self:decodeHtmlEntities(intro),
         face = Font:getFace("infont"),
         width = screen_width - self.padding * 2,
         height = screen_height * Constants.DESCRIPTION_HEIGHT_RATIO,
@@ -504,11 +494,9 @@ end
 
 function BookDetails:getCoverimage(path, book_cache_id)
     if not (path or book_cache_id ) then
-        -- get_cover_bitmap(Constants.PLACEHOLDER_COVER)
         return RenderImage:renderImageFile(Constants.PLACEHOLDER_COVER, false)
     end
 
-    -- if the picture is damaged, it will crash.
     local ok, cover_bb =  pcall(FileManagerBookInfo.getCoverImage, FileManagerBookInfo, nil, path)
     if ok and cover_bb and H.is_func(cover_bb.getWidth) then
         local w, h = cover_bb:getWidth(), cover_bb:getHeight()
@@ -519,13 +507,12 @@ function BookDetails:getCoverimage(path, book_cache_id)
         if book_cache_id then
             local cover_path = Backend:get_default_cover_cache(book_cache_id)
             if H.is_str(cover_path) and util.fileExists(cover_path) then
-                -- supports gz compression
                 local get_cover_bitmap = function(cover_file)
                     local cover_doc = DocumentRegistry:openDocument(cover_file)
                     if cover_doc then
                         ok, cover_bb = pcall(cover_doc.getCoverPageImage, cover_doc)
                         cover_doc:close()
-                        if ok and cover_bb and H.is_func(cover_bb.getWidth) then return cover_bb end 
+                        if ok and cover_bb and H.is_func(cover_bb.getWidth) then return cover_bb end
                     end
                 end
                 return get_cover_bitmap(cover_path)
@@ -534,7 +521,6 @@ function BookDetails:getCoverimage(path, book_cache_id)
     end
     return nil
 end
-    
 
 function BookDetails:_reload()
     self[1][1] = self:getDetailsContent(self.screen_size.w)

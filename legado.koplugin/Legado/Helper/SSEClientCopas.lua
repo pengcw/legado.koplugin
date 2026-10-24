@@ -276,7 +276,7 @@ function M.open(opts)
             finish("已取消")
         end
     end
-    function handle:get_result() return event_result end -- on_event 返回非 nil 中止流时的返回值（供回调式调用方；reader3 走队列模式未用）
+    function handle:get_result() return event_result end
 
     local decoder = chunked_decoder()
     local sse = sse_parser()
@@ -312,7 +312,6 @@ function M.open(opts)
                 return
             end
             raw_sock = sec_sock
-            -- SNI（部分 HTTPS 服务器缺少 SNI 会握手失败）
             if sec_sock.sni then
                 pcall(sec_sock.sni, sec_sock, host)
             end
@@ -344,7 +343,6 @@ function M.open(opts)
             return
         end
 
-        -- 5. 读取 HTTP 响应状态行与响应头
         local status_line, rerr = wrapped_sock:receive("*l")
         if not status_line then
             finish("读取响应状态行失败：" .. tostring(rerr))
@@ -368,7 +366,7 @@ function M.open(opts)
                 return
             end
             if header_line == "" then
-                break -- 响应头读取完毕，进入数据流阶段
+                break
             end
             local k, v = header_line:match("^([^:]+):%s*(.*)$")
             if k and string.lower(k) == "transfer-encoding" and string.lower(v):find("chunked") then

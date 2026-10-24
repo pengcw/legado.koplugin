@@ -1,4 +1,3 @@
--- Legado/task/Lock.lua
 local H = require("Legado/Helper")
 
 local M = {}
@@ -41,9 +40,17 @@ end
 
 function M.setLock(dbManager, targets, is_locked, ttl, owner_id)
     if not (dbManager and dbManager.isConnected and targets) then return false end
-    if H.is_tbl(targets) and #targets == 0 then return true end
 
-    local list = (H.is_tbl(targets) and targets[1]) and targets or { targets }
+    local list
+    if H.is_tbl(targets) and targets.book_cache_id and targets.chapters_index ~= nil then
+        list = { targets }
+    elseif H.is_tbl(targets) then
+        if #targets == 0 then return true end
+        list = targets
+    else
+        list = { targets }
+    end
+
     local now_time = os.time()
     owner_id = owner_id or "main"
     ttl = ttl or 7200
@@ -71,12 +78,12 @@ function M.withLock(dbManager, target, fn, ttl, owner_id)
     if M.isLocked(dbManager, target) then
         return false, "lock_acquired_failed"
     end
-    
+
     owner_id = owner_id or string.format("owner_%d_%d", os.time(), math.random(1000, 9999))
     M.setLock(dbManager, target, true, ttl, owner_id)
     local ok, res1, res2 = pcall(fn)
     M.setLock(dbManager, target, false, nil, owner_id)
-    
+
     if not ok then error(res1) end
     return true, res1, res2
 end

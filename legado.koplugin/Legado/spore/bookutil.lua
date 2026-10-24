@@ -1,18 +1,29 @@
 local H = require("Legado/Helper")
 local utf8c = require("Legado.Helper.utf8proc")
+local util = require("util")
 
 local M = {}
+
+local function normalize_book_name(name)
+    return util.trim(name)
+end
 
 function M.filter_search(book, search_text, is_exact_search, options)
     if not H.is_tbl(book) then return false end
     local has_name_filter = H.is_str(options and options.name) and options.name ~= ""
     local has_author_filter = H.is_str(options and options.author) and options.author ~= ""
     local has_origin_filter = H.is_str(options and options.origin) and options.origin ~= ""
-    -- 作者匹配：≥2 汉字包含匹配（覆盖“余华著/作者：余华”等格式差异）；1 字精确
     local OPT_AUTHOR = options and options.author
     local OPT_AUTHOR_LEN = H.is_str(OPT_AUTHOR) and utf8c.len(OPT_AUTHOR) or 0
     if has_name_filter or has_author_filter or has_origin_filter then
-        local match_name = has_name_filter and H.is_str(book.name) and book.name == options.name
+        local match_name = false
+        if has_name_filter and H.is_str(book.name) then
+            if options.normalize_name then
+                match_name = normalize_book_name(book.name) == normalize_book_name(options.name)
+            else
+                match_name = book.name == options.name
+            end
+        end
         local match_author = has_author_filter and H.is_str(book.author) and (
             (OPT_AUTHOR_LEN >= 2 and book.author:find(OPT_AUTHOR, 1, true) ~= nil)
             or (OPT_AUTHOR_LEN < 2 and book.author == OPT_AUTHOR)

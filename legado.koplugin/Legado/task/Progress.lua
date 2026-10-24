@@ -26,7 +26,7 @@ local function show_progress_info(message, options)
     if defaultOptions.dismissable then
         local orig_dismiss_cb = defaultOptions.dismiss_callback
         defaultOptions.dismiss_callback = function()
-            user_closed = true 
+            user_closed = true
             if H.is_func(orig_dismiss_cb) then orig_dismiss_cb() end
         end
     end
@@ -53,26 +53,26 @@ local function show_progress_info(message, options)
 
         local new_text = string.format("%s %s ...", message, current_progress_text)
         if message_dialog and message_dialog.movable and Screen.refreshUI then
-            local orig_offset = message_dialog.movable:getMovedOffset()  
-            message_dialog:free()  
-            message_dialog.text = new_text  
-            message_dialog:init()  
-            message_dialog.movable:setMovedOffset(orig_offset)  
+            local orig_offset = message_dialog.movable:getMovedOffset()
+            message_dialog:free()
+            message_dialog.text = new_text
+            message_dialog:init()
+            message_dialog.movable:setMovedOffset(orig_offset)
             message_dialog:paintTo(Screen.bb, 0, 0)
-            local d = message_dialog[1][1].dimen  
-            Screen.refreshUI(Screen, d.x, d.y, d.w, d.h)  
-        else  
+            local d = message_dialog[1][1].dimen
+            Screen.refreshUI(Screen, d.x, d.y, d.w, d.h)
+        else
             defaultOptions.text = new_text
-            message_dialog = InfoMessage:new(defaultOptions)  
-            UIManager:show(message_dialog)  
-        end  
-    
+            message_dialog = InfoMessage:new(defaultOptions)
+            UIManager:show(message_dialog)
+        end
+
         UIManager:scheduleIn(defaultOptions.update_interval, updateText)
     end
 
     updateText()
     return {
-        closed = false,   -- 供调用方判断，用户手动关闭后 true，可据此重建/重置引用
+        closed = false,
         close = function()
             user_closed = true
             UIManager:unschedule(updateText)
@@ -140,7 +140,7 @@ function M.loading(message_or_args, runnable, callback, options, silent_cancel)
         args.dismiss_callback = function()
             if is_cancelled or is_finished then return end
             if message_dialog and message_dialog.unschedule then message_dialog:unschedule() end
-            
+
             if is_silent_cancel then
                 is_cancelled = true
                 bg_switch_dialog = MessageBox:notice("取消操作")
@@ -155,17 +155,17 @@ function M.loading(message_or_args, runnable, callback, options, silent_cancel)
 
             if not on_cancel_func then
                 bg_switch_dialog = MessageBox:notice("已切至后台")
-                is_background = true 
-                return 
+                is_background = true
+                return
             end
-            
+
             confirm_dialog = MessageBox:confirm("确定要取消当前任务吗？", function(result)
                 if is_finished then
                     if not result and notify_bg_finish == true then
                         local bg_msg = (message ~= "") and (message .. " 已结束") or "后台任务已结束"
                         MessageBox:notice(bg_msg)
                     end
-                    return 
+                    return
                 end
 
                 if result then
@@ -188,8 +188,8 @@ function M.loading(message_or_args, runnable, callback, options, silent_cancel)
     pid = TaskQueue.spawnProcess(task_runnable, function(ok, return_values)
         is_finished = true
         if is_cancelled then return end
-        
-        if message_dialog and message_dialog.close then 
+
+        if message_dialog and message_dialog.close then
             message_dialog:close()
         end
         if confirm_dialog then UIManager:close(confirm_dialog) end
@@ -202,7 +202,7 @@ function M.loading(message_or_args, runnable, callback, options, silent_cancel)
                 on_done(true, return_values)
             end
         end
-        
+
         if is_background and notify_bg_finish == true then
             local bg_msg = (message ~= "") and (message .. " 已结束") or "后台任务已结束"
             MessageBox:notice(bg_msg)
@@ -232,8 +232,7 @@ function M.showBar(message, options)
             dismissable = dismissable,
             on_dismiss = options.on_dismiss,
         }
-        -- fix bar fill color on Koreader 2025.08
-        if progressbar_dialog.progress_bar then  
+        if progressbar_dialog.progress_bar then
             progressbar_dialog.progress_bar.fillcolor = require("ffi/blitbuffer").COLOR_BLACK
         end
         if dismissable then
@@ -252,7 +251,6 @@ function M.showBar(message, options)
                 end
 
                 if self_dialog.dismiss_box then
-                    -- Suppress UI repaint while confirm box is open to prevent E-ink flashing
                     if self_dialog.progress_bar_visible and self_dialog.progress_bar then
                         self_dialog.progress_bar:setPercentage(progress / self_dialog.progress_max)
                     end
@@ -265,7 +263,7 @@ function M.showBar(message, options)
 
             progressbar_dialog.onDismiss = function(self_dialog)
                 if self_dialog.dismiss_box then return end
-                
+
                 if self_dialog.dismiss_text then
                     local MessageBox = require("Legado/MessageBox")
                     self_dialog.dismiss_box = MessageBox:confirm(self_dialog.dismiss_text, function(ok)
@@ -277,7 +275,6 @@ function M.showBar(message, options)
                                 self_dialog.on_dismiss(self_dialog)
                             end
                         else
-                            -- Force catch up redraw after dismiss box closes
                             if self_dialog.progress_bar_visible and H.is_func(self_dialog.redrawProgressbar) then
                                 self_dialog:redrawProgressbar()
                             end
@@ -290,8 +287,7 @@ function M.showBar(message, options)
                     end
                 end
             end
-            
-            -- Fix: Bind gesture and key events to our custom onDismiss
+
             progressbar_dialog.onTapClose = progressbar_dialog.onDismiss
             progressbar_dialog.onAnyKeyPressed = progressbar_dialog.onDismiss
         end
@@ -300,11 +296,8 @@ function M.showBar(message, options)
     return progressbar_dialog or show_progress_info(sub_title, {progress_max = max, parent = show_parent, dismissable = dismissable})
 end
 
--- Non-blocking spinner loading (InfoMessage + rotating icon).
--- Returns { close(), unschedule(), reportProgress(progress) }.
 M.showSpinner = show_progress_info
 
--- E-ink 圆角交互卡片组件 (供视图内嵌或独立浮层复用)
 function M.createCardWidget(options)
     options = options or {}
     local TextWidget = require("ui/widget/textwidget")

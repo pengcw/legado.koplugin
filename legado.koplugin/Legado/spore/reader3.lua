@@ -1,11 +1,9 @@
 local util = require("util")
-local logger = require("logger")
 local socket_url = require("socket.url")
 local socketutil = require("socketutil")
 local H = require("Legado/Helper")
 local safe_pcall = require("Legado.Helper.Error").pcall
 local BaseSpec = require("Legado.spore.base")
-local bookutil = require("Legado.spore.bookutil")
 local Probe = require("Legado.Helper.Probe")
 
 local M = BaseSpec:extend{
@@ -22,7 +20,7 @@ function M:reader3Login()
     local reader3_un = self.settings.reader3_un
     local reader3_pwd = self.settings.reader3_pwd
 
-    if not (H.is_str(reader3_un) and H.is_str(reader3_pwd) and 
+    if not (H.is_str(reader3_un) and H.is_str(reader3_pwd) and
                     reader3_pwd ~= "" and reader3_un ~= "") then
         return false, '认证信息设置不全'
     end
@@ -50,7 +48,7 @@ function M:reader3Login()
         Probe.fail("Spore", "login", full_url, t_start, err)
         return false, err
     end
-    
+
     if not (H.is_tbl(res) and H.is_tbl(res.body)) then
         Probe.fail("Spore", "login", full_url, t_start, "返回了无效数据")
         return false, "返回了无效数据"
@@ -60,7 +58,7 @@ function M:reader3Login()
         Probe.fail("Spore", "login", full_url, t_start, res.body.errorMsg or "Token缺失")
         return false, err_msg
     end
-    
+
     Probe.done("Spore", "login", full_url, t_start, "200 OK", "Token OK")
     self:ensureTokenManager():set(res.body.data.accessToken)
     return true, res.body.data.accessToken
@@ -82,11 +80,10 @@ function M:saveBook(bookinfo, callback)
         H.is_str(bookinfo.originName)) then
         return nil, "输入参数错误"
     end
-  
+
     return self:handleResponse(function()
-        -- data=bookinfo
         return self.client:saveBook({
-  
+
             v = os.time(),
             name = bookinfo.name,
             author = bookinfo.author,
@@ -104,21 +101,21 @@ function M:saveBook(bookinfo, callback)
             kind = bookinfo.kind or '',
             type = bookinfo.type or 0
         })
-  
+
     end, callback, {
         timeouts = {10, 12}
     }, 'saveBook')
-  
+
   end
-  
+
   function M:deleteBook(bookinfo, callback)
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.name) and H.is_str(bookinfo.origin) and H.is_str(bookinfo.bookUrl)) then
         return nil, "输入参数错误"
     end
-  
+
     return self:handleResponse(function()
         return self.client:deleteBook({
-  
+
             v = os.time(),
             name = bookinfo.name,
             author = bookinfo.author,
@@ -140,14 +137,13 @@ function M:saveBook(bookinfo, callback)
         timeouts = {6, 8}
     }, 'deleteBook')
   end
-  
+
   function M:getChapterList(bookinfo, callback)
-    if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then 
+    if not (H.is_tbl(bookinfo) and bookinfo.bookUrl) then
       return nil, "参数错误"
     end
-  
+
     local bookUrl = bookinfo.bookUrl
-    -- refresh=true：仅清除缓存场景强制绕过服务器目录缓存
     local refresh = bookinfo.refresh == true and 1 or 0
     return self:handleResponse(function()
           return self.client:getChapterList({
@@ -159,17 +155,16 @@ function M:saveBook(bookinfo, callback)
       timeouts = {10, 18}
   }, 'getChapterList')
   end
-  
+
   function M:getBookContent(chapter, callback)
     local bookUrl = chapter.bookUrl
     local down_chapters_index = chapter.chapters_index
-  
+
     if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
         return nil, 'getBookContent参数错误'
     end
-  
+
     return self:handleResponse(function()
-        -- data=string
         return self.client:getBookContent({
             url = bookUrl,
             index = down_chapters_index,
@@ -183,11 +178,11 @@ function M:saveBook(bookinfo, callback)
 function M:refreshBookContent(chapter, callback)
     local bookUrl = chapter.bookUrl
     local down_chapters_index = chapter.chapters_index
-  
+
     if not H.is_str(bookUrl) or not H.is_num(down_chapters_index) then
         return nil, '刷新章节出错'
     end
-    
+
     return self:handleResponse(function()
         return self.client:getBookContent({
             url = bookUrl,
@@ -199,13 +194,13 @@ function M:refreshBookContent(chapter, callback)
         timeouts = {10, 20}
     }, 'refreshBookContent')
   end
-  
+
   function M:saveBookProgress(chapter, callback)
     if not (H.is_str(chapter.name) and H.is_str(chapter.bookUrl)) then
         return nil, '参数错误'
     end
     local chapters_index = chapter.chapters_index
-  
+
     return self:handleResponse(function()
         local timestamp = os.time()
         return self.client:saveBookProgress({
@@ -224,8 +219,6 @@ function M:refreshBookContent(chapter, callback)
     }, 'saveBookProgress')
   end
 
--- socket.url.escape util.urlEncode + / ? = @会被编码
--- 处理 reader3 服务器版含书名路径有空格等问题
 local function custom_urlEncode(str)
 
     if str == nil then
@@ -257,18 +250,12 @@ local function custom_urlEncode(str)
             return string.format("%%%02X", string.byte(c))
         end
     end)
-    --[[
-    -- socket_url.build_path(socket_url.parse_path(str))
-    return str:gsub("([^%w%-%.%_%~%!%$%&%'%(%)%*%+%,%;%=%:%@%/%?])", function(c)
-        return string.format("%%%02X", string.byte(c))
-    end)
-    ]]
 end
 
 function M:getProxyCoverUrl(coverUrl)
     if not H.is_str(coverUrl) then return coverUrl end
     local server_address = self.settings.server_address
-    
+
     local api_root_url = server_address:gsub("/reader3$", "")
     return socket_url.absolute(api_root_url, coverUrl)
 end
@@ -276,10 +263,9 @@ end
 function M:getProxyImageUrl(_, img_src)
     local res_img_src = H.is_str(img_src) and tostring(img_src) or ""
     local server_address = self.settings.server_address
-    
+
     if res_img_src:find("^https?://") then return res_img_src end
     local api_root_url = server_address:gsub("/reader3$", "")
-    -- <img src='__API_ROOT__/book-assets/guest/剑来_/剑来.cbz/index/1.png' />
     res_img_src = custom_urlEncode(img_src):gsub("^__API_ROOT__", "")
     res_img_src = socket_url.absolute(api_root_url, res_img_src)
     return res_img_src
@@ -290,7 +276,6 @@ function M:getProxyEpubUrl(_, htmlUrl)
     local server_address = self.settings['server_address']
     if server_address:match("/reader3$") and htmlUrl:match("%.x?html$") then
         local api_root_url = server_address:gsub("/reader3$", "")
-        -- 可能有空格 "data": "/book-assets/guest/紫川_老猪/紫川 作者：老猪.epub/index/OEBPS/Text/chapter_0.html"
         htmlUrl = custom_urlEncode(htmlUrl)
         return socket_url.absolute(api_root_url, htmlUrl)
     else
@@ -301,7 +286,7 @@ end
 function M:getBookSourcesList(callback)
     return self:handleResponse(function()
         return self.client:getBookSources({
-            simple = 1,
+            simple = 0,
             v = os.time()
         })
     end, callback, {
@@ -378,10 +363,6 @@ function M:exploreBook(options, callback)
     }, 'exploreBook')
 end
 
-
--- 同步 SSE 流拉取：底层复用 SSEClientCopas（copas 异步 socket），
--- 此处以 copas.sleep 轮询事件队列的方式呈现"同步阻塞"语义给调用方。
--- on_event_sync 返回值驱动流结局：true=提前结束 / "RETRY_LOGIN"=重登录 / 其他非空串=错误
 local function fetch_sse_stream_sync(req_url, timeout_sec, ctx, on_event_sync)
     local copas = require("Legado.vendor.copas")
     local SSEClientCopas = require("Legado.Helper.SSEClientCopas")
@@ -460,7 +441,7 @@ local function fetch_sse_stream_sync(req_url, timeout_sec, ctx, on_event_sync)
         copas.sleep(0.01)
     end
     if not result and not cancelled then
-        drain_queue() -- 流结束后可能还有积压事件
+        drain_queue()
     end
     if cancelled then
         probe_fail("已取消")
@@ -584,7 +565,6 @@ function M:getAvailableBookSource(options, on_finish, on_chunk)
                     if H.is_str(msg) and (msg:find("NEED_LOGIN", 1, true) or msg:find("登录", 1, true)) then
                         return "RETRY_LOGIN"
                     end
-                    -- 返回消息让 fetch 以失败结束并透传到 UI（如"没有更多了"为正常结束信号）
                     return msg or "换源搜索失败"
                 end
                 return false
@@ -637,15 +617,12 @@ function M:getAvailableBookSource(options, on_finish, on_chunk)
 end
 
 function M:changeBookSource(new_book_source, callback)
-    -- origin = bookSourceUrl
-    -- return bookinfo
     if not H.is_tbl(new_book_source) or not H.is_str(new_book_source.bookUrl) or not H.is_str(new_book_source.newUrl) or
         not H.is_str(new_book_source.bookSourceUrl) then
         return nil, '更换书源参数错误'
     end
 
     return self:handleResponse(function()
-        -- data=bookinfo
         return self.client:setBookSource({
             bookUrl = new_book_source.bookUrl,
             bookSourceUrl = new_book_source.bookSourceUrl,
@@ -658,7 +635,7 @@ function M:changeBookSource(new_book_source, callback)
 end
 
 function M:searchBookSingle(options, callback)
-    if not (H.is_tbl(options) and H.is_str(options.search_text) and 
+    if not (H.is_tbl(options) and H.is_str(options.search_text) and
             options.search_text ~= '' and H.is_str(options.book_source_url)) then
         return nil, "输入参数错误"
     end
@@ -668,7 +645,6 @@ function M:searchBookSingle(options, callback)
     local concurrentCount = options.concurrent_count or 32
 
     return self:handleResponse(function()
-        -- data = bookinfolist
         return self.client:searchBook({
             key = search_text,
             bookSourceGroup = '',
@@ -704,7 +680,6 @@ function M:searchBookMulti(options, on_chunk, on_finish)
     local last_index = (H.is_num(options.last_index) and options.last_index >= 0) and options.last_index or -1
     local is_more_call = last_index >= 0
 
-    -- 会话级去重：首搜重置，续搜沿用
     if not is_more_call then
         self._search_dedup = {}
     end
@@ -795,7 +770,6 @@ function M:searchBookMulti(options, on_chunk, on_finish)
                     if H.is_str(msg) and (msg:find("NEED_LOGIN", 1, true) or msg:find("登录", 1, true)) then
                         return "RETRY_LOGIN"
                     end
-                    -- 返回消息让 fetch 以失败结束并透传到 UI（如"没有更多了"为正常结束信号）
                     return msg or "搜索失败"
                 end
                 return false
@@ -856,7 +830,6 @@ function M:searchBookMulti(options, on_chunk, on_finish)
     end
 end
 
--- 仅测试用
 M._parsers = require("Legado.Helper.SSEClientCopas")._parsers
 
 return M

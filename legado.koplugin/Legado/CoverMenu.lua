@@ -27,7 +27,6 @@ local M = Menu:extend{
     _cover_path = nil,
 }
 
--- fix KOReader crash when no_title = true
 function M:mergeTitleBarIntoLayout()
     if self.no_title then return end
     Menu.mergeTitleBarIntoLayout(self)
@@ -44,11 +43,10 @@ function M:init()
     Menu.init(self)
 end
 
--- 封面探测结果缓存, 命中免 get_default_cover_cache 频繁探测
 function M:_coverPath(cache_id)
     if not (H.is_str(cache_id) and cache_id ~= "") then return nil end
     local p = self._cover_path[cache_id]
-    if p ~= nil then return p and p or nil end   -- false 表示探测过不存在
+    if p ~= nil then return p and p or nil end
     p = Backend:get_default_cover_cache(cache_id)
     self._cover_path[cache_id] = p or false
     return p
@@ -91,8 +89,18 @@ local function downloadCover(url, book_cache_id)
     return exists == true
 end
 
+local function freeItemState(item)
+    if type(item) == "table" and item.state then
+        if item.state.free then
+            pcall(item.state.free, item.state)
+        end
+        item.state = nil
+    end
+end
+
 local function buildCoverState(item, cover_w, cover_h, cover_cache_path)
     if type(item) ~= "table" then return nil end
+    freeItemState(item)
     item._is_cover_state = true
 
     local book_cache_id = item.cache_id
@@ -105,7 +113,7 @@ local function buildCoverState(item, cover_w, cover_h, cover_cache_path)
                     width = cover_w,
                     height = cover_h,
                     scale_factor = 0,
-                    file_do_cache = true,
+                    file_do_cache = false,
                     alpha = false,
                     use_legacy_image_scaling = true,
                 }
@@ -161,9 +169,8 @@ function M:_updateCoverItems()
     local cover_w = self._cached_cover_w
 
     local items_on_page = math.min(perpage, total_items - idx_offset)
-    -- 避免 item.state 悬垂
     for _, it in ipairs(self.item_table) do
-        if type(it) == "table" then it.state = nil end
+        freeItemState(it)
     end
     if cover_h then
         for idx = 1, items_on_page do
@@ -322,7 +329,7 @@ function M:updateItems(select_number, no_recalculate_dimen)
     elseif H.is_tbl(self.item_table) then
         for _, item in ipairs(self.item_table) do
             if type(item) == "table" and item._is_cover_state then
-                item.state = nil
+                freeItemState(item)
             end
         end
     end
@@ -347,7 +354,7 @@ function M:onCloseWidget()
     if H.is_tbl(self.item_table) then
         for _, item in ipairs(self.item_table) do
             if type(item) == "table" and item._is_cover_state then
-                item.state = nil
+                freeItemState(item)
             end
         end
     end

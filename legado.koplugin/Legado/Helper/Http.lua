@@ -1,19 +1,15 @@
 local logger = require("logger")
 local image_meta = require("Legado.Helper.image_meta")
+local Error = require("Legado.Helper.Error")
 
---- Common timeout values
--- Large content 块超时 总超时
 local LARGE_BLOCK_TIMEOUT = 10
 local LARGE_TOTAL_TIMEOUT = 30
--- File downloads
 local FILE_BLOCK_TIMEOUT = 15
 local FILE_TOTAL_TIMEOUT = 60
--- Upstream defaults
 local DEFAULT_BLOCK_TIMEOUT = 60
 local DEFAULT_TOTAL_TIMEOUT = -1
 
 local default_headers = {
-    -- Use a modern UA to avoid CDN/WAF blocking outdated or niche devices
     ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 }
 
@@ -28,14 +24,6 @@ local function calc_block_timeout(total_timeout)
     return block_timeout
 end
 
---[[
-    return block_timeout, total_timeout.
-    参数 options.timeout 两种写法：
-      1. number : 总超时（total timeout），block timeout 由 calc_block_timeout 计算
-      2. table: { block_timeout, total_timeout },  两项都必须是数字，缺值/非法回退默认值
-    默认值: 文件下载 {FILE_BLOCK_TIMEOUT, FILE_TOTAL_TIMEOUT}，
-                    普通请求 {DEFAULT_BLOCK_TIMEOUT, DEFAULT_TOTAL_TIMEOUT}。
-]]
 local function resolve_timeouts(options, is_file)
     options = options or {}
     local total_timeout
@@ -92,9 +80,23 @@ local function get_extension_from_mimetype(content_type)
     return extensions[mime]
 end
 
--- =========================================================================
--- Transport 驱动分离：解耦同步 (LuaSocket) 与 协程异步 (Copas) 传输细节
--- =========================================================================
+local function bounded_sink(sink, opts)
+    local progress=opts.progress
+    if not progress then return sink end
+    return function(chunk, err)
+        if chunk then progress.bytes_received=progress.bytes_received+#chunk end
+        if opts.deadline and opts.clock() >= opts.deadline then
+            progress.kind="limit_exceeded"
+            return nil,"resource deadline exceeded"
+        end
+        if opts.max_bytes and progress.bytes_received > opts.max_bytes then
+            progress.kind="limit_exceeded"
+            return nil,"resource byte limit exceeded"
+        end
+        return sink(chunk,err)
+    end
+end
+
 local SyncTransport = {}
 
 function SyncTransport.request(opts)
@@ -122,15 +124,17 @@ function SyncTransport.request(opts)
         url = opts.url,
         method = opts.method,
         headers = opts.headers,
-        sink = response_sink,
+        sink = bounded_sink(response_sink, opts),
         source = opts.source,
         redirect = opts.redirect,
+        proxy = opts.proxy,
         create = (opts.is_create and opts.is_http) and socketutil.tcp or nil,
     }
 
     socketutil:set_timeout(opts.block_timeout, opts.total_timeout)
-    local code, headers, status = socket.skip(1, http.request(request))
+    local ok, result, code, headers, status = pcall(http.request, request)
     socketutil:reset_timeout()
+    if not ok then return nil, nil, "request interrupted:" .. Error.extract_message(result) end
 
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
         return nil, nil, "request interrupted:" .. tostring(code)
@@ -151,15 +155,16 @@ function CopasTransport.request(opts)
         url = opts.url,
         method = opts.method,
         headers = opts.headers,
-        sink = response_sink,
+        sink = bounded_sink(response_sink, opts),
         source = opts.source,
         redirect = opts.redirect,
+        proxy = opts.proxy,
         timeout = opts.block_timeout,
     }
 
     local pcall_ok, ok, code, headers, status = pcall(copas_http.request, request)
     if not pcall_ok then
-        local err_str = type(ok) == "table" and tostring(ok[1] or ok) or tostring(ok)
+        local err_str = Error.extract_message(ok)
         if err_str:find("timeout") then
             return nil, nil, "request interrupted:timeout"
         end
@@ -167,7 +172,7 @@ function CopasTransport.request(opts)
     end
 
     if not ok then
-        local err_str = type(code) == "table" and tostring(code[1] or code) or tostring(code)
+        local err_str = Error.extract_message(code)
         if err_str:find("timeout") then
             return nil, nil, "request interrupted:timeout"
         end
@@ -183,34 +188,52 @@ local function pGetUrlContent(options, is_create)
     local socket_url = require("socket.url")
 
     local url = options.url
+    local probe_url = options.probe_url or url
     local file_fp = options.file
     local is_pic = options.is_pic
     local is_file = file_fp ~= nil
     local method = (type(options.method) == "string" and options.method ~= "") and options.method:upper() or "GET"
 
     local block_timeout, total_timeout = resolve_timeouts(options, is_file)
+    local clock=options.clock or os.time
+    local progress=(options.max_bytes or options.deadline) and {bytes_received=0}
+    local function failed(message, kind, known)
+        return false,message,progress and {bytes_received=known and progress.bytes_received or nil,
+            kind=kind or progress.kind or "download_failed"}
+    end
 
     local function close_file()
         if file_fp then pcall(function() file_fp:close() end) end
     end
 
+    if options.deadline then
+        local remaining=options.deadline-clock()
+        if remaining <= 0 then
+            close_file()
+            return failed("request interrupted:deadline","limit_exceeded",true)
+        end
+        block_timeout=math.min(block_timeout,remaining)
+        total_timeout=total_timeout > 0 and math.min(total_timeout,remaining) or remaining
+    end
     local is_copas = Probe.is_copas()
 
     if type(url) ~= "string" or url == "" then
         close_file()
         Probe.fail("Http", method, '""', nil, "Invalid URL")
-        return false, "Invalid URL"
+        return failed("Invalid URL")
     end
 
     local parsed = socket_url.parse(url)
     if not parsed or (parsed.scheme ~= "http" and parsed.scheme ~= "https") then
         close_file()
         local reason = "Unsupported protocol: " .. tostring(parsed and parsed.scheme)
-        Probe.fail("Http", method, tostring(url), nil, reason)
-        return false, "Unsupported protocol"
+        Probe.fail("Http", method, probe_url, nil, options.probe_url and "Unsupported protocol" or reason)
+        return failed("Unsupported protocol")
     end
 
-    local t_start = Probe.start("Http", method, tostring(url), string.format("(timeout: block=%ss, total=%ss)", block_timeout, total_timeout))
+    local t_start = Probe.start("Http", method, probe_url, function()
+        return string.format("(timeout: block=%ss, total=%ss)", block_timeout, total_timeout)
+    end)
 
     local req_headers = {}
     if type(options.headers) == "table" then
@@ -235,6 +258,11 @@ local function pGetUrlContent(options, is_create)
         headers = req_headers,
         source = options.source,
         redirect = options.redirect,
+        proxy = options.proxy,
+        progress = progress,
+        max_bytes = options.max_bytes,
+        deadline = options.deadline,
+        clock = clock,
         file_fp = file_fp,
         sink_table = sink,
         block_timeout = block_timeout,
@@ -243,25 +271,29 @@ local function pGetUrlContent(options, is_create)
         is_http = parsed.scheme == "http",
     })
 
+    if progress and (progress.kind or (options.deadline and clock() >= options.deadline)) then
+        close_file()
+        Probe.fail("Http", method, probe_url, t_start, "Resource receive limit exceeded")
+        return failed("Resource receive limit exceeded","limit_exceeded",progress.kind~=nil or type(code)=="number")
+    end
     if not code and status and status:find("^request interrupted") then
         close_file()
-        Probe.fail("Http", method, tostring(url), t_start, status)
-        return false, status
+        Probe.fail("Http", method, probe_url, t_start, options.probe_url and "Request interrupted" or status)
+        return failed(status)
     end
 
     if headers == nil then
         close_file()
-        Probe.fail("Http", method, tostring(url), t_start, "No HTTP headers")
-        return false, "Network or remote server unavailable"
+        Probe.fail("Http", method, probe_url, t_start, "No HTTP headers")
+        return failed("Network or remote server unavailable")
     end
 
-    if type(code) ~= 'number' or code < 200 or code > 299 then
+    if type(code) ~= 'number' or (not options.raw_response and (code < 200 or code > 299)) then
         close_file()
-        Probe.fail("Http", method, tostring(url), t_start, "HTTP " .. tostring(code))
-        return false, "Remote server error or unavailable"
+        Probe.fail("Http", method, probe_url, t_start, "HTTP " .. tostring(code))
+        return failed("Remote server error or unavailable")
     end
 
-    -- 图片请求：Content-Type 明确非图片（text/*, application/json, xml）→ 提前失败
     if is_pic and headers and headers["content-type"] then
         local mime = headers["content-type"]:match("^%s*([^;%s]+)")
         if mime then
@@ -270,8 +302,8 @@ local function pGetUrlContent(options, is_create)
                     or mime == "application/xml"
                     or mime == "application/xhtml+xml" then
                 close_file()
-                Probe.fail("Http", method, tostring(url), t_start, "Invalid image MIME " .. mime)
-                return false, "server error: Content-Type " .. mime
+                Probe.fail("Http", method, probe_url, t_start, options.probe_url and "Invalid image MIME" or ("Invalid image MIME " .. mime))
+                return failed("server error: Content-Type " .. mime)
             end
         end
     end
@@ -283,8 +315,8 @@ local function pGetUrlContent(options, is_create)
             local content_length = tonumber(headers["content-length"])
             if content_length and #content ~= content_length then
                 close_file()
-                Probe.fail("Http", method, tostring(url), t_start, "Incomplete content")
-                return false, "Incomplete content received"
+                Probe.fail("Http", method, probe_url, t_start, "Incomplete content")
+                return failed("Incomplete content received")
             end
         end
     end
@@ -297,16 +329,19 @@ local function pGetUrlContent(options, is_create)
             extension = image_meta.sniff_format(content)
         end
     end
-    
+
     close_file()
 
-    local size_str = is_file and "file" or Probe.format_bytes(content and #content or 0)
-    Probe.done("Http", method, tostring(url), t_start, code, size_str, extension)
+    Probe.done("Http", method, probe_url, t_start, code, function()
+        return is_file and "file" or Probe.format_bytes(content and #content or 0)
+    end, extension)
 
     return true, {
         data = content,
         ext = extension,
-        headers = headers
+        headers = headers,
+        code = code,
+        bytes_received = progress and progress.bytes_received,
     }
 end
 
