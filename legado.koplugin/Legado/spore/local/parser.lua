@@ -25,8 +25,8 @@ local Reader = {
     _json = nil,
     _loaded_path = nil,
     _library_validation = nil,
-    MIN_EXTENSION_VERSION = "1.1.2",
-    PINNED_EXTENSION_VERSION = "1.1.2",
+    MIN_EXTENSION_VERSION = "1.1.4",
+    PINNED_EXTENSION_VERSION = "1.1.4",
 }
 
 local function is_android_platform()
@@ -242,22 +242,7 @@ end
 
 Reader.removeAndroidPrivateLibrary = Reader.removeRuntimeCopy
 
-function Reader.compare_versions(v1, v2)
-    local function parse(v)
-        local parts = {}
-        for num in tostring(v or ""):gmatch("%d+") do
-            table.insert(parts, tonumber(num) or 0)
-        end
-        return parts
-    end
-    local p1, p2 = parse(v1), parse(v2)
-    for i = 1, math.max(#p1, #p2) do
-        local n1, n2 = p1[i] or 0, p2[i] or 0
-        if n1 > n2 then return 1 end
-        if n1 < n2 then return -1 end
-    end
-    return 0
-end
+Reader.compare_versions = require("Legado/Helper").compare_versions
 
 function Reader.get_version()
     if not Reader._lib_handle then
@@ -496,6 +481,14 @@ local function call_and_parse(symbol, mode, ...)
         for operation, handler in pairs(RSA.new():handlers()) do handlers[operation] = handler end
         local Compression = require("Legado.spore.local.providers.compression")
         for operation, handler in pairs(Compression.new():handlers()) do handlers[operation] = handler end
+        handlers["reader.config.snapshot"] = function()
+            return require("Legado.spore.local.providers.read_config").snapshot()
+        end
+        local font
+        handlers["font.parse"] = function(arguments)
+            if not font then font = require("Legado.spore.local.providers.font") end
+            return font.parse(arguments)
+        end
         local chinese
         handlers["text.chinese.convert"] = function(arguments)
             if not chinese then

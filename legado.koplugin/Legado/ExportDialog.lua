@@ -49,9 +49,6 @@ function CbzExporter:package()
     local output_path = FS.joinPath(output_dir, safe_filename .. ".cbz")
     local cbz_path_tmp = output_path .. '.tmp'
 
-    if util.fileExists(output_path) then
-        pcall(util.removeFile, output_path)
-    end
     if util.fileExists(cbz_path_tmp) then
         pcall(util.removeFile, cbz_path_tmp)
     end
@@ -79,78 +76,64 @@ function CbzExporter:package()
         }
     end
 
-    local mime_ok, mime_err = cbz:add("mimetype", self:createMimetype(), true)
-    if not mime_ok then
-        cbz:close()
-        return {
-            success = false,
-            error = "无法写入 mimetype: " .. tostring(mime_err)
-        }
+    local chapter_reader
+    local function addFile(path, content, no_compress)
+        local ok, err = cbz:add(path, content, no_compress)
+        if not ok then error("无法写入 " .. path .. ": " .. tostring(err), 0) end
     end
 
-    local current_progress = 0
-    local image_index = 1
-    local total_pages = 0
-
-    for _, cache_chapter in ipairs(self.cache_chapters) do
-
-        if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) then
-            if cache_chapter.cacheFilePath:match("%.cbz$") then
-                local chapter_reader = ZipUtil.Reader:new()
-                if chapter_reader and chapter_reader:open(cache_chapter.cacheFilePath) then
-                    chapter_reader:iterate(function(entry)
-                        if entry.path:find("ComicInfo%.xml$") then return true end
-                        local ext = get_image_ext(entry.path)
-                        if entry.mode == "file" and ext then
-                            local img_data = chapter_reader:extractToMemory(entry.path)
-                            if img_data then
-                                local new_name = string.format("%04d.%s", image_index, ext)
-
-                                cbz:add(new_name, img_data)
-
-                                image_index = image_index + 1
-                                total_pages = total_pages + 1
-                            end
-                        end
-                        return true
-                    end)
-                    chapter_reader:close()
-                else
-                    logger.warn("无法解压章节 CBZ（无可用解压库）:", cache_chapter.cacheFilePath)
-                end
-            end
-            else
-                local img_ext = get_image_ext(cache_chapter.cacheFilePath)
-                if H.is_str(img_ext) and util.fileExists(cache_chapter.cacheFilePath) then
-                    local img_data = util.readFromFile(cache_chapter.cacheFilePath, "rb")
-                    if img_data then
-                        local new_name = string.format("%04d.%s", image_index, img_ext:lower())
-                        cbz:add(new_name, img_data)
+    local write_ok, write_err = pcall(function()
+        addFile("mimetype", self:createMimetype(), true)
+        local image_index = 1
+        local total_pages = 0
+        for current_progress, chapter in ipairs(self.cache_chapters) do
+            local path = chapter.cacheFilePath
+            if not H.is_str(path) then error("章节缓存路径无效", 0) end
+            if path:match("%.cbz$") then
+                chapter_reader = ZipUtil.Reader:new()
+                if not chapter_reader then error("无法创建章节解压器", 0) end
+                local ok, err = chapter_reader:open(path)
+                if not ok then error("无法解压章节: " .. tostring(err), 0) end
+                chapter_reader:iterate(function(entry)
+                    if entry.path:find("ComicInfo%.xml$") then return true end
+                    local ext = get_image_ext(entry.path)
+                    if entry.mode == "file" and ext then
+                        local data, extract_err = chapter_reader:extractToMemory(entry.path)
+                        if not data then error("无法读取图片: " .. tostring(extract_err), 0) end
+                        addFile(string.format("%04d.%s", image_index, ext), data)
                         image_index = image_index + 1
                         total_pages = total_pages + 1
                     end
-                end
+                    return true
+                end)
+                chapter_reader:close()
+                chapter_reader = nil
+            else
+                local ext = get_image_ext(path)
+                if not H.is_str(ext) then error("不支持的章节缓存: " .. path, 0) end
+                local data = util.readFromFile(path, "rb")
+                if not data then error("无法读取章节图片: " .. path, 0) end
+                addFile(string.format("%04d.%s", image_index, ext:lower()), data)
+                image_index = image_index + 1
+                total_pages = total_pages + 1
             end
-
-        current_progress = current_progress + 1
-        if H.is_func(self.reportProgress) then
-            self.reportProgress(current_progress)
+            if H.is_func(self.reportProgress) then self.reportProgress(current_progress) end
         end
+        if total_pages == 0 then error("没有可导出的图片", 0) end
+        addFile("ComicInfo.xml", self:createComicInfo(total_pages), true)
+    end)
+    if chapter_reader then pcall(chapter_reader.close, chapter_reader) end
+    local close_ok, closed, close_err = pcall(cbz.close, cbz)
+    if not write_ok or not close_ok or not closed then
+        pcall(util.removeFile, cbz_path_tmp)
+        return {success = false, error = tostring(not write_ok and write_err
+            or (not close_ok and closed or close_err) or "无法关闭 CBZ 文件")}
     end
 
-    local comic_info = self:createComicInfo(total_pages)
-    cbz:add("ComicInfo.xml", comic_info, true)
-
-    if cbz and cbz.close then
-        cbz:close()
-    end
-
-    if util.fileExists(output_path) then
-        util.removeFile(output_path)
-    end
-
-    if util.fileExists(cbz_path_tmp) then
-        os.rename(cbz_path_tmp, output_path)
+    local renamed, rename_err = os.rename(cbz_path_tmp, output_path)
+    if not renamed then
+        pcall(util.removeFile, cbz_path_tmp)
+        return {success = false, error = "无法重命名 CBZ 文件: " .. tostring(rename_err)}
     end
 
     return {
@@ -245,7 +228,7 @@ function M:prepareChaptersForExport(bookinfo, only_cached, completion_callback)
     if H.is_tbl(self.chapter_cache_status) then
         cache_status = self.chapter_cache_status
     else
-        cache_status = Backend:analyzeCacheStatus(book_cache_id)
+        cache_status = Backend:analyzeCacheStatus(book_cache_id, nil, only_cached and bookinfo.book_self_id or nil)
         if not (H.is_tbl(cache_status) and H.is_tbl(cache_status.cached_chapters) and H.is_tbl(cache_status.uncached_chapters)) then
             return completion_callback(false, { error = "查询章节缓存状态出错" })
         end
@@ -583,7 +566,7 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, ret
     end)
 end
 
-function M:_buildEpubFile(bookinfo, chapters, export_settings)
+function M:_buildEpubFile(bookinfo, chapters, export_settings, only_cached)
     if not (H.is_tbl(bookinfo) and H.is_tbl(chapters) and #chapters > 0) then
         return {success = false, error = "无效的书籍信息或章节列表" }
     end
@@ -614,10 +597,8 @@ function M:_buildEpubFile(bookinfo, chapters, export_settings)
     local safe_filename = FS.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author))
     local output_path = FS.joinPath(output_dir, safe_filename .. ".epub")
 
-    if util.fileExists(output_path) then pcall(util.removeFile, output_path) end
-
-    local cover_path
-    if bookinfo.coverUrl then
+    local cover_path = require("Legado.Helper.ImageUtil").get_default_cover_cache(book_cache_id)
+    if not cover_path and not only_cached and bookinfo.coverUrl then
         local ok
         ok, cover_path = pcall(function()
             return Backend:download_cover_img(book_cache_id, bookinfo.coverUrl)
@@ -655,7 +636,7 @@ end
 function M:_processEpubExport(bookinfo, chapters, only_cached)
     local export_settings = self:getEpubExportSettings()
     TaskProg.loading("正在统计已缓存章节", function()
-        return self:_buildEpubFile(bookinfo, chapters, export_settings)
+        return self:_buildEpubFile(bookinfo, chapters, export_settings, only_cached)
     end, function(state, build_result)
         if state == true and H.is_tbl(build_result) and build_result.success then
             self:showExportSuccessDialog(build_result, function(path)
@@ -725,7 +706,7 @@ function M:_generateBookFile(bookinfo, only_cached, is_comic)
     end)
 end
 
-function M:exportBook()
+function M:exportBook(only_cached)
     local bookinfo = self.bookinfo
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
         self:showExportErrorDialog("书籍信息错误")
@@ -735,12 +716,12 @@ function M:exportBook()
     local book_cache_id = bookinfo.cache_id
     local chapter_count = self:_getChapterCount(book_cache_id)
     if not chapter_count or chapter_count == 0 then
-        self:showExportErrorDialog("该书没有章节,请刷新")
+        self:showExportErrorDialog(only_cached and "缺少本地章节目录，无法离线导出" or "该书没有章节,请刷新")
         return
     end
 
     TaskProg.loading("正在统计已缓存章节", function()
-        return Backend:analyzeCacheStatus(book_cache_id)
+        return Backend:analyzeCacheStatus(book_cache_id, nil, only_cached and bookinfo.book_self_id or nil)
     end, function(state, response)
         if not (state == true and H.is_tbl(response) and H.is_tbl(response.cached_chapters) and H.is_tbl(response.uncached_chapters)) then
             return self:showExportErrorDialog("查询章节缓存状态出错")
@@ -748,26 +729,41 @@ function M:exportBook()
 
         self.chapter_cache_status = response
         local cached_count = self.chapter_cache_status.cached_count
-        local is_comic = Backend:isBookTypeComic(book_cache_id)
+        local route = Backend:bookReaderRoute(book_cache_id)
+        local is_comic = route == "comic"
+            or (route ~= "reader" and Backend:bookContentType(bookinfo) == "comic")
         local export_type = is_comic and "CBZ" or "EPUB"
 
-        local export_select_callback = function(only_cached)
-            if only_cached and cached_count == 0 then
+        local export_select_callback = function(cached_only)
+            if cached_only and cached_count == 0 then
                 self:showExportErrorDialog("没有已缓存的章节")
                 return
             end
             UIManager:nextTick(function()
-                self:_generateBookFile(bookinfo, only_cached, is_comic)
+                self:_generateBookFile(bookinfo, cached_only, is_comic)
             end)
         end
 
+        local other_buttons = {{
+            text = "自定义设置",
+            callback = function() self:showEpubExportSettings() end,
+        }}
+        if not only_cached then
+            table.insert(other_buttons, {
+                text = "全书导出",
+                callback = function() export_select_callback(false) end,
+            })
+        end
+        local hint = only_cached and "仅导出本地缓存，不下载章节或封面"
+            or "全书导出需要下载所有章节，可能需要一些时间"
         MessageBox:confirm(string.format(
-            "是否导出 <<%s>> 为 %s 文件？\n\n作者：%s\n总章节数：%d\n已缓存章节：%d\n\n全书导出需要下载所有章节，可能需要一些时间",
+            "是否导出 <<%s>> 为 %s 文件？\n\n作者：%s\n总章节数：%d\n已缓存章节：%d\n\n%s",
             bookinfo.name or "未命名",
             export_type,
             bookinfo.author or "未知作者",
             chapter_count,
-            cached_count
+            cached_count,
+            hint
         ), function(result)
             if not result then return end
             export_select_callback(true)
@@ -775,19 +771,7 @@ function M:exportBook()
             ok_text = "仅已缓存",
             cancel_text = "取消",
             other_buttons_first = true,
-            other_buttons = {{
-                {
-                    text = "自定义设置",
-                    callback = function()
-                        self:showEpubExportSettings()
-                    end
-                }, {
-                    text = "全书导出",
-                    callback = function()
-                        export_select_callback(false)
-                    end
-                }
-            }}
+            other_buttons = {other_buttons},
         })
     end)
 end

@@ -1,8 +1,6 @@
 local BD = require("ui/bidi")
 local Font = require("ui/font")
 local util = require("util")
-local logger = require("logger")
-local dbg = require("dbg")
 local Blitbuffer = require("ffi/blitbuffer")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
@@ -22,10 +20,6 @@ local MessageBox = require("Legado/MessageBox")
 local TaskProg = require("Legado.task.Progress")
 local H = require("Legado/Helper")
 local PlgState = require("Legado/PlgState")
-
-if not dbg.log then
-    dbg.log = logger.dbg
-end
 
 local ChapterListing = Menu:extend{
     name = "chapter_listing",
@@ -53,6 +47,8 @@ local ChapterListing = Menu:extend{
     expand_button = nil,
     collapse_button = nil,
     toc_indent = nil,
+    _opening_chapter = nil,
+    _force_refresh_after_clear = nil,
 }
 
 function ChapterListing:init()
@@ -407,6 +403,8 @@ function ChapterListing:refreshVisibleItems(target_raw_index)
 end
 
 function ChapterListing:onClose()
+    self._opening_chapter = nil
+    self._force_refresh_after_clear = nil
     Backend:closeDbManager()
     self:onReturn()
 end
@@ -421,6 +419,9 @@ function ChapterListing:onReturn()
 end
 
 function ChapterListing:onCloseWidget()
+    self._opening_chapter = nil
+    self._force_refresh_after_clear = nil
+    self.item_table_stack = {}
     Backend:closeDbManager()
     Menu.onCloseWidget(self)
 end
@@ -518,9 +519,9 @@ function ChapterListing:onMenuSelect(item, pos)
 end
 
 function ChapterListing:onMenuChoice(item)
-    if item.chapters_index == nil or item.isVolume then
-        return true
-    end
+    if item.chapters_index == nil or item.isVolume then return true end
+    if self._opening_chapter then return true end
+    self._opening_chapter = true
     local book_cache_id = self.bookinfo.cache_id
     local chapters_index = item.chapters_index
 
@@ -606,10 +607,10 @@ function ChapterListing:onMenuHold(item)
                 value_max = tonumber(self.all_chapters_count),
                 value_step = 1,
                 value_hold_step = 5,
-                ok_text = "下载",
-                title_text = "请选择需下载的章数：",
+                ok_text = "缓存",
+                title_text = "请选择需缓存的章数：",
                 info_text = "(点击中间数字可直接输入)",
-                extra_text = Icons.FA_DOWNLOAD .. " 下载本章后全部",
+                extra_text = Icons.FA_DOWNLOAD .. " 缓存本章后全部",
                 callback = function(autoturn_spin)
                     require("Legado/ExportDialog"):new({
                         bookinfo = self.bookinfo
@@ -707,7 +708,7 @@ end
 function ChapterListing:syncProgressShow(chapter)
     local method = H.is_tbl(chapter) and "saveBookProgress" or "getBookshelf"
     if not Backend:supportsProviderMethod(method) then
-        MessageBox:notice(H.is_tbl(chapter) and "当前模式不支持上传阅读进度" or "当前模式不支持拉取阅读进度")
+        MessageBox:notice(H.is_tbl(chapter) and "当前模式不支持上传" or "当前模式不支持拉取")
         return
     end
 
@@ -736,11 +737,10 @@ function ChapterListing:syncProgressShow(chapter)
                     local bookinfo = Backend:getBookInfoCache(bookCacheId)
                     if H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex) then
                         self.bookinfo = bookinfo
-                        Backend:MarkReadChapter({
+                        Backend.dbManager:updateIsRead({
                             book_cache_id = bookCacheId,
                             chapters_index = bookinfo.durChapterIndex,
-                            isRead = true
-                        }, true)
+                        }, true, true)
                         if UIManager:isWidgetShown(self) then
                             self:refreshItems(true, true)
                         end
@@ -778,7 +778,7 @@ function ChapterListing:openMenu()
         end)
     end
 
-    local buttons = {{},{{
+    local buttons = {{{
         text = Icons.FA_GLOBE .. " 切换书源",
         callback = function()
             if not NetworkMgr:isConnected() then
@@ -847,7 +847,14 @@ function ChapterListing:openMenu()
             }
             UIManager:show(source_dialog)
         end,
-        align = "left",
+        align = "center",
+    }, {
+        text = Icons.FA_REFRESH .. " 刷新",
+        callback = function()
+            UIManager:close(dialog)
+            self:onRefreshChapters()
+        end,
+        align = "center",
     }}, {{
         text = Icons.FA_EXCHANGE .. " " .. (Backend:chapterSortingMode(self.bookinfo.cache_id) == "ASC" and "目录倒序" or "目录正序"),
         callback = function()
@@ -855,63 +862,22 @@ function ChapterListing:openMenu()
             self:toggleSortMode()
         end,
         align = "left",
-    }}, {{
-        text = Icons.FA_DOWNLOAD .. " 本书缓存",
-        callback = function()
-            UIManager:close(dialog)
-            MessageBox:confirm(
-                    string.format("《%s》: \n\n (部分书源存在访问频率限制，如遇章节缺失或内容不完整，可尝试: \n  长按章节分章下载、调低并发下载数)", self.bookinfo.name),
-                    function(result)
-                        if result then
-                            require("Legado/ExportDialog"):new({
-                                bookinfo = self.bookinfo
-                            }):cacheAllChapters(function(success)
-                                self:refreshItems(true)
-                            end)
-                        end
-                    end,
-                    {
-                        ok_text = "缓存全书",
-                        cancel_text = "取消",
-                        other_buttons_first = true,
-                        other_buttons = {{{
-                            text = "导出书籍",
-                            callback = function()
-                                require("Legado/ExportDialog"):new({ bookinfo = self.bookinfo }):exportBook()
-                            end,
-                        }, {
-                            text = "清除缓存",
-                            callback = function()
-                                MessageBox:confirm(
-                                    "请确认清除本书缓存：\n",
-                                    function(result)
-                                        if not result then return end
-                                        Backend:closeDbManager()
-                                        TaskProg.loading("清理中 ", function()
-                                            return Backend:cleanBookCache(self.bookinfo.cache_id, self.bookinfo)
-                                        end, function(state, response)
-                                            if state == true then
-                                                Backend:HandleResponse(response, function()
-                                                    self._force_refresh_after_clear = true
-                                                    MessageBox:success("已清理，可刷新目录")
-                                                    self:onReturn()
-                                                end, function(err_msg)
-                                                    MessageBox:error('请稍后重试：', err_msg)
-                                                end)
-                                            else
-                                                MessageBox:error("清理失败：", tostring(response))
-                                            end
-                                        end)
-                                end)
-                            end,
-                        }}},
-                    }
-                )
-        end,
-        align = "left",
     }},}
-    if Backend:supportsProviderMethod("getBookshelf") then
-        table.insert(buttons, 4, pull_progress_button)
+    if Backend:usesLocalTextTransform() then
+        table.insert(buttons, {{
+            text = Icons.FA_PAINT_BRUSH .. " 净化规则",
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                local result, err = Backend:getBookReplaceRules(self.bookinfo)
+                if not result then return MessageBox:error(err) end
+                if #result.rules == 0 then
+                    return MessageBox:notice("本书暂无适用净化规则")
+                end
+                require("Legado.spore.local.replace_rules").showRules(
+                    result.rules, result.dialect, "本书适用规则")
+            end,
+        }})
     end
 
     if self.has_volume then
@@ -922,8 +888,8 @@ function ChapterListing:openMenu()
                 break
             end
         end
-        table.insert(buttons, 4, {{
-            text = Icons.FA_FOLDER .. " " .. (all_expanded and "折叠全部目录" or "展开全部目录"),
+        table.insert(buttons[2], {
+            text = Icons.FA_FOLDER .. " " .. (all_expanded and "折叠目录" or "展开目录"),
             callback = function()
                 UIManager:close(dialog)
                 if all_expanded then
@@ -932,8 +898,12 @@ function ChapterListing:openMenu()
                     self:expandAll()
                 end
             end,
-            align = "left",
-        }})
+            align = "center",
+        })
+    end
+
+    if Backend:supportsProviderMethod("getBookshelf") then
+        table.insert(buttons, pull_progress_button)
     end
 
     local stream_mode_item =self:getStreamModeItem(function()
@@ -941,17 +911,6 @@ function ChapterListing:openMenu()
     end)
     if H.is_tbl(stream_mode_item) then
         table.insert(buttons, stream_mode_item)
-    end
-
-    if not Device:isTouchDevice() then
-        table.insert(buttons, {{
-            text = Icons.FA_REFRESH .. ' ' .. "刷新目录",
-            callback = function()
-                UIManager:close(dialog)
-                self:onRefreshChapters()
-            end,
-            align = "left",
-        }})
     end
 
     table.insert(buttons, {{
@@ -989,18 +948,13 @@ function ChapterListing:openMenu()
         align = "left",
     }})
 
-    local book_cache_id = self.bookinfo.cache_id
-    local lastUpdated = Backend:getChapterLastUpdateTime(book_cache_id)
-    lastUpdated = tonumber(lastUpdated)
-
     local dimen
     if self.title_bar and self.title_bar.left_button and self.title_bar.left_button.image then
         dimen = self.title_bar.left_button.image.dimen
     end
     dialog = ButtonDialog:new{
-        title = os.date("%m-%d %H:%M", lastUpdated),
+        title = "目录操作",
         title_align = "left",
-        info_face = Font:getFace("tfont"),
         buttons = buttons,
         shrink_unneeded_width = true,
         anchor = dimen and function()

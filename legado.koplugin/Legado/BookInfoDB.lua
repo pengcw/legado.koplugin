@@ -33,7 +33,7 @@ local function custom_concat(tbl, sep)
     return table.concat(result, sep)
 end
 
-local BOOKINFO_DB_VERSION = 20261012
+local BOOKINFO_DB_VERSION = 20261102
 
 local function encode_variable(value)
     if value == nil then return nil end
@@ -165,9 +165,11 @@ CREATE TABLE IF NOT EXISTS chapters (
     title TEXT DEFAULT '',             
     chapterUrl TEXT DEFAULT NULL,
     variable TEXT DEFAULT NULL,
-    isVolume INTEGER DEFAULT 0, 
-    
-    
+    isVolume INTEGER DEFAULT 0,
+    tag TEXT DEFAULT NULL,
+    isVip INTEGER DEFAULT NULL,
+    isPay INTEGER DEFAULT NULL,
+
     isRead INTEGER DEFAULT 0,       
     cacheFilePath TEXT DEFAULT NUll,   
     content TEXT DEFAULT NUll,          
@@ -226,7 +228,12 @@ local function _mapBookInfoRow(row, bookShelfId)
     return book
 end
 
-local COLS_CHAPTER_FULL = "c.chapterIndex, c.title, c.isRead, c.cacheFilePath, b.name, b.author, b.bookUrl, b.durChapterIndex, b.durChapterTime, b.totalChapterNum, b.cacheExt, b.origin, c.chapterUrl, c.isVolume, c.variable, b.variable"
+local function nullable_bool(value)
+    if value == nil then return nil end
+    return tonumber(value) == 1
+end
+
+local COLS_CHAPTER_FULL = "c.chapterIndex, c.title, c.isRead, c.cacheFilePath, b.name, b.author, b.bookUrl, b.durChapterIndex, b.durChapterTime, b.totalChapterNum, b.cacheExt, b.origin, c.chapterUrl, c.isVolume, c.variable, b.variable, c.tag, c.isVip, c.isPay, b.durChapterTitle, b.durChapterPos, b.wordCount, b.originName, b.coverUrl, b.kind, b.btype"
 local function _mapChapterRow(row, bookCacheId)
     if not row then return nil end
     return {
@@ -248,7 +255,17 @@ local function _mapChapterRow(row, bookCacheId)
         chapterUrl = row[13],
         isVolume = row[14] == 1,
         variable = row[15],
-        bookVariable = row[16]
+        bookVariable = row[16],
+        tag = row[17],
+        isVip = nullable_bool(row[18]),
+        isPay = nullable_bool(row[19]),
+        durChapterTitle = row[20],
+        durChapterPos = tonumber(row[21]) or 0,
+        wordCount = row[22],
+        originName = row[23],
+        coverUrl = row[24],
+        kind = row[25],
+        btype = tonumber(row[26])
     }
 end
 
@@ -278,7 +295,7 @@ local function _mapChapterRowUI(row)
     }
 end
 
-local COLS_CHAPTER_NOT_DOWNLOADED = "c.chapterIndex, c.title, b.bookUrl, b.name, b.origin, c.chapterUrl, c.variable, b.variable"
+local COLS_CHAPTER_NOT_DOWNLOADED = "c.chapterIndex, c.title, b.bookUrl, b.name, b.origin, c.chapterUrl, c.variable, b.variable, c.tag, c.isVip, c.isPay, b.durChapterIndex, b.durChapterTime, b.totalChapterNum, b.durChapterTitle, b.durChapterPos, b.wordCount, b.author, b.originName, b.coverUrl, b.kind, b.btype"
 local function _mapChapterNotDownloadedRow(row, bookCacheId)
     if not row then return nil end
     return {
@@ -292,6 +309,20 @@ local function _mapChapterNotDownloadedRow(row, bookCacheId)
         chapterUrl = row[6],
         variable = row[7],
         bookVariable = row[8],
+        tag = row[9],
+        isVip = nullable_bool(row[10]),
+        isPay = nullable_bool(row[11]),
+        durChapterIndex = tonumber(row[12]) or 0,
+        durChapterTime = tonumber(row[13]) or 0,
+        totalChapterNum = tonumber(row[14]) or 0,
+        durChapterTitle = row[15],
+        durChapterPos = tonumber(row[16]) or 0,
+        wordCount = row[17],
+        author = row[18],
+        originName = row[19],
+        coverUrl = row[20],
+        kind = row[21],
+        btype = tonumber(row[22]),
     }
 end
 
@@ -472,6 +503,19 @@ function M:_migrateDB()
             WHERE COALESCE(durChapterTime, 0) = 0 AND COALESCE(durChapterIndex, 0) = 0
                 AND EXISTS (SELECT 1 FROM chapters WHERE bookCacheId = books.bookCacheId AND isRead = 1);
         ]])
+    end)
+
+    _migrate_stage(conn, 20261102, function()
+        local existing = {}
+        local stmt = conn:prepare("PRAGMA table_info(chapters);")
+        for row in stmt:rows() do existing[row[2]] = true end
+        stmt:close()
+        for _, definition in ipairs({"tag TEXT", "isVip INTEGER", "isPay INTEGER"}) do
+            local name = definition:match("^(%S+)")
+            if not existing[name] then
+                conn:exec("ALTER TABLE chapters ADD COLUMN " .. definition .. ";")
+            end
+        end
     end)
 end
 
@@ -932,7 +976,7 @@ end
 function M:getAllBookCacheInfo()
     local infos = {}
     local book_rows = self:execute([[
-        SELECT bookCacheId, name, author, totalChapterNum
+        SELECT bookCacheId, name, author, totalChapterNum, bookShelfId, btype, cacheExt, intro
         FROM books
         ORDER BY isEnabled DESC, id DESC;
     ]])
@@ -944,6 +988,10 @@ function M:getAllBookCacheInfo()
                 name = row[2],
                 author = row[3],
                 total_count = tonumber(row[4]) or 0,
+                book_self_id = row[5],
+                btype = tonumber(row[6]),
+                cacheExt = row[7],
+                intro = row[8],
             }
         end
     end
@@ -996,13 +1044,16 @@ function M:upsertChapters(bookCacheId, chapters)
     end
 
     local sql_stmt = [[
-        INSERT INTO chapters (bookCacheId, chapterIndex, title, isVolume, chapterUrl, variable)
-VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO chapters (bookCacheId, chapterIndex, title, isVolume, chapterUrl, variable, tag, isVip, isPay)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(bookCacheId, chapterIndex) DO UPDATE SET
     title = CASE WHEN excluded.title != chapters.title THEN excluded.title ELSE chapters.title END,
     isVolume = CASE WHEN excluded.isVolume != chapters.isVolume THEN excluded.isVolume ELSE chapters.isVolume END,
     chapterUrl = CASE WHEN excluded.chapterUrl IS NOT NULL AND excluded.chapterUrl != '' THEN excluded.chapterUrl ELSE chapters.chapterUrl END,
-    variable = excluded.variable;
+    variable = excluded.variable,
+    tag = excluded.tag,
+    isVip = excluded.isVip,
+    isPay = excluded.isPay;
     ]]
 
     local batch_data = {}
@@ -1014,7 +1065,9 @@ ON CONFLICT(bookCacheId, chapterIndex) DO UPDATE SET
             end
             table.insert(batch_data, {
                 bookCacheId, chapter.index, chapter.title, chapter.isVolume and 1 or 0,
-                chapter.url or chapter.chapterUrl, encode_variable(chapter.variable)
+                chapter.url or chapter.chapterUrl, encode_variable(chapter.variable),
+                chapter.tag, type(chapter.isVip) == "boolean" and (chapter.isVip and 1 or 0) or nil,
+                type(chapter.isPay) == "boolean" and (chapter.isPay and 1 or 0) or nil
             })
 
         end
@@ -1112,19 +1165,22 @@ function M:getChapterLastUpdateTime(bookCacheId)
     end
 end
 
-function M:getChapterInfo(bookCacheId, chapterIndex)
+function M:getChapterInfo(bookCacheId, chapterIndex, bookShelfId)
     if not H.is_str(bookCacheId) or not H.is_num(chapterIndex) then
         logger.dbg('getChapterInfo Incorrect input parameters')
         return {}
     end
 
+    local filter = bookShelfId and "b.bookShelfId = ?" or "b.isEnabled = 1"
+    local params = {bookCacheId, chapterIndex}
+    if bookShelfId then params[3] = bookShelfId end
     local sql_stmt = string.format([[
-    SELECT %s 
+    SELECT %s
     FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId
-    WHERE b.isEnabled = 1 AND c.bookCacheId = ? AND c.chapterIndex = ?;
-    ]], COLS_CHAPTER_FULL)
+    WHERE c.bookCacheId = ? AND c.chapterIndex = ? AND %s;
+    ]], COLS_CHAPTER_FULL, filter)
 
-    local result = self:execute(sql_stmt, {bookCacheId, chapterIndex})
+    local result = self:execute(sql_stmt, params)
 
     if result and #result > 0 then
         return _mapChapterRow(result[1], bookCacheId)
@@ -1636,6 +1692,16 @@ function M:removeBookShelf(bookShelfId)
     return perform_delete(bookShelfId)
 end
 
+function M:getBookSourcesSyncTime(bookShelfId)
+    local rows = self:execute([[
+        SELECT lastSuccessAt FROM sync_records
+        WHERE scopeType = 'bookshelf' AND scopeId = ?
+            AND resourceType = 'book_sources' AND resourceKey = ''
+        LIMIT 1
+    ]], { bookShelfId })
+    return rows and rows[1] and tonumber(rows[1][1]) or 0
+end
+
 function M:tryStartSync(scope_id, resource_type, interval, resource_key)
     if not (H.is_str(scope_id) and scope_id ~= "") then return false end
     if not (H.is_str(resource_type) and resource_type ~= "") then return false end
@@ -1954,6 +2020,22 @@ function M:getBookSourceByUrl(bookShelfId, bookSourceUrl, allow_fallback)
     return nil
 end
 
+function M:getBookSourceRuntimeState(bookShelfId, bookSourceUrl)
+    local rows = self:execute(
+        "SELECT session, loginData FROM book_sources WHERE bookShelfId = ? AND bookSourceUrl = ? LIMIT 1",
+        { bookShelfId or "local", bookSourceUrl }
+    )
+    if type(rows) ~= "table" or #rows == 0 then return nil end
+    local state = {}
+    for i, field in ipairs({ "session", "loginData" }) do
+        if type(rows[1][i]) == "string" then
+            local ok, value = pcall(rapidjson.decode, rows[1][i])
+            if ok and type(value) == "table" then state[field] = value end
+        end
+    end
+    return state
+end
+
 function M:saveBookSourceSession(bookShelfId, bookSourceUrl, session)
     if type(bookShelfId) ~= "string" or type(bookSourceUrl) ~= "string" or bookSourceUrl == "" then
         return false, "invalid book source session key"
@@ -1963,7 +2045,7 @@ function M:saveBookSourceSession(bookShelfId, bookSourceUrl, session)
     if session == nil then
         encoded = self.nil_object()
     else
-        local ok, value = pcall(rapidjson.encode, session)
+        local ok, value = pcall(rapidjson.encode, session, { sort_keys = true })
         if not ok or type(value) ~= "string" then
             return false, "failed to encode book source session"
         end
@@ -1972,8 +2054,8 @@ function M:saveBookSourceSession(bookShelfId, bookSourceUrl, session)
 
     local ok, err = pcall(function()
         self:execute(
-            "UPDATE book_sources SET session = ? WHERE bookShelfId = ? AND bookSourceUrl = ?",
-            { encoded, bookShelfId, bookSourceUrl }
+            "UPDATE book_sources SET session = ? WHERE bookShelfId = ? AND bookSourceUrl = ? AND session IS NOT ?",
+            { encoded, bookShelfId, bookSourceUrl, encoded }
         )
     end)
     if not ok then return false, tostring(err) end
@@ -1990,7 +2072,7 @@ function M:saveBookSourceLoginData(bookShelfId, bookSourceUrl, loginData)
         encoded = self.nil_object()
     else
         if type(loginData) ~= "table" then return false, "login data must be an object" end
-        local ok, value = pcall(rapidjson.encode, loginData)
+        local ok, value = pcall(rapidjson.encode, loginData, { sort_keys = true })
         if not ok or type(value) ~= "string" then
             return false, "failed to encode book source login data"
         end
@@ -1999,11 +2081,13 @@ function M:saveBookSourceLoginData(bookShelfId, bookSourceUrl, loginData)
 
     local ok, err = pcall(function()
         self:execute(
-            "UPDATE book_sources SET loginData = ? WHERE bookShelfId = ? AND bookSourceUrl = ?",
-            { encoded, bookShelfId, bookSourceUrl }
+            "UPDATE book_sources SET loginData = ? WHERE bookShelfId = ? AND bookSourceUrl = ? AND loginData IS NOT ?",
+            { encoded, bookShelfId, bookSourceUrl, encoded }
         )
         if tonumber(self:getDB():rowexec("SELECT changes()")) == 0 then
-            error("书源不存在，未保存凭证", 0)
+            local rows = self:execute("SELECT 1 FROM book_sources WHERE bookShelfId = ? AND bookSourceUrl = ? LIMIT 1",
+                { bookShelfId, bookSourceUrl })
+            if #rows == 0 then error("书源不存在，未保存凭证", 0) end
         end
     end)
     if not ok then return false, tostring(err) end

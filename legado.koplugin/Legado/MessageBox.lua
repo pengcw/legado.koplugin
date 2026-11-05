@@ -136,35 +136,24 @@ function M:input(message, callback, options)
 
     local defaultOptions = {
         title = "",
-
         input_hint = "",
-
         description = _(message),
-
         buttons = {{{
             text = _("Cancel"),
-
             callback = function()
-                if callback then
-                    callback(nil)
-                end
+                if callback then callback(nil) end
                 UIManager:close(dialog)
             end
         }, {
             text = _("OK"),
-
             is_enter_default = true,
-
             callback = function()
                 local input_text = dialog:getInputText()
-                if callback then
-                    callback(input_text)
-                end
+                if callback then callback(input_text) end
                 UIManager:close(dialog)
             end
         }}},
         timeout = nil
-
     }
 
     if not callback then

@@ -124,6 +124,23 @@ M.n_to_b = function(n)
     return n == 1
 end
 
+function M.compare_versions(v1, v2)
+    local function parse(v)
+        local parts = {}
+        for num in tostring(v or ""):gmatch("%d+") do
+            table.insert(parts, tonumber(num) or 0)
+        end
+        return parts
+    end
+    local p1, p2 = parse(v1), parse(v2)
+    for i = 1, math.max(#p1, #p2) do
+        local n1, n2 = p1[i] or 0, p2[i] or 0
+        if n1 > n2 then return 1 end
+        if n1 < n2 then return -1 end
+    end
+    return 0
+end
+
 M.timestamp = function()
     return socket.gettime()
 end

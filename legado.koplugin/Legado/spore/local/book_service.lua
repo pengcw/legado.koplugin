@@ -76,6 +76,7 @@ function BookService.new(source, opts)
         max_pages = opts.max_pages or DEFAULT_MAX_PAGES,
         save_session = opts.save_session,
         load_source = opts.load_source,
+        load_state = opts.load_state,
         session_dirty = false,
         save_login_data = opts.save_login_data,
         login_data = source.login_data,
@@ -102,8 +103,9 @@ end
 
 function BookService:_execute_once(op, params)
     params = params or {}
-    if type(self.load_source) == "function" then
-        local ok, latest_source = pcall(self.load_source, self.source.bookSourceUrl)
+    local load_state = self.load_state or self.load_source
+    if type(load_state) == "function" then
+        local ok, latest_source = pcall(load_state, self.source.bookSourceUrl)
         if ok and type(latest_source) == "table" then
             if not self.session_dirty then
                 self.source.session = type(latest_source.session) == "table" and latest_source.session or nil
@@ -199,6 +201,10 @@ function BookService:login(values, action)
         return nil, login_public_error(response.error)
     end
 
+    local refresh_requested = type(response.data) == "table" and type(response.data.reLoginView) == "table"
+    if refresh_requested and self.session_dirty and type(self.save_session) == "function" then
+        return nil, "登录设置保存失败，未刷新表单"
+    end
     self.login_data = values
     self.source.login_data = values
     if not saved_before_login and type(self.save_login_data) == "function" then
@@ -210,6 +216,7 @@ function BookService:login(values, action)
         if not ok or saved == false then
             Probe.event("Source", "登录凭证", "SAVE_FAILED")
             logger.warn("BookService: login data persistence failed")
+            if refresh_requested then return nil, "登录设置保存失败，未刷新表单" end
         else
             Probe.event("Source", "书源表单", "SAVED")
         end
@@ -230,6 +237,16 @@ function BookService:search(keyword, page)
     })
     if not books then return nil, error_message(err) end
     return apply_source_type_list(self.source, books)
+end
+
+function BookService:explore_action(action)
+    local response, err = self:_execute_once("explore_action", {action = action})
+    if type(response) ~= "table" then return nil, error_message(err) end
+    if response.ok ~= true then return nil, error_message(response.error) end
+    if response.infoMapError or (self.session_dirty and type(self.save_session) == "function") then
+        return nil, "发现设置保存失败，请重试"
+    end
+    return response.data
 end
 
 function BookService:explore_kinds()

@@ -1,8 +1,5 @@
-
 local UIManager = require("ui/uimanager")
-
 local util = require("util")
-
 local ButtonDialog = require("ui/widget/buttondialog")
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")

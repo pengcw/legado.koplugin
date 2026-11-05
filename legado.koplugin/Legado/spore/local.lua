@@ -4,13 +4,22 @@ local Reader = require("Legado.spore.local.parser")
 local logger = require("logger")
 local Probe = require("Legado.Helper.Probe")
 local base = require("Legado.spore.base")
-local util = require("util")
 local errHandler = require("Legado.Helper.Error")
 local BookSourceLogin = require("Legado.Helper.BookSourceLogin")
 
 local function is_str(v) return type(v) == "string" end
 local function is_tbl(v) return type(v) == "table" end
 local function is_func(v) return type(v) == "function" end
+
+local function book_type(book, source)
+    local value = book.type ~= nil and book.type or book.btype
+    if type(value) == "number" and value >= 4 and value % 1 == 0 then return value end
+    if book.type ~= nil then return nil end
+    local category = tonumber(source and source.bookSourceType)
+    if value ~= nil and value ~= category then return nil end
+    if category == 0 then return 8 end
+    if category == 2 then return 64 end
+end
 
 local MAX_AVAILABLE_SOURCE_SEARCH = 100
 
@@ -58,6 +67,7 @@ end
 
 local M = base:extend({
     name = "local",
+    uses_local_text_transform = true,
     client = nil,
     settings = nil,
     _need_login = false,
@@ -98,6 +108,7 @@ function M:init()
         self.source_manager = SourceManager.new({
             save_session = self.save_source_session,
             load_source = self.single_source_loader,
+            load_state = self.source_state_loader,
             save_login_data = self.save_source_login_data
         })
     end
@@ -397,17 +408,6 @@ function M:saveBook(bookinfo, callback)
     end, callback, nil, 'saveBook')
 end
 
-function M:downloadBook(bookinfo, temp)
-    if not (is_tbl(bookinfo) and is_str(bookinfo.bookUrl)) then return nil, "输入参数错误" end
-    local entry = self:_locate_service(bookinfo.bookUrl, bookinfo.origin)
-    if not entry or tonumber(entry.source.bookSourceType) ~= 3 then
-        return nil, "未找到文件下载书源"
-    end
-    local info, err = entry.service:book_info(bookinfo.bookUrl, bookinfo)
-    if not info then return nil, err end
-    return require("Legado.spore.local.file_download").download(info, entry.source, bookinfo, temp)
-end
-
 function M:deleteBook(bookinfo, callback)
     if not (is_tbl(bookinfo) and is_str(bookinfo.name) and is_str(bookinfo.origin) and is_str(bookinfo.bookUrl)) then
         return nil, "输入参数错误"
@@ -439,8 +439,24 @@ function M:getChapterList(bookinfo, callback)
         logger.info("getChapterList 定位书源: " .. tostring(entry.source.bookSourceName)
             .. " (" .. tostring(entry.source.bookSourceUrl) .. ")")
         local toc, err = entry.service:fetch_toc(bookUrl, {
+            bookUrl = bookUrl,
+            origin = bookinfo.origin,
+            originName = bookinfo.originName,
             name = bookinfo.name,
+            author = bookinfo.author,
+            type = book_type(bookinfo, entry.source),
+            kind = bookinfo.kind,
+            coverUrl = bookinfo.coverUrl,
+            tocUrl = bookinfo.tocUrl,
+            intro = bookinfo.intro,
+            latestChapterTitle = bookinfo.latestChapterTitle,
             variable = bookinfo.variable,
+            durChapterIndex = bookinfo.durChapterIndex,
+            durChapterTime = bookinfo.durChapterTime,
+            durChapterPos = bookinfo.durChapterPos,
+            durChapterTitle = bookinfo.durChapterTitle,
+            totalChapterNum = bookinfo.totalChapterNum,
+            wordCount = bookinfo.wordCount,
         }, {
             dialect = bookinfo.textTransformDialect,
             rules = bookinfo.textTransformRules,
@@ -484,8 +500,24 @@ function M:getBookContent(chapter, callback)
         logger.info("getBookContent 定位书源: " .. tostring(entry.source.bookSourceName)
             .. " (" .. tostring(entry.source.bookSourceUrl) .. ")")
         local res, err = entry.service:fetch_content(content_url, {
+            bookUrl = bookUrl,
+            origin = chapter.origin,
+            originName = chapter.originName,
             name = chapter.name,
+            author = chapter.author,
+            type = book_type(chapter, entry.source),
+            kind = chapter.kind,
+            coverUrl = chapter.coverUrl,
+            tocUrl = chapter.tocUrl,
+            intro = chapter.intro,
+            latestChapterTitle = chapter.latestChapterTitle,
             variable = chapter.bookVariable,
+            durChapterIndex = chapter.durChapterIndex,
+            durChapterTime = chapter.durChapterTime,
+            durChapterPos = chapter.durChapterPos,
+            durChapterTitle = chapter.durChapterTitle,
+            totalChapterNum = chapter.totalChapterNum,
+            wordCount = chapter.wordCount,
         }, {
             url = content_url,
             bookUrl = bookUrl,
@@ -493,6 +525,9 @@ function M:getBookContent(chapter, callback)
             title = chapter.title,
             variable = chapter.variable,
             isVolume = chapter.isVolume,
+            tag = chapter.tag,
+            isVip = chapter.isVip,
+            isPay = chapter.isPay,
             nextChapterUrl = chapter.nextChapterUrl,
         }, {
             dialect = chapter.textTransformDialect,
@@ -634,18 +669,26 @@ function M:getBookSourcesList(callback)
     end, callback, nil, 'getBookSourcesList')
 end
 
-function M:getBookSourcesExploreUrl(bookSourceUrl, callback)
+function M:getBookSourcesExploreUrl(bookSourceUrl, callback, options)
     local entry = self:_get_source_entry(bookSourceUrl)
     if not entry then
         return nil, "本地未加载书源: " .. tostring(bookSourceUrl)
     end
-    local kinds, err = entry.service:explore_kinds()
-    if not kinds then return nil, err end
-    if #kinds == 0 then return nil, "源探索未设置" end
-    local ret = {
-        exploreUrl = require("json").encode(kinds),
-        BookSourceUrl = bookSourceUrl,
-    }
+    local ret = {BookSourceUrl = bookSourceUrl}
+    if options ~= nil then
+        if not is_tbl(options) or not is_str(options.action) or options.action == "" then
+            return nil, "发现按钮参数错误"
+        end
+        local result, err = entry.service:explore_action(options.action)
+        if not result then return nil, err end
+        ret.refreshExplore, ret.message = result.refreshExplore, result.message
+    end
+    if options == nil or ret.refreshExplore == true then
+        local kinds, err = entry.service:explore_kinds()
+        if not kinds then return nil, err end
+        if #kinds == 0 then return nil, "源探索未设置" end
+        ret.exploreUrl = Reader._json.encode(kinds)
+    end
     if is_func(callback) then
         return callback(ret)
     end

@@ -30,15 +30,61 @@ local function get_engine_version()
 end
 
 local function check_local_engine(menu_def)
-    local Update = require("Legado/Update")
-    Update:ensureEngineLibrary(function()
-        MessageBox:notice("本地解析扩展可用，版本: v" .. get_engine_version())
-        if menu_def and menu_def.updateItems then menu_def:updateItems() end
-    end, function(err_msg)
-        if err_msg == "已取消安装" then return end
-        local message = Error.extract_message(err_msg or "未知错误")
-        Probe.fail("Update", "安装解析扩展", "", nil, message)
-        MessageBox:error(Error.format_failure("扩展安装失败，请重试", message))
+    local ok, status = pcall(LocalExtension.status, true)
+    if not ok then
+        return MessageBox:error("检查扩展状态失败：" .. Error.extract_message(status))
+    end
+    if status.usable then
+        return MessageBox:notice("扩展已可正常使用。")
+    end
+
+    local confirm_text
+    if not status.any_file then
+        confirm_text = "未找到扩展文件（Legado/spore/local/），是否现在安装？"
+    elseif not status.loadable then
+        confirm_text = "扩展无法加载，是否下载并修复？"
+    elseif status.abi_ok == false then
+        confirm_text = "扩展接口异常，是否下载并修复？"
+    else
+        confirm_text = "扩展与当前插件不兼容，是否更新？"
+    end
+
+    MessageBox:confirm(confirm_text, function(confirmed)
+        if not confirmed then return end
+        local Update = require("Legado/Update")
+        Update:ensureEngineLibrary(function()
+            MessageBox:notice("扩展已修复，版本：v" .. get_engine_version())
+            if menu_def and menu_def.updateItems then menu_def:updateItems() end
+        end, function(err_msg)
+            if err_msg == "已取消安装" then return end
+            local message = Error.extract_message(err_msg or "未知错误")
+            Probe.fail("Update", "安装解析扩展", "", nil, message)
+            MessageBox:error(Error.format_failure("扩展修复失败", message))
+        end, true)
+    end, { ok_text = "修复", cancel_text = "取消" })
+end
+
+function M.editCustomStyle()
+    local editor = require("pluginloader"):getPluginInstance("texteditor")
+    if not editor then
+        return MessageBox:info("请先启用“文本编辑器”：\n顶部菜单 → 插件管理 → 文本编辑器。")
+    end
+    local EpubHelper = require("Legado/EpubHelper")
+    local path = EpubHelper.getUserCssPath()
+    if not util.fileExists(path) then
+        local ok, err = EpubHelper.refreshStyles()
+        if not ok or not util.fileExists(path) then
+            return MessageBox:error("自定义样式文件创建失败：" .. tostring(err or path))
+        end
+    end
+    local ui = editor.ui
+    local document = ui and ui.document
+    editor:openFile(path, function()
+        if not (document and ui.document == document and ui.styletweak) then return end
+        local Env = require("Legado.Helper.Env")
+        if Env.is_legado_chapter_cache(nil, ui) or Env.is_legado_skeleton_book(nil, ui) then
+            ui.styletweak:updateCssText(true)
+        end
     end)
 end
 
@@ -133,28 +179,42 @@ function M.getItems()
                     text = "关于扩展",
                     keep_menu_open = true,
                     callback = function()
-                        local ok, err_msg = LocalExtension.available()
+                        local ok, status = pcall(LocalExtension.status, true)
                         if not ok then
-                            return MessageBox:error("解析扩展不可用: " .. tostring(err_msg or "未知错误"))
+                            return MessageBox:error("检查扩展状态失败：" .. Error.extract_message(status))
                         end
-                        MessageBox:info("专门为资源有限设备书源解析优化\n当前版本: v" .. get_engine_version())
+                        if status.usable then
+                            return MessageBox:info("专门为资源有限设备书源解析优化\n当前版本：v" .. tostring(status.version))
+                        end
+                        if not status.any_file then
+                            return MessageBox:error("未找到扩展文件（Legado/spore/local/），请修复。")
+                        elseif not status.loadable then
+                            return MessageBox:error("扩展无法加载，请修复。")
+                        elseif status.abi_ok == false then
+                            return MessageBox:error("扩展接口异常，请修复。")
+                        end
+                        return MessageBox:error("扩展与当前插件不兼容，请修复。")
                     end,
                 }, {
                     text = "检查/修复扩展",
+                    keep_menu_open = true,
                     callback = function(menu_def)
                         check_local_engine(menu_def)
                     end,
                 }, {
                     text = "书源设置",
-                    enabled_func = function() return Backend:_isLocal() end,
                     callback = function()
                         require("Legado/BookSourceResults"):openLocalBookSourceSettings()
                     end,
                 }, {
-                    text = "替换规则",
+                    text = "替换净化",
                     callback = function()
                         LocalExtension.showReplaceRules()
                     end,
+                }, {
+                    text = "自定义样式",
+                    help_text = "保存不会自动启用样式。\n阅读时进入：样式微调 → 用户样式微调 → Legado 自定义。\n点击用于本书；长按后选择用于所有书籍，可全局启用。",
+                    callback = M.editCustomStyle,
                 }, {
                     text = "停用本地解析",
                     callback = function(menu_def)
@@ -170,6 +230,7 @@ function M.getItems()
                     end,
                 }, {
                     text = "清除扩展库",
+                    keep_menu_open = true,
                     callback = function(menu_def)
                         MessageBox:confirm("确定清除解析扩展库？\n清除后将恢复使用云端接口", function(confirmed)
                             if not confirmed then return end
@@ -210,7 +271,7 @@ function M.getItems()
                 Backend:HandleResponse(Backend:saveSettings(settings), function()
                     PlgState:clearReadingRoute()
                     if chapter_mode then
-                        MessageBox:notice("已切换为逐章加载（兼容）")
+                        MessageBox:notice("已切换为分章阅读")
                     end
                     if menu_def and menu_def.updateItems then menu_def:updateItems() end
                 end, function(err_msg)
@@ -222,7 +283,7 @@ function M.getItems()
                 save()
             else
                 MessageBox:confirm(
-                    "“整本打开”目前处于测试阶段，可能会遇到问题。若阅读异常，可切回“逐章加载（兼容）”。",
+                    "“整本打开”目前处于测试阶段，可能会遇到问题。若阅读卡顿，可切回“分章阅读”。",
                     function(confirmed)
                         if confirmed then save() end
                     end,
@@ -252,7 +313,7 @@ function M.getItems()
                         end,
                     }, {
                         text = "整本阅读",
-                        help_text = "章节在同一本书中连续阅读；目前处于测试阶段，遇到问题可切回逐章加载（兼容）。",
+                        help_text = "章节在同一本书中连续阅读；目前处于测试阶段，遇到问题可切回分章阅读。",
                         checked_func = function()
                             return Backend:getSettings().chapter_mode == false
                         end,

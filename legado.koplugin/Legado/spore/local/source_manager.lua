@@ -14,6 +14,7 @@ function M.new(opts)
     self.source_keys = {}
     self.save_session = opts.save_session
     self.load_source = opts.load_source
+    self.load_state = opts.load_state
     self.save_login_data = opts.save_login_data
     return self
 end
@@ -35,6 +36,7 @@ function M:add(raw)
     local service = BookService.new(source, {
         save_session = self.save_session,
         load_source = self.load_source,
+        load_state = self.load_state,
         save_login_data = self.save_login_data
     })
     local entry = { source = source, service = service }

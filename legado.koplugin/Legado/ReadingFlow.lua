@@ -21,11 +21,12 @@ end
 
 local function can_use_skeleton()
     local settings = Backend:getSettings()
-    return skeleton_supported() and settings ~= nil and settings.chapter_mode == false
+    return settings ~= nil and settings.chapter_mode == false and skeleton_supported()
 end
 
 function ReadingFlow:isFullBookMode(item, options)
-    if options and options.mode == "full_book" then return skeleton_supported() end
+    if not can_use_skeleton() then return false end
+    if options and options.mode == "full_book" then return true end
     if options and options.mode == "chapter_mode" then return false end
     if H.is_tbl(item) and (item.is_virtual_epub == true
             or (item.cacheFilePath and item.cacheFilePath:match("%.epub$"))) then
@@ -34,13 +35,17 @@ function ReadingFlow:isFullBookMode(item, options)
     if not H.is_tbl(item) then return false end
     local book_cache_id = item.cache_id or item.book_cache_id
     if book_cache_id then
-        local override = Backend:bookReaderRoute(book_cache_id)
-        if override == "comic" then return false end
-        if override == "reader" then return can_use_skeleton() end
         local container = PlgState:readingRoute(book_cache_id)
         if container then return container == "skeleton" end
+        local override = Backend:bookReaderRoute(book_cache_id)
+        if override == "comic" then return false end
+        if override == "reader" then return true end
     end
-    return Backend:bookContentType(book_cache_id or item) == "reader" and can_use_skeleton()
+    local type_source = item
+    if book_cache_id and item.btype == nil and item.type == nil and item.cacheExt == nil then
+        type_source = book_cache_id
+    end
+    return Backend:bookContentType(type_source) == "reader"
 end
 
 ReadingFlow.isSkeletonEnabled = ReadingFlow.isFullBookMode
@@ -48,15 +53,21 @@ ReadingFlow.isSkeletonEnabled = ReadingFlow.isFullBookMode
 function ReadingFlow:resolveRoute(bookinfo, chapter, options)
     options = options or {}
     local book_cache_id = chapter.book_cache_id
+    local settings = Backend:getSettings()
+    local chapter_mode = not settings or settings.chapter_mode ~= false
     if options.mode == "full_book" then
-        return skeleton_supported() and "skeleton" or "legacy", "explicit"
+        return not chapter_mode and skeleton_supported() and "skeleton" or "legacy", "explicit"
     end
     if options.mode == "chapter_mode" then return "legacy", "explicit" end
-    if chapter.is_virtual_epub == true or (chapter.cacheFilePath and chapter.cacheFilePath:match("%.epub$")) then
+    if not chapter_mode and (chapter.is_virtual_epub == true
+            or (chapter.cacheFilePath and chapter.cacheFilePath:match("%.epub$"))) then
         return "skeleton", "document"
     end
     local container, session_source = PlgState:readingRoute(book_cache_id)
-    if container then return container, session_source or "session" end
+    if container then
+        if chapter_mode and container == "skeleton" then return "legacy", "setting" end
+        return container, session_source or "session"
+    end
 
     local route = Backend:bookReaderRoute(book_cache_id)
     local source = "user_override"
@@ -89,6 +100,13 @@ function ReadingFlow:openBook(chapter, options)
         local path = cached and cached.cacheFilePath
         if H.is_str(path) and path:lower():match("%.cbz$") and util.fileExists(path) then
             container, source = "legacy", "chapter_fallback"
+        elseif not (H.is_str(path) and util.fileExists(path))
+                and not Store:isUsable(Store:location(chapter.book_cache_id), chapter.book_cache_id)
+                and not Store:hasCachedChapter(chapter.book_cache_id) then
+            return self:_openLegacyBook(bookinfo, chapter, options, function(ready)
+                if SkeletonBook._open_generation ~= open_generation then return end
+                return self:openBook(ready, options)
+            end)
         end
     end
     PlgState:readingRoute(chapter.book_cache_id, container, source)
@@ -107,16 +125,27 @@ function ReadingFlow:openBook(chapter, options)
     return self:_openLegacyBook(bookinfo, chapter, options)
 end
 
-function ReadingFlow:_openLegacyBook(_, chapter, options)
+function ReadingFlow:_openLegacyBook(_, chapter, options, on_ready)
+    if chapter.is_virtual_epub or (H.is_str(chapter.cacheFilePath) and chapter.cacheFilePath:lower():match("%.epub$")) then
+        local normalized = {}
+        for key, value in pairs(chapter) do normalized[key] = value end
+        if H.is_str(normalized.cacheFilePath) and normalized.cacheFilePath:lower():match("%.epub$") then
+            normalized.cacheFilePath = nil
+        end
+        normalized.is_virtual_epub = nil
+        chapter = normalized
+    end
     local parent_view = options.parent_view
     local on_error = options.on_error or function(msg) MessageBox:error(msg) end
+    local generation = SkeletonBook._open_generation
+    local function show(ch)
+        if on_ready then return on_ready(ch) end
+        if parent_view and parent_view.showReaderUI then return parent_view:showReaderUI(ch) end
+    end
 
     local cache_chapter = Backend:getCacheChapterFilePath(chapter)
     if cache_chapter and cache_chapter.cacheFilePath and util.fileExists(cache_chapter.cacheFilePath) then
-        if parent_view and parent_view.showReaderUI then
-            parent_view:showReaderUI(cache_chapter)
-        end
-        return
+        return show(cache_chapter)
     end
 
     if not NetworkMgr:isConnected() then
@@ -127,6 +156,7 @@ function ReadingFlow:_openLegacyBook(_, chapter, options)
     return TaskProg.loading("正在下载正文 ", function()
         return Backend:downloadChapter(chapter)
     end, function(state, response)
+        if SkeletonBook._open_generation ~= generation then return end
         if state == true then
             Backend:HandleResponse(response, function(data)
                 if H.is_tbl(data) and data.kind == "cbz" then
@@ -149,9 +179,7 @@ function ReadingFlow:_openLegacyBook(_, chapter, options)
                             if result and result.success then
                                 pending.chapter.cacheFilePath = pending.filePath
                                 UIManager:nextTick(function()
-                                    if parent_view and parent_view.showReaderUI then
-                                        parent_view:showReaderUI(pending.chapter)
-                                    end
+                                    if SkeletonBook._open_generation == generation then show(pending.chapter) end
                                 end)
                             else
                                 on_error("章节打包失败")
@@ -165,9 +193,7 @@ function ReadingFlow:_openLegacyBook(_, chapter, options)
                     return on_error("下载失败")
                 end
 
-                if parent_view and parent_view.showReaderUI then
-                    parent_view:showReaderUI(data)
-                end
+                return show(data)
             end, function(err_msg)
                 on_error(err_msg or "下载章节失败")
             end)

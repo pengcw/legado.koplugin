@@ -5,7 +5,6 @@ local util = require("util")
 local LuaSettings = require("luasettings")
 local socket_url = require("socket.url")
 local socketutil = require("socketutil")
-local Spore = require("Spore")
 local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local load_script = require("Legado.Helper.Loader").load_script
@@ -14,6 +13,8 @@ local Probe = require("Legado.Helper.Probe")
 
 local M = {
     name = "base",
+    uses_local_text_transform = false,
+    uses_local_explore = false,
     client = nil,
     settings = nil,
     _need_login = false,
@@ -68,6 +69,7 @@ function M:new(o)
 end
 
 function M:init()
+    local Spore = require("Spore")
     local spec_name = tostring(self.name) .. "_spec"
     local _spec, err_msg = load_script("Legado.spore." .. spec_name)
     if not _spec then

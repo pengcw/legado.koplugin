@@ -107,10 +107,20 @@ function M:openBook(bookinfo, chapter, options, open_generation)
             return active_chapter
         end
 
+        local function close_parent_toc()
+            if parent_view and parent_view.getBookTocWidget then
+                local toc_obj = parent_view:getBookTocWidget()
+                if toc_obj and UIManager:isWidgetShown(toc_obj) then
+                    UIManager:close(toc_obj)
+                end
+            end
+        end
+
         local triggered = false
         local function navigate_and_trigger()
             if triggered or not is_current_open_intent() then return end
             triggered = true
+            close_parent_toc()
             PlgState:afterReadUiOpenCallback(false)
 
             local ui = ReaderUI.instance
@@ -178,13 +188,6 @@ function M:openBook(bookinfo, chapter, options, open_generation)
             end)
         end
 
-        if parent_view and parent_view.getBookTocWidget then
-            local toc_obj = parent_view:getBookTocWidget()
-            if toc_obj and UIManager:isWidgetShown(toc_obj) then
-                UIManager:close(toc_obj)
-            end
-        end
-
         local safe_navigate = function(...)
             if not is_current_open_intent() then return end
             local cb = PlgState:afterReadUiOpenCallback()
@@ -209,12 +212,12 @@ function M:openBook(bookinfo, chapter, options, open_generation)
                 return
             end
             PlgState:afterReadUiOpenCallback(navigate_and_trigger)
-            ReaderUI.instance:switchDocument(epub_path, true, safe_navigate)
+            ReaderUI.instance:switchDocument(epub_path, false, safe_navigate)
         else
             PlgState:afterReadUiOpenCallback(navigate_and_trigger)
             UIManager:broadcastEvent(Event:new("SetupShowReader"))
             local show_reader = ReaderUI._legado_wrapped or ReaderUI.showReader
-            show_reader(ReaderUI, epub_path, nil, true, nil, safe_navigate)
+            show_reader(ReaderUI, epub_path, nil, false, nil, safe_navigate)
         end
     end
 
@@ -247,12 +250,14 @@ function M:openExisting(chapter, options)
     PlgState:readingChapter(chapter)
     local is_skeleton = Env.is_legado_skeleton_book(book_path)
 
-    local toc_obj = parent_view:getBookTocWidget()
-    if toc_obj and UIManager:isWidgetShown(toc_obj) then UIManager:close(toc_obj) end
     local triggered = false
     local function navigate_to_target_chapter()
         if triggered or not is_current_open_intent() then return end
         triggered = true
+        if parent_view and parent_view.getBookTocWidget then
+            local toc_obj = parent_view:getBookTocWidget()
+            if toc_obj and UIManager:isWidgetShown(toc_obj) then UIManager:close(toc_obj) end
+        end
         local chapter_direction = PlgState:chapterDirection()
         PlgState:afterReadUiOpenCallback(false)
         options.navigate({
@@ -293,15 +298,7 @@ function M:syncNewChapters(book_cache_id, book_name)
 end
 
 function M:preloadCallbacks()
-    return {
-        inject_one = function(...) return Store:syncChapter(...) end,
-        inject_many = function(...) return Store:syncChapters(...) end,
-        request_refresh = function(...) return Refresh:request(...) end,
-        show_chapter_loading = function(...) return Refresh:showLoading(...) end,
-        hide_chapter_loading = function(...) return Refresh:hideLoading(...) end,
-        sync_new_chapters = function(...) return self:syncNewChapters(...) end,
-        cleanup = function() return Refresh:_clearPreloadRefreshScheduler() end,
-    }
+    return require("Legado.Skeleton.Callbacks").new(self)
 end
 
 function M:onPageUpdate(ui, pageno, last_virtual_toc_idx)

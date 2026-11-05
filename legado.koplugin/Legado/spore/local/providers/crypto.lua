@@ -14,6 +14,8 @@ int EVP_EncryptFinal_ex(struct evp_cipher_ctx_st *, unsigned char *, int *);
 int EVP_DecryptFinal_ex(struct evp_cipher_ctx_st *, unsigned char *, int *);
 const struct evp_cipher_st *EVP_des_ecb(void);
 const struct evp_cipher_st *EVP_des_cbc(void);
+const struct evp_cipher_st *EVP_des_ede3_ecb(void);
+const struct evp_cipher_st *EVP_des_ede3_cbc(void);
 ]]
 local Backend = require('Legado.spore.local.providers.crypto_backend')
 local Crypto = {}
@@ -77,20 +79,23 @@ function Crypto:discover()
     library = Backend.bind(library,functions)
     if not library then return end
     self.library = library
-    for _, mode in ipairs({"CBC","ECB"}) do
-        local getter = Backend.optional(library,"EVP_des_"..mode:lower())
-        local ok, cipher = pcall(function() return getter and getter() end)
-        if ok and cipher ~= nil then
-            for _, padding in ipairs({"PKCS5PADDING","PKCS7PADDING","NOPADDING"}) do
-                local name = "DES/"..mode.."/"..padding
-                local key, iv = string.rep("\0",8), mode == "CBC" and string.rep("\0",8) or ""
-                local input, padded = string.rep("\0",8), padding ~= "NOPADDING"
-                local success, encrypted = pcall(transform,library,cipher,key,iv,input,false,padded)
-                local decoded, plain
-                if success and encrypted then decoded, plain = pcall(transform,library,cipher,key,iv,encrypted,true,padded) end
-                if decoded and plain == input then
-                    self.support[name..":8"] = cipher
-                    self.support[name] = {keyBytes={8}}
+    for _, spec in ipairs({{"DES","EVP_des_",8},{"DESEDE","EVP_des_ede3_",24}}) do
+        local algorithm, prefix, key_size = spec[1], spec[2], spec[3]
+        for _, mode in ipairs({"CBC","ECB"}) do
+            local getter = Backend.optional(library,prefix..mode:lower())
+            local ok, cipher = pcall(function() return getter and getter() end)
+            if ok and cipher ~= nil then
+                for _, padding in ipairs({"PKCS5PADDING","PKCS7PADDING","NOPADDING"}) do
+                    local name = algorithm.."/"..mode.."/"..padding
+                    local key, iv = string.rep("\0",key_size), mode == "CBC" and string.rep("\0",8) or ""
+                    local input, padded = string.rep("\0",8), padding ~= "NOPADDING"
+                    local success, encrypted = pcall(transform,library,cipher,key,iv,input,false,padded)
+                    local decoded, plain
+                    if success and encrypted then decoded, plain = pcall(transform,library,cipher,key,iv,encrypted,true,padded) end
+                    if decoded and plain == input then
+                        self.support[name..":"..key_size] = cipher
+                        self.support[name] = {keyBytes={key_size}}
+                    end
                 end
             end
         end
@@ -111,13 +116,14 @@ function Crypto:symmetric(args)
     end
     local name = args.transformation:upper()
     local algorithm, mode, padding = name:match("^([A-Z]+)/([A-Z]+)/([A-Z0-9]+)$")
-    if algorithm ~= "DES" or (mode ~= "CBC" and mode ~= "ECB") or (padding ~= "PKCS5PADDING"
+    if (algorithm ~= "DES" and algorithm ~= "DESEDE") or (mode ~= "CBC" and mode ~= "ECB") or (padding ~= "PKCS5PADDING"
         and padding ~= "PKCS7PADDING" and padding ~= "NOPADDING") then
         return failure("unsupported","unsupported symmetric transformation")
     end
-    local key, iv, input = bytes(args.key,8), bytes(args.iv or {},8), bytes(args.data,MAX_INPUT_BYTES)
+    local key_size = algorithm == "DESEDE" and 24 or 8
+    local key, iv, input = bytes(args.key,key_size), bytes(args.iv or {},8), bytes(args.data,MAX_INPUT_BYTES)
     local block = 8
-    local valid_key = key and #key == 8
+    local valid_key = key and #key == key_size
     if not valid_key or not iv or not input
         or (mode == "CBC" and #iv ~= block) or (mode == "ECB" and #iv ~= 0) then
         return failure("invalid_argument","invalid symmetric key, IV or byte data")
@@ -132,7 +138,7 @@ function Crypto:symmetric(args)
     if not cipher then return failure("unsupported","symmetric combination is not available on this device") end
     local ok, output = pcall(transform,self.library,cipher,key,iv,input,args.action == "decrypt",padded)
     if not ok or not output then return failure("operation_failed","symmetric operation failed") end
-    local result = {}
+    local result = require('rapidjson').array({})
     for index=1,#output do result[index] = output:byte(index) end
     return result
 end

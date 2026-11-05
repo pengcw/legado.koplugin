@@ -136,17 +136,74 @@ M.escape_xml_attr = function(value, quote)
     end
 end
 
-M.addCssRes = function(book_cache_id)
+local review_css_module = "Legado.res.review_css"
+
+M.getReviewCss = function()
+    local ok, css = pcall(require, review_css_module)
+    if not ok then return nil, css end
+    if type(css) ~= "string" then return nil, "段评样式模块必须返回字符串" end
+    return css
+end
+
+M.getUserCssPath = function()
+    return FS.joinPath(Env.getKoreaderDirectory(), "styletweaks/Legado_自定义.css")
+end
+
+local function prepare_user_style(review_css)
+    local path = M.getUserCssPath()
+    if util.fileExists(path) then return end
+    local template = require("Legado.res.custom_css")
+    FS.checkAndCreateFolder(FS.joinPath(Env.getKoreaderDirectory(), "styletweaks"))
+    assert(util.writeToFile(template .. review_css, path))
+end
+
+local function write_shared_css(css_path, review_css)
+    local temporary = css_path .. ".tmp"
+    local ok, err = pcall(function()
+        local copy_err = require("ffi/util").copyFile(
+            FS.joinPath(Env.getPluginDirectory(), defaultCss), temporary)
+        assert(not copy_err, copy_err)
+        local file = assert(io.open(temporary, "ab"))
+        local written, write_err = file:write("\n", review_css)
+        local closed, close_err = file:close()
+        assert(written, write_err)
+        assert(closed, close_err)
+        assert(os.rename(temporary, css_path))
+    end)
+    if not ok then
+        os.remove(temporary)
+        return nil, err
+    end
+    local user_ok, user_err = pcall(prepare_user_style, review_css)
+    if not user_ok then logger.warn("Legado user stylesheet creation failed:", user_err) end
+    return true
+end
+
+M.addCssRes = function()
     local resources_dir = FS.joinPath(Env.getTempDirectory(), "resources")
     local css_path = FS.joinPath(resources_dir, "legado.css")
     if not util.fileExists(css_path) then
         FS.checkAndCreateFolder(resources_dir)
-        local source_path = FS.joinPath(Env.getPluginDirectory(), defaultCss)
-        if util.fileExists(source_path) then
-            FS.copyFileFromTo(source_path, css_path)
-        end
+        local css, err = M.getReviewCss()
+        local ok
+        if css then ok, err = write_shared_css(css_path, css) end
+        if not ok then logger.warn("Legado stylesheet creation failed:", err) end
     end
     return css_path
+end
+
+M.refreshStyles = function()
+    local previous = package.loaded[review_css_module]
+    package.loaded[review_css_module] = nil
+    local css, err = M.getReviewCss()
+    local ok
+    if css then
+        local resources_dir = FS.checkAndCreateFolder(
+            FS.joinPath(Env.getTempDirectory(), "resources"))
+        ok, err = write_shared_css(FS.joinPath(resources_dir, "legado.css"), css)
+    end
+    if not ok then package.loaded[review_css_module] = previous end
+    return ok, err
 end
 
 M.prepareCacheResources = function()
@@ -254,6 +311,12 @@ function EpubExporter:createOPF()
             '<item id="%s" href="Text/chapter%d.xhtml" media-type="application/xhtml+xml"/>',
             chapter_id, chapter_index
         ))
+        if image_meta.is_image_extension(chapter.cache_ext) then
+            table.insert(manifest_items, string.format(
+                '<item id="%s-image" href="Text/resources/chapter%d.%s" media-type="%s"/>',
+                chapter_id, chapter_index, chapter.cache_ext, image_meta.get_mime_type(chapter.cache_ext)
+            ))
+        end
         table.insert(spine_items, string.format('<itemref idref="%s"/>', chapter_id))
     end
 
@@ -294,7 +357,7 @@ function EpubExporter:createOPF()
     local manifest_str = "    " .. table.concat(manifest_items, "\n    ")
     local spine_str = "    " .. table.concat(spine_items, "\n    ")
 
-    return string.format(opf_template, self.title, self.author, description_meta, uuid, timestamp, manifest_str, spine_str)
+    return string.format(opf_template, M.escape_xml(self.title), M.escape_xml(self.author), description_meta, uuid, timestamp, manifest_str, spine_str)
 end
 
 function EpubExporter:createNCX()
@@ -306,7 +369,7 @@ function EpubExporter:createNCX()
     <navPoint id="navPoint-%d" playOrder="%d">
       <navLabel><text>%s</text></navLabel>
       <content src="Text/chapter%d.xhtml"/>
-    </navPoint]], chapter_index, chapter_index, chapter.title or ("第" .. (chapter_index + 1) .. "章"), chapter_index)
+    </navPoint]], chapter_index, chapter_index, M.escape_xml(chapter.title or ("第" .. (chapter_index + 1) .. "章")), chapter_index)
         table.insert(nav_points, nav_point)
     end
 
@@ -328,7 +391,7 @@ function EpubExporter:createNCX()
     local uuid = generateUUID()
     local nav_str = table.concat(nav_points, "\n")
 
-    return string.format(ncx_template, uuid, self.title, self.author, nav_str)
+    return string.format(ncx_template, uuid, M.escape_xml(self.title), M.escape_xml(self.author), nav_str)
 end
 
 function EpubExporter:createCoverPage()
@@ -360,7 +423,7 @@ function EpubExporter:createCoverPage()
         cover_image = string.format('<div class="pic"><img src="../Images/%s" style="width: 100%%; height: auto;"/></div>', cover_filename)
     end
 
-    return string.format(cover_template, cover_image, self.title, self.author)
+    return string.format(cover_template, cover_image, M.escape_xml(self.title), M.escape_xml(self.author))
 end
 
 function EpubExporter:createNavPage()
@@ -370,7 +433,7 @@ function EpubExporter:createNavPage()
         local chapter_index = chapter.chapters_index
         table.insert(nav_items, string.format(
             '        <li><a href="chapter%d.xhtml">%s</a></li>',
-            chapter_index, chapter.title or ("第" .. (chapter_index + 1) .. "章")
+            chapter_index, M.escape_xml(chapter.title or ("第" .. (chapter_index + 1) .. "章"))
         ))
     end
 
@@ -473,94 +536,90 @@ function EpubExporter:packageEpub()
         }
     end
 
-    local mimetype_ok, mimetype_err = writer:add("mimetype", self:createMimetype(), true)
-    if not mimetype_ok then
-        writer:close()
-        logger.warn("无法写入 mimetype:", mimetype_err)
-        return {
-            success = false,
-            error = "无法创建 EPUB 文件：mimetype 写入失败"
-        }
-    end
-
     local function addFile(filename, content, no_compress)
         local add_ok, add_err = writer:add(filename, content, no_compress)
         if not add_ok then
-            logger.warn("添加 EPUB 文件失败:", filename, tostring(add_err))
+            error("添加 EPUB 文件失败: " .. filename .. ": " .. tostring(add_err), 0)
         end
     end
 
-    addFile("META-INF/container.xml", self:createContainer())
+    local write_ok, write_err = pcall(function()
+        addFile("mimetype", self:createMimetype(), true)
+        addFile("META-INF/container.xml", self:createContainer())
 
-    if H.is_str(self.cover_path) and util.fileExists(self.cover_path) then
-        local cover_data = util.readFromFile(self.cover_path, "rb")
-        local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
-        addFile("OEBPS/Images/" .. cover_filename, cover_data, true)
-    end
-    addFile("OEBPS/Text/cover.xhtml", self:createCoverPage())
-    addFile("OEBPS/Text/nav.xhtml", self:createNavPage())
-
-    local cache_ext
-    local cache_file_path
-    local chapter_content
-    local file_index
-    for _, chapter in ipairs(self.chapters) do
-
-        file_index = chapter.chapters_index
-        cache_ext = chapter.cache_ext
-        cache_file_path = chapter.cache_path
-        chapter_content = ""
-
-        if cache_ext == "txt" then
-            chapter_content = util.readFromFile(cache_file_path, "r") or ""
-            chapter.content = chapter_content:gsub("([^\n]+)", "<p>%1</p>")
-            chapter_content = self:createChapterPage(file_index, chapter)
-        elseif cache_ext == "html" or cache_ext == "xhtml" then
-            chapter_content = util.readFromFile(cache_file_path, "r") or ""
-            chapter_content = chapter_content:gsub('href="%.%./resources/legado%.css"', 'href="' .. epubCss .. '"')
-            if self.custom_css_path then
-                chapter_content = chapter_content:gsub('<p%s+style="text%-indent:%s*0em;"><span%s+class="duokan%-dropcaps%-two">(.)</span>', '<p>%1')
-            end
-        elseif image_meta.is_image_extension(cache_ext) then
-            local img_data = util.readFromFile(cache_file_path, "rb")
-            if img_data then
-                 chapter.content = string.format("<img src='resources/chapter%d.%s'><img>", file_index, cache_ext)
-                 chapter_content = self:createChapterPage(file_index, chapter)
-                 addFile(string.format("OEBPS/Text/resources/chapter%d.%s", file_index, cache_ext), img_data)
-            end
+        if H.is_str(self.cover_path) and util.fileExists(self.cover_path) then
+            local cover_data = util.readFromFile(self.cover_path, "rb")
+            local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
+            addFile("OEBPS/Images/" .. cover_filename, cover_data, true)
         end
+        addFile("OEBPS/Text/cover.xhtml", self:createCoverPage())
+        addFile("OEBPS/Text/nav.xhtml", self:createNavPage())
 
-        addFile(string.format("OEBPS/Text/chapter%d.xhtml", file_index), chapter_content)
-    end
+        local cache_ext
+        local cache_file_path
+        local chapter_content
+        local file_index
+        for _, chapter in ipairs(self.chapters) do
 
-    addFile("OEBPS/content.opf", self:createOPF())
+            file_index = chapter.chapters_index
+            cache_ext = chapter.cache_ext
+            cache_file_path = chapter.cache_path
+            chapter_content = ""
 
-    addFile("OEBPS/toc.ncx", self:createNCX())
-
-    local resources_path = FS.joinPath(self.book_cache_path, "resources")
-    if util.directoryExists(resources_path) then
-        util.findFiles(resources_path, function(file_path, fname, attr)
-            if attr and attr.mode == "file" and H.is_str(fname) and fname ~= "" then
-                if fname ~= "legado.css" then
-                    local file_content = util.readFromFile(file_path)
-                    if file_content and #file_content > 0 then
-                        addFile("OEBPS/Text/resources/" .. fname, file_content)
-                    else
-                        logger.warn("Empty or unreadable resource file:", file_path)
-                    end
+            if cache_ext == "txt" then
+                chapter_content = util.readFromFile(cache_file_path, "r") or ""
+                chapter.content = M.escape_xml(chapter_content):gsub("([^\n]+)", "<p>%1</p>")
+                chapter_content = self:createChapterPage(file_index, chapter)
+            elseif cache_ext == "html" or cache_ext == "xhtml" then
+                chapter_content = util.readFromFile(cache_file_path, "r") or ""
+                chapter_content = chapter_content:gsub('href="%.%./resources/legado%.css"', 'href="' .. epubCss .. '"')
+                if self.custom_css_path then
+                    chapter_content = chapter_content:gsub('<p%s+style="text%-indent:%s*0em;"><span%s+class="duokan%-dropcaps%-two">(.)</span>', '<p>%1')
+                end
+            elseif image_meta.is_image_extension(cache_ext) then
+                local img_data = util.readFromFile(cache_file_path, "rb")
+                if img_data then
+                     chapter.content = string.format("<img src='resources/chapter%d.%s'/>", file_index, cache_ext)
+                     chapter_content = self:createChapterPage(file_index, chapter)
+                     addFile(string.format("OEBPS/Text/resources/chapter%d.%s", file_index, cache_ext), img_data)
                 end
             end
-        end, false)
-    end
 
-    local css_content = self.custom_css
-        or util.readFromFile(FS.joinPath(Env.getPluginDirectory(), defaultCss), "r")
-    if css_content then
-        addFile("OEBPS/Text/resources/legado.css", css_content)
-    end
+            addFile(string.format("OEBPS/Text/chapter%d.xhtml", file_index), chapter_content)
+        end
 
-    if writer and writer.close then
-        writer:close()
+        addFile("OEBPS/content.opf", self:createOPF())
+
+        addFile("OEBPS/toc.ncx", self:createNCX())
+
+        local resources_path = FS.joinPath(self.book_cache_path, "resources")
+        if util.directoryExists(resources_path) then
+            util.findFiles(resources_path, function(file_path, fname, attr)
+                if attr and attr.mode == "file" and H.is_str(fname) and fname ~= "" then
+                    if fname ~= "legado.css" then
+                        local file_content = util.readFromFile(file_path)
+                        if file_content and #file_content > 0 then
+                            addFile("OEBPS/Text/resources/" .. fname, file_content)
+                        else
+                            logger.warn("Empty or unreadable resource file:", file_path)
+                        end
+                    end
+                end
+            end, false)
+        end
+
+        local css_content = self.custom_css
+            or util.readFromFile(M.addCssRes(), "r")
+        if css_content then
+            addFile("OEBPS/Text/resources/legado.css", css_content)
+        end
+
+    end)
+    local close_ok, closed, close_err = pcall(writer.close, writer)
+    if not write_ok or not close_ok or not closed then
+        pcall(util.removeFile, epub_path_tmp)
+        return {success = false, error = tostring(not write_ok and write_err
+            or (not close_ok and closed or close_err) or "无法关闭 EPUB 文件")}
     end
 
     local success = os.rename(epub_path_tmp, epub_path)
@@ -576,6 +635,7 @@ function EpubExporter:packageEpub()
             author = self.author
         }
     else
+        pcall(util.removeFile, epub_path_tmp)
         logger.warn("无法重命名 EPUB 文件")
         return {
             success = false,

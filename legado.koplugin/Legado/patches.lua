@@ -10,10 +10,34 @@ local M = {
     is_enabled = false,
 }
 
+local function installReviewStyle(ui)
+    local styletweak = ui.styletweak
+    if not styletweak or styletweak._legado_review_style_installed then return end
+    local original = styletweak.getCssText
+    styletweak.getCssText = function(self, ...)
+        local css = original(self, ...)
+        if not M.is_enabled then return css end
+        local review_css, err = require("Legado/EpubHelper").getReviewCss()
+        if not review_css then
+            logger.warn("Legado review stylesheet unavailable:", err)
+            return css
+        end
+        return css and css ~= "" and (review_css .. "\n" .. css) or review_css
+    end
+    styletweak._legado_review_style_installed = true
+end
+
 M.readui_starting = function(read_ui)
     if not read_ui then return end
     local ui = read_ui.name == "ReaderUI" and read_ui or read_ui.ui
     if not ui or ui.name ~= "ReaderUI" then return end
+    local stats = ui.statistics
+    if M.is_enabled and stats and stats.settings and stats.settings.is_enabled
+            and not stats._legado_chapter_stats and not stats._legado_chapter_stats_paused
+            and Env.is_legado_chapter_cache(nil, ui) then
+        require("Legado/ChapterStatistics").install(ui, M)
+    end
+    if M.is_enabled then installReviewStyle(ui) end
     if ui._ref_legado_wrapped_s == true then return end
     ui._ref_legado_wrapped_s = true
 
@@ -137,32 +161,43 @@ M.readui_runtime = function(read_ui)
         end
     end
 
+    local function atPageStart(document, page)
+        if not document or type(page) ~= "number" or page < 1 then return false end
+        if type(document.getPrevPage) == "function" then
+            return document:getPrevPage(page) == 0
+        end
+        return page == 1
+    end
+
     if ui.rolling then
-        local orig_rolling_onGotoViewRel = ui.rolling.onGotoViewRel
-        ui.rolling.onGotoViewRel = function(self, diff)
-            if not M.is_enabled then return orig_rolling_onGotoViewRel(self, diff) end
-            local scroll_mode = self.view.view_mode == "scroll"
-            local old_pos = scroll_mode and self.current_pos or self.current_page
-            orig_rolling_onGotoViewRel(self, diff)
-            local new_pos = scroll_mode and self.current_pos or self.current_page
-            if diff < 0 and old_pos == new_pos and Env.is_legado_chapter_cache(nil, self.ui) then
-                self.ui:handleEvent(Event:new("StartOfBook"))
+        local original = ui.rolling.onGotoViewRel
+        ui.rolling.onGotoViewRel = function(self, diff, ...)
+            if M.is_enabled and diff < 0 and Env.is_legado_chapter_cache(nil, self.ui) then
+                local mode = self.view.view_mode
+                if (mode == "page" or (mode == "scroll" and self.current_pos == 0))
+                        and atPageStart(self.ui.document, self.current_page) then
+                    self.ui:handleEvent(Event:new("StartOfBook"))
+                    return true
+                end
             end
-            return true
+            return original(self, diff, ...)
         end
     end
 
     if ui.paging then
-        local orig_paging_onGotoViewRel = ui.paging.onGotoViewRel
-        ui.paging.onGotoViewRel = function(self, diff)
-            if not M.is_enabled then return orig_paging_onGotoViewRel(self, diff) end
-            local old_pos = self:getTopPage()
-            orig_paging_onGotoViewRel(self, diff)
-            local new_pos = self:getTopPage()
-            if diff < 0 and old_pos == 1 and old_pos == new_pos and Env.is_legado_chapter_cache(nil, self.ui) then
-                self.ui:handleEvent(Event:new("StartOfBook"))
+        local original = ui.paging.onGotoViewRel
+        ui.paging.onGotoViewRel = function(self, diff, no_page_turn, ...)
+            if M.is_enabled and diff < 0 and no_page_turn ~= true
+                    and Env.is_legado_chapter_cache(nil, self.ui) then
+                local scroll = self.view.page_scroll
+                local ready = not scroll or (self.view.page_states and self.view.page_states[1])
+                if ready and atPageStart(self.ui.document, self:getTopPage())
+                        and (not scroll or self:getTopPosition() <= 0) then
+                    self.ui:handleEvent(Event:new("StartOfBook"))
+                    return true
+                end
             end
-            return true
+            return original(self, diff, no_page_turn, ...)
         end
     end
 

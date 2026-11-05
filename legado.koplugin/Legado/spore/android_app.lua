@@ -12,6 +12,7 @@ local Probe = require("Legado.Helper.Probe")
 
 local M = BaseSpec:extend{
     name = "android_app",
+    uses_local_explore = true,
     client = nil,
     settings = nil,
 }

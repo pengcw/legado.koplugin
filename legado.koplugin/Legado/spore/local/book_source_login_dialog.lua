@@ -8,6 +8,25 @@ local Device = require("device")
 local BookSourceLogin = require("Legado.Helper.BookSourceLogin")
 
 local M = {}
+local generation = 0
+
+local function close_for_action(widget)
+    if widget then
+        widget._legado_action_transition = true
+        UIManager:close(widget)
+    end
+end
+
+local function track_widget(widget, request_id)
+    local on_close = widget.onCloseWidget
+    widget.onCloseWidget = function(self, ...)
+        if not self._legado_action_transition and generation == request_id then
+            generation = generation + 1
+        end
+        if on_close then return on_close(self, ...) end
+    end
+    return widget
+end
 
 local function clean_http_url(value)
     if type(value) ~= "string" or value == "" then return nil end
@@ -69,7 +88,8 @@ local function handle_response(response, on_success)
     end)
 end
 
-local function show_form(source, form)
+local function show_form(source, form, request_id)
+    if generation ~= request_id then return end
     local rows = type(form.fields) == "table" and form.fields or {}
     local saved_values = type(form.values) == "table" and form.values or {}
     local login_url = clean_http_url(form.loginUrl)
@@ -84,7 +104,7 @@ local function show_form(source, form)
                 if type(name) == "string" and name ~= "" then
                     field_rows[#field_rows + 1] = row
                     fields[#fields + 1] = {
-                        text = tostring(saved_values[name] or ""),
+                        text = tostring(saved_values[name] or row.default or ""),
                         hint = row.title or row.label or name,
                         text_type = row.type == "password" and "password" or "text",
                     }
@@ -108,20 +128,39 @@ local function show_form(source, form)
         if clean_action_url then
             open_external_url(clean_action_url)
         else
-            local run = TaskProg.loading
-            if Backend:_isLocal() then
-                Backend:closeDbManager()
-                run = require("Legado.spore.local.browser.task").run
-            end
-            run("正在执行：" .. tostring(title or (action and "书源动作" or "登录")), function()
+            Backend:closeDbManager()
+            require("Legado.spore.local.browser.task").run("正在执行：" .. tostring(title or (action and "书源动作" or "登录")), function()
                 return Backend:loginBookSource({
                     bookSourceUrl = source.bookSourceUrl,
                     values = entered_values or {},
                     action = action,
                 })
             end, function(state, response)
+                if generation ~= request_id then return end
                 if state == true then
                     handle_response(response, function(result)
+                        if type(result) == "table" and type(result.reLoginView) == "table" then
+                            Backend:closeDbManager()
+                            return TaskProg.loading("刷新书源登录配置", function()
+                                return Backend:getBookSourceLoginUi(source.bookSourceUrl)
+                            end, function(ok, refreshed)
+                                if not ok or generation ~= request_id then return end
+                                handle_response(refreshed, function(updated)
+                                    if type(updated) ~= "table" then return end
+                                    if result.reLoginView.deltaUp == true then
+                                        local values = updated.values or {}
+                                        for _, row in ipairs(updated.fields or {}) do
+                                            local name = row.name or row.key
+                                            if name and entered_values and entered_values[name] ~= nil then
+                                                values[name] = entered_values[name]
+                                            end
+                                        end
+                                        updated.values = values
+                                    end
+                                    show_form(source, updated, request_id)
+                                end)
+                            end, nil, true)
+                        end
                         if type(result) == "table" then
                             if type(result.preview) == "table"
                                     and type(result.preview.html) == "string" then
@@ -136,7 +175,7 @@ local function show_form(source, form)
                             "不支持交互webview")
                         MessageBox:info(message)
                     end)
-                elseif Backend:_isLocal() and type(response) == "string" then
+                elseif type(response) == "string" then
                     MessageBox:error("书源操作失败：", response)
                 end
             end, nil, true)
@@ -158,7 +197,7 @@ local function show_form(source, form)
             item_table = item_table,
             items_per_page = 15,
             onMenuSelect = function(_, item)
-                if menu_dialog then UIManager:close(menu_dialog) end
+                close_for_action(menu_dialog)
                 execute_action(item.action, {}, item.text)
             end,
             close_callback = function()
@@ -168,7 +207,8 @@ local function show_form(source, form)
                 end
             end,
         }
-        menu_dialog = UIManager:show(menu)
+        track_widget(menu, request_id)
+        menu_dialog = UIManager:show(menu) or menu
         return
     end
 
@@ -198,7 +238,7 @@ local function show_form(source, form)
             text = primary_action.title or primary_action.label or primary_action.name or "保存",
             callback = function()
                 local values = get_current_values()
-                UIManager:close(dialog)
+                close_for_action(dialog)
                 execute_action(primary_action.action, values,
                     primary_action.title or primary_action.label or primary_action.name)
             end,
@@ -212,7 +252,7 @@ local function show_form(source, form)
                 text = string.format("更多操作 (%d)", #action_rows),
                 callback = function()
                     local values = get_current_values()
-                    UIManager:close(dialog)
+                    close_for_action(dialog)
                     local Menu = require("ui/widget/menu")
                     local item_table = {}
                     for _, act in ipairs(action_rows) do
@@ -227,7 +267,7 @@ local function show_form(source, form)
                         item_table = item_table,
                         items_per_page = 15,
                         onMenuSelect = function(_, item)
-                            if menu_dialog then UIManager:close(menu_dialog) end
+                            close_for_action(menu_dialog)
                             execute_action(item.action, values, item.text)
                         end,
                         close_callback = function()
@@ -237,7 +277,8 @@ local function show_form(source, form)
                             end
                         end,
                     }
-                    menu_dialog = UIManager:show(menu)
+                    track_widget(menu, request_id)
+                    menu_dialog = UIManager:show(menu) or menu
                 end,
             }
         })
@@ -273,6 +314,7 @@ local function show_form(source, form)
             buttons = dialog_buttons,
         }
     end
+    track_widget(dialog, request_id)
     UIManager:show(dialog)
 end
 
@@ -286,12 +328,15 @@ function M:show(source)
         bookSourceName = source.bookSourceName or source.name,
     }
 
+    generation = generation + 1
+    local request_id = generation
+    Backend:closeDbManager()
     TaskProg.loading("读取书源登录配置", function()
         return Backend:getBookSourceLoginUi(source.bookSourceUrl)
     end, function(state, response)
-        if state == true then
+        if state == true and generation == request_id then
             handle_response(response, function(form)
-                show_form(source, type(form) == "table" and form or {})
+                show_form(source, type(form) == "table" and form or {}, request_id)
             end)
         end
     end, nil, true)

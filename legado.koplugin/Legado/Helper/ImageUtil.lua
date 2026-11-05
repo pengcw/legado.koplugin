@@ -1,6 +1,6 @@
 local util = require("util")
 local logger = require("logger")
-local ffi = require("ffi")
+local ffi
 local H = require("Legado/Helper")
 local FS = require("Legado.Helper.FS")
 local Env = require("Legado.Helper.Env")
@@ -45,39 +45,45 @@ local function debug_save_invalid(data, reason, url)
     end
 end
 
-if not pcall(ffi.typeof, "z_stream") then
-    ffi.cdef[[
-        typedef void *(*z_alloc_func)(void *opaque, unsigned int items, unsigned int size);
-        typedef void (*z_free_func)(void *opaque, void *address);
-        typedef struct z_stream_s {
-            const unsigned char *next_in;
-            unsigned int avail_in;
-            unsigned long total_in;
-            unsigned char *next_out;
-            unsigned int avail_out;
-            unsigned long total_out;
-            const char *msg;
-            void *state;
-            z_alloc_func zalloc;
-            z_free_func zfree;
-            void *opaque;
-            int data_type;
-            unsigned long adler;
-            unsigned long reserved;
-        } z_stream;
-    ]]
-end
-pcall(ffi.cdef, "const char *zlibVersion(void);")
-pcall(ffi.cdef, "int inflateInit2_(z_stream *strm, int windowBits, const char *version, int stream_size);")
-pcall(ffi.cdef, "int inflate(z_stream *strm, int flush);")
-pcall(ffi.cdef, "int inflateEnd(z_stream *strm);")
 local libz
-if pcall(ffi.typeof, "z_stream") then
-    local ok, lib = pcall(function() return ffi.loadlib("z", 1) end)
-    if not (ok and lib) then
-        ok, lib = pcall(ffi.load, "z")
+local zlib_initialized = false
+local function init_zlib()
+    if zlib_initialized then return end
+    ffi = require("ffi")
+    if not pcall(ffi.typeof, "z_stream") then
+        ffi.cdef[[
+            typedef void *(*z_alloc_func)(void *opaque, unsigned int items, unsigned int size);
+            typedef void (*z_free_func)(void *opaque, void *address);
+            typedef struct z_stream_s {
+                const unsigned char *next_in;
+                unsigned int avail_in;
+                unsigned long total_in;
+                unsigned char *next_out;
+                unsigned int avail_out;
+                unsigned long total_out;
+                const char *msg;
+                void *state;
+                z_alloc_func zalloc;
+                z_free_func zfree;
+                void *opaque;
+                int data_type;
+                unsigned long adler;
+                unsigned long reserved;
+            } z_stream;
+        ]]
     end
-    libz = ok and lib or nil
+    pcall(ffi.cdef, "const char *zlibVersion(void);")
+    pcall(ffi.cdef, "int inflateInit2_(z_stream *strm, int windowBits, const char *version, int stream_size);")
+    pcall(ffi.cdef, "int inflate(z_stream *strm, int flush);")
+    pcall(ffi.cdef, "int inflateEnd(z_stream *strm);")
+    if pcall(ffi.typeof, "z_stream") then
+        local ok, lib = pcall(function() return ffi.loadlib("z", 1) end)
+        if not (ok and lib) then
+            ok, lib = pcall(ffi.load, "z")
+        end
+        libz = ok and lib or nil
+    end
+    zlib_initialized = true
 end
 
 local Z_NO_FLUSH = 0
@@ -103,6 +109,7 @@ function M.gunzip(data, options)
     if type(data) ~= "string" or data:sub(1, 2) ~= "\x1f\x8b" then
         return nil, "not gzip"
     end
+    init_zlib()
     if not libz then return nil, "zlib unavailable" end
 
     local version = get_zlib_version()
@@ -251,10 +258,6 @@ function M.download_cover(book_cache_id, img_src, is_force, opts)
 
     local _, image_filename = util.splitFilePathName(final_img_path)
     return final_img_path, image_filename
-end
-function M.convertToGrayscale(image_data)
-    local Png = require("Legado/Png")
-    return Png.processImage(Png.toGrayscale, image_data, 1)
 end
 
 function M.extract_urls_from_html(content, proxy_resolver_func)

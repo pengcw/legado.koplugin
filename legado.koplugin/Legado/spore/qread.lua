@@ -605,11 +605,11 @@ end
 
 function M:_getSearchBookSources()
     if H.is_func(self.source_summary_loader) then
-        local ok, sources = pcall(self.source_summary_loader)
-        if ok and type(sources) == "table" then return sources end
-        if not ok then logger.warn("qread: 读取书源摘要失败，回退远端摘要:", tostring(sources)) end
+        local ok, sources, err = pcall(self.source_summary_loader)
+        if ok then return sources, err end
+        return nil, tostring(sources)
     end
-    return self:getBookSourcesListNew()
+    return self:getBookSourcesList()
 end
 
 function M:searchBookMulti(options, on_chunk, on_finish)

@@ -27,14 +27,27 @@ function M.wrap(html, href)
     return '<a href="' .. EpubHelper.escape_xml_attr(href, '"') .. '">' .. html .. '</a>'
 end
 
-local REF_STYLE = ' class="legado-review-ref" style="font-size:0.5em;vertical-align:super;color:#0066cc;text-decoration:underline;white-space:nowrap"'
 local function review_label(label, href)
     load_dependencies()
-    local text = EpubHelper.escape_xml_attr(label, '"')
-    if href then
-        return '<sup' .. REF_STYLE .. '><a href="' .. EpubHelper.escape_xml_attr(href, '"') .. '" style="color:inherit;text-decoration:underline">' .. text .. '</a></sup>'
+    local count = label:match("^%[(%d+%+?)%]$")
+    local value = count or (label == "[评]" and "评")
+    local class_name, text
+    if value then
+        class_name = "legado-review-marker"
+        local value_class = count and " legado-review-marker-count" or ""
+        text = '<span class="legado-review-marker-bracket">[</span>'
+            .. '<span class="legado-review-marker-value' .. value_class .. '">'
+            .. EpubHelper.escape_xml_attr(value, '"') .. '</span>'
+            .. '<span class="legado-review-marker-bracket">]</span>'
+    else
+        class_name = "legado-review-ref"
+        text = EpubHelper.escape_xml_attr(label, '"')
     end
-    return '<sup' .. REF_STYLE .. '>' .. text .. '</sup>'
+    if href then
+        return '<sup class="' .. class_name .. '"><a href="'
+            .. EpubHelper.escape_xml_attr(href, '"') .. '">' .. text .. '</a></sup>'
+    end
+    return '<sup class="' .. class_name .. '">' .. text .. '</sup>'
 end
 
 function M.take_image_action(attrs, opts)

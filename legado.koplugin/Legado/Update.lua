@@ -138,7 +138,7 @@ function M:checkUpdate()
     end
     local latest_release_version = latest_release_info.latest_version
     return {
-        state = (current_version ~= latest_release_version),
+        state = H.compare_versions(latest_release_version, current_version) > 0,
         info = latest_release_info,
         release_version = latest_release_version,
         current_version = current_version

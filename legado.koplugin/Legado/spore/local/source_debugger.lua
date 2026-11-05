@@ -624,9 +624,7 @@ function M:start_test(item, keyword, allow_fallback)
     end
     keyword = test_keyword(resolved_source, keyword)
     local be = Backend
-    if type(be._isLocal) == "function" and be:_isLocal() and type(be.closeDbManager) == "function" then
-        be:closeDbManager()
-    end
+    be:closeDbManager()
     TaskProg.loading("正在检查书源，请稍候", function()
         local text, summary = M.run_debug(resolved_source, keyword, allow_fallback)
         return { log = text, summary = summary }

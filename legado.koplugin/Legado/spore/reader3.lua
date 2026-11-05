@@ -8,6 +8,7 @@ local Probe = require("Legado.Helper.Probe")
 
 local M = BaseSpec:extend{
   name = "reader3",
+    uses_local_text_transform = true,
   client = nil,
   settings = nil,
 }

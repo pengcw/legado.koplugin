@@ -60,6 +60,22 @@ function M:isUsable(path, book_cache_id)
     return version >= SkeletonEpub.SKELETON_SCHEMA_VERSION and chapters_count > 0
 end
 
+local function cached_chapter_content(chapter)
+    local cached = Backend:getCacheChapterFilePath(chapter, true)
+    local path = (cached and cached.cacheFilePath) or chapter.cacheFilePath
+    if path and util.fileExists(path) and not path:lower():match("%.cbz$") then
+        local data = util.readFromFile(path)
+        if data and data ~= "" and not M:isPlaceholder(data) then return data end
+    end
+end
+
+function M:hasCachedChapter(book_cache_id)
+    for _, chapter in ipairs(Backend:getReadableChapters(book_cache_id) or {}) do
+        if cached_chapter_content(chapter) then return true end
+    end
+    return false
+end
+
 function M:ensureEpub(bookinfo, _, custom_output_path)
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then
         return nil, "invalid bookinfo"
@@ -143,14 +159,10 @@ function M:ensureEpub(bookinfo, _, custom_output_path)
             index = ch_idx,
             title = ch.title or ch.name or string.format("第%d章", ch_idx + 1),
         })
-        local ch_cache = Backend:getCacheChapterFilePath(ch, true)
-        local cache_file = (ch_cache and ch_cache.cacheFilePath) or ch.cacheFilePath
-        if cache_file and util.fileExists(cache_file) and not cache_file:lower():match("%.cbz$") then
-            local data = util.readFromFile(cache_file)
-            if data and data ~= "" and not SkeletonEpub.isPlaceholderHtml(data) then
-                chapters_content[ch_idx] = data
-            end
-        end
+        chapters_content[ch_idx] = cached_chapter_content(ch)
+    end
+    if next(chapters_content) == nil then
+        return nil, "至少缓存一章正文后才能创建骨架书籍"
     end
 
     local ok_build, err_build = SkeletonEpub.buildSkeleton({

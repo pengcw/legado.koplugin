@@ -122,7 +122,7 @@ local function show_rule(rule, dialect)
     UIManager:show(viewer)
 end
 
-local function show_rules(rules, dialect)
+function M.showRules(rules, dialect, title)
     local Menu = require("ui/widget/menu")
     local items = {}
     for _, rule in ipairs(rules) do
@@ -168,7 +168,7 @@ local function show_rules(rules, dialect)
         if #filtered == 0 then MessageBox:notice("没有匹配的规则，换个关键词试试") end
     end
     menu = Menu:new{
-        title = "替换规则",
+        title = title or "替换规则",
         subtitle = string.format("%s · 已启用 %d 条 · 点击查看详情", dialect_name(dialect), #items),
         item_table = items,
         items_max_lines = 2,
@@ -206,7 +206,7 @@ function M.show()
         if type(result.rules) ~= "table" or #result.rules == 0 then
             return MessageBox:notice("本地数据库中暂无已启用替换规则")
         end
-        show_rules(result.rules, result.dialect)
+        M.showRules(result.rules, result.dialect)
     end)
 end
 

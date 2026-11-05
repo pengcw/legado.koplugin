@@ -1,6 +1,7 @@
 local BD = require("ui/bidi")
 local CoverMenu = require("Legado/CoverMenu")
 local Device = require("device")
+local Font = require("ui/font")
 local UIManager = require("ui/uimanager")
 local Event = require("ui/event")
 local NetworkMgr = require("ui/network/manager")
@@ -12,6 +13,13 @@ local H = require("Legado/Helper")
 local Icons = require("Legado.res.icons")
 local PlgState = require("Legado/PlgState")
 
+local function getShelfSubtitle()
+    local name = Backend:getSettings().current_conf_name
+    if not H.is_str(name) or name == "default" then name = "" end
+    local icon = Backend:_isLocal() and Icons.OCT_DEVICE_DESKTOP or Icons.CLOUD_OUTLINE
+    return name ~= "" and (icon .. " " .. name) or icon
+end
+
 local function init_book_shelf(parent)
     if parent.book_shelf then
         return parent.book_shelf
@@ -19,6 +27,7 @@ local function init_book_shelf(parent)
     local book_shelf = CoverMenu:new{
         name = "library_view",
         title = "书架",
+        subtitle = getShelfSubtitle(),
         with_context_menu = true,
         align_baselines = true,
         covers_fullscreen = true,
@@ -31,7 +40,14 @@ local function init_book_shelf(parent)
         refresh_menu_key = nil,
         parent_ref = parent,
         show_cover = true,
+        _is_refreshing = nil,
     }
+    local subtitle_widget = book_shelf.title_bar and book_shelf.title_bar.subtitle_widget
+    if subtitle_widget then
+        subtitle_widget.face = Font:getFace("xx_smallinfofont", 16)
+        subtitle_widget:free()
+        book_shelf.title_bar.title_group:resetLayout()
+    end
 
     if Device:hasKeys() then
         book_shelf.refresh_menu_key = "Home"
@@ -53,12 +69,12 @@ local function init_book_shelf(parent)
         parent:openMenu(dimen)
     end
 
-    function book_shelf:refreshModeTitle()
-        local title = Backend:_isLocal() and "书架 (本地)" or "书架"
-        if self.title == title then return end
-        self.title = title
+    function book_shelf:refreshSubtitle()
+        local subtitle = getShelfSubtitle()
+        if self.subtitle == subtitle then return end
+        self.subtitle = subtitle
         if self.title_bar then
-            self.title_bar:setTitle(title)
+            self.title_bar:setSubTitle(subtitle)
         end
     end
 
@@ -83,10 +99,16 @@ local function init_book_shelf(parent)
         if direction == "south" then
             if NetworkMgr:isConnected() then
                 UIManager:nextTick(function()
-                    self:onRefreshLibrary()
+                    if not self._is_closed and UIManager:isWidgetShown(self) then
+                        self:onRefreshLibrary()
+                    end
                 end)
             else
-                NetworkMgr:runWhenConnected(function() self:onRefreshLibrary() end)
+                NetworkMgr:runWhenConnected(function()
+                    if not self._is_closed and UIManager:isWidgetShown(self) then
+                        self:onRefreshLibrary()
+                    end
+                end)
             end
             return
         end
@@ -94,7 +116,7 @@ local function init_book_shelf(parent)
     end
 
     function book_shelf:refreshItems(no_recalculate_dimen)
-        self:refreshModeTitle()
+        self:refreshSubtitle()
         local books_cache_data = Backend:getBookShelfCache()
         if H.is_tbl(books_cache_data) and #books_cache_data > 0 then
             self.item_table = self:generateItemTableFromMangas(books_cache_data)
@@ -123,27 +145,28 @@ local function init_book_shelf(parent)
             return MessageBox:error("书籍信息查询出错")
         end
 
-        if Backend:isDownloadBook(bookinfo) then
-            require("Legado.LocalExtension").downloadBook(bookinfo)
-            return
-        end
-
         local onReturnCallBack = function()
             self:show_view()
             self:refreshItems(true)
         end
 
+        PlgState._entry_path = nil
         PlgState:entrySource("bookshelf")
         self.parent_ref:refreshBookTocWidget(bookinfo, onReturnCallBack, true)
         self:onClose()
 
         UIManager:nextTick(function()
             Backend:autoPinToTop(bookinfo.cache_id, bookinfo.sortOrder)
-            self.parent_ref:addBkShortcut(bookinfo)
+            if Backend:getSettings().chapter_mode == false then
+                self.parent_ref:addBkShortcut(bookinfo)
+            end
         end)
     end
 
     function book_shelf:onRefreshLibrary()
+        if self._is_closed or not UIManager:isWidgetShown(self) then return end
+        if self._is_refreshing then return end
+        self._is_refreshing = true
         Backend:closeDbManager()
         local is_local = Backend:_isLocal()
         TaskProg.loading({
@@ -153,6 +176,8 @@ local function init_book_shelf(parent)
                 return Backend:refreshLibraryCache(PlgState.ui_refresh_time)
             end,
             callback = function(ok, result)
+                self._is_refreshing = nil
+                if self._is_closed then return end
                 if ok == true then
                     Backend:HandleResponse(result, function()
                         MessageBox:notice(is_local and '刷新成功' or '同步成功')
@@ -170,6 +195,11 @@ local function init_book_shelf(parent)
                 end
             end,
         })
+    end
+
+    function book_shelf:onCloseWidget()
+        self._is_refreshing = nil
+        CoverMenu.onCloseWidget(self)
     end
 
     function book_shelf:onMenuHold(item)

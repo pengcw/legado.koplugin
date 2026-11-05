@@ -6,8 +6,6 @@ local UIManager = require("ui/uimanager")
 local DocSettings = require("docsettings")
 local MessageBox = require("Legado/MessageBox")
 local Backend = require("Legado/Backend")
-local Refresh = require("Legado.Skeleton.Refresh")
-local SkeletonBook = require("Legado.Skeleton.Book")
 local H = require("Legado/Helper")
 local Patcher = require("Legado.patches")
 local PlgState = require("Legado/PlgState")
@@ -18,16 +16,21 @@ local Handlers = {}
 local function return_to_filemanager(ui)
     local file = ui.document.file
     if Env.is_legado_chapter_cache(nil, ui) then
-        ui:setLastDirForFileBrowser(Env.getHomeDir())
-        file = nil
+        local entry_path = PlgState._entry_path
+        if entry_path and util.fileExists(entry_path) then
+            file = entry_path
+        else
+            ui:setLastDirForFileBrowser(Env.getHomeDir())
+            file = nil
+        end
     end
     ui:onClose()
+    PlgState._entry_path = nil
     ui:showFileManager(file)
 end
 
 function Handlers:readerEventRules(parent_ref)
     if not parent_ref.ui or parent_ref.ui.name ~= "ReaderUI" then return end
-    local LibraryView = require("Legado/LibraryView")
     local reader_document = parent_ref.ui.document
     local function matches(ui)
         return Env.is_legado_chapter_cache(nil, ui)
@@ -37,7 +40,7 @@ function Handlers:readerEventRules(parent_ref)
             or Env.is_legado_skeleton_book(nil, ui)
     end
     local function boundary(ui, direction)
-        local library_obj = LibraryView:getInstance()
+        local library_obj = require("Legado/LibraryView"):getInstance()
         if library_obj then
             if Backend:enforceRateLimit(PlgState.last_page_turn_time, 80) then return end
             PlgState.last_page_turn_time = time.now()
@@ -84,7 +87,7 @@ function Handlers:readerEventRules(parent_ref)
             mode = "after",
             matches = function(ui) return Env.is_legado_skeleton_book(nil, ui) end,
             run = function(ui, event)
-                ui._legado_last_virtual_toc_idx = SkeletonBook:onPageUpdate(
+                ui._legado_last_virtual_toc_idx = require("Legado.Skeleton.Book"):onPageUpdate(
                     ui, event.args[1], ui._legado_last_virtual_toc_idx)
             end,
         },
@@ -99,7 +102,8 @@ function Handlers:readerEventRules(parent_ref)
             mode = "before",
             matches = legadoReader,
             run = function(ui)
-                Refresh:cancelForDocument(reader_document)
+                local refresh = package.loaded["Legado.Skeleton.Refresh"]
+                if refresh then refresh:cancelForDocument(reader_document) end
                 ui._legado_last_virtual_toc_idx = nil
                 PlgState:entrySource(nil)
                 PlgState:readerUiVisible(false)
@@ -123,10 +127,10 @@ function Handlers:readerEventRules(parent_ref)
 end
 
 function Handlers:register(parent_ref)
-    local LibraryView = require("Legado/LibraryView")
 
     function parent_ref:onShowLegadoLibraryView()
-        local library_obj = LibraryView:getInstance()
+        PlgState._entry_path = nil
+        local library_obj = require("Legado/LibraryView"):getInstance()
         if not library_obj then return true end
 
         if self.ui and self.ui.document then
@@ -154,10 +158,13 @@ function Handlers:register(parent_ref)
 
         if not H.is_str(book_cache_id) then
             UIManager:close(loading_msg)
-            return undoFileOpen and undoFileOpen(file)
+            PlgState._entry_path = nil
+            if undoFileOpen then return undoFileOpen(file) end
+            PlgState:entrySource(nil)
+            return MessageBox:error("无法识别骨架 EPUB 入口")
         end
 
-        local library_obj = LibraryView:getInstance()
+        local library_obj = require("Legado/LibraryView"):getInstance()
         if not library_obj then
             logger.warn("loadLastReadChapter LibraryView instance not loaded")
             UIManager:close(loading_msg)
@@ -186,7 +193,7 @@ function Handlers:register(parent_ref)
     end
 
     function parent_ref:onShowLegadoToc(book_cache_id)
-        local library_obj = LibraryView:getInstance()
+        local library_obj = require("Legado/LibraryView"):getInstance()
         if not library_obj then
             logger.warn("ShowLegadoToc LibraryView instance not loaded")
             return true
@@ -229,13 +236,17 @@ function Handlers:register(parent_ref)
     end
 
     function parent_ref:onScreenResize(_)
-        local library_obj = LibraryView.instance
+        local library = package.loaded["Legado/LibraryView"]
+        local library_obj = library and library.instance
         if library_obj then
-            if library_obj.book_menu then
-                LibraryView.instance.book_menu = nil
+            if library_obj.invalidateBookShelf then
+                library_obj:invalidateBookShelf()
+            elseif library_obj.book_shelf then
+                library_obj.book_shelf:onClose()
+                library_obj.book_shelf = nil
             end
             if library_obj.book_toc then
-                LibraryView.instance.book_toc = nil
+                library_obj.book_toc = nil
             end
         end
     end
@@ -249,9 +260,12 @@ function Handlers:register(parent_ref)
             show_reader(ReaderUI, file_path, nil, true)
         end
         if not parent_ref:isSkeletonEpub(file) then
+            PlgState._entry_path = nil
             open_regular_file(file)
             return
         end
+        local settings = Backend:getSettings()
+        PlgState._entry_path = (not settings or settings.chapter_mode ~= false) and file or nil
         local doc_settings = DocSettings:open(file)
         if not (doc_settings and doc_settings:readSetting("book_cache_id")) then
             pcall(function()
@@ -260,10 +274,12 @@ function Handlers:register(parent_ref)
             end)
         end
         PlgState:entrySource("filemanager")
+        local fallback = settings and settings.chapter_mode == false and open_regular_file or nil
         local ok, err = pcall(function()
-            self:_loadBookFromManager(file, open_regular_file)
+            self:_loadBookFromManager(file, fallback)
         end)
         if not ok then
+            PlgState._entry_path = nil
             logger.err("fail to open file:", err)
         end
         return true
@@ -288,9 +304,9 @@ function Handlers:register(parent_ref)
             return MessageBox:error("旧版链接对应的书籍信息不存在")
         end
         MessageBox:notice("检测到链接文件，正在重新生成快捷 EPUB…")
-        local library_obj = LibraryView:getInstance()
+        local library_obj = require("Legado/LibraryView"):getInstance()
         local book_links = library_obj and library_obj.book_links
-        SkeletonBook:ensureEpubAsync(bookinfo, nil, nil, function(epub_path)
+        require("Legado.Skeleton.Book"):ensureEpubAsync(bookinfo, nil, nil, function(epub_path)
             if book_links and book_links.refreshBookMetadata then
                 book_links:refreshBookMetadata(epub_path, bookinfo)
             end
@@ -325,6 +341,18 @@ function Handlers:register(parent_ref)
                                 text = "书籍缓存",
                                 callback = function()
                                     require("Legado/BookCacheMgr"):open()
+                                end,
+                            },
+                            {
+                                text = "刷新书籍样式",
+                                keep_menu_open = true,
+                                callback = function()
+                                    local ok, err = require("Legado/EpubHelper").refreshStyles()
+                                    if not ok then
+                                        MessageBox:error("刷新样式失败：" .. tostring(err))
+                                        return
+                                    end
+                                    MessageBox:info("样式已刷新。", 3)
                                 end,
                             },
                             {
@@ -399,96 +427,108 @@ function Handlers:register(parent_ref)
                 end
             end
 
-            local settings = Backend:getSettings()
-            local library_obj = LibraryView:getInstance()
-            local book_cache_id = library_obj:getReadingBookId()
-            local is_comic = book_cache_id and Backend:isBookTypeComic(book_cache_id)
+            local function build_sub_items()
+                local settings = Backend:getSettings()
+                local library_obj = require("Legado/LibraryView"):getInstance()
+                local book_cache_id = library_obj:getReadingBookId()
+                local is_comic = book_cache_id and Backend:isBookTypeComic(book_cache_id)
 
-            local sub_items = {}
+                local sub_items = {}
 
-            if is_comic then
-                table.insert(sub_items, {
-                    text = "漫画免缓存",
-                    keep_menu_open = true,
-                    checked_func = function()
-                        local b_id = library_obj:getReadingBookId() or book_cache_id
-                        if b_id then
+                if is_comic then
+                    table.insert(sub_items, {
+                        text = "漫画免缓存",
+                        keep_menu_open = true,
+                        checked_func = function()
+                            local b_id = library_obj:getReadingBookId() or book_cache_id
+                            if b_id then
+                                local extras_settings = Backend:getBookExtras(b_id)
+                                return H.is_tbl(extras_settings.data) and extras_settings.data.stream_image_view ~= false
+                            end
+                            return false
+                        end,
+                        callback = function()
+                            MessageBox:info("不缓存在线获取内容\n <长按切换选项>")
+                        end,
+                        hold_callback = function(menu_def)
+                            local b_id = library_obj:getReadingBookId() or book_cache_id
+                            if not b_id then return end
                             local extras_settings = Backend:getBookExtras(b_id)
-                            return H.is_tbl(extras_settings.data) and extras_settings.data.stream_image_view ~= false
-                        end
-                        return false
-                    end,
+                            local ChapterListing = require("Legado/ChapterListing")
+                            ChapterListing.switchStreamMode(extras_settings, function()
+                                if menu_def and menu_def.updateItems then menu_def:updateItems() end
+                                local reading_chapter = PlgState:readingChapter()
+                                if reading_chapter then
+                                    library_obj:loadAndRenderChapter(reading_chapter)
+                                end
+                            end, b_id)
+                        end,
+                    })
+                end
+
+                table.insert(sub_items, {
+                    text = "提取资源",
                     callback = function()
-                        MessageBox:info("不缓存在线获取内容\n <长按切换选项>")
+                        if self.ui.menu then self.ui.menu:onTapCloseMenu() end
+                        require("Legado.BookDownload").showResources(self.ui)
                     end,
-                    hold_callback = function(menu_def)
-                        local b_id = library_obj:getReadingBookId() or book_cache_id
-                        if not b_id then return end
-                        local extras_settings = Backend:getBookExtras(b_id)
-                        local ChapterListing = require("Legado/ChapterListing")
-                        ChapterListing.switchStreamMode(extras_settings, function()
+                })
+
+                table.insert(sub_items, {
+                    text = "重新下载本章",
+                    separator = is_comic,
+                    callback = function()
+                        self:onRefreshLegadoChapter()
+                    end,
+                })
+
+                if Backend:supportsProviderMethod("saveBookProgress") then
+                    table.insert(sub_items, {
+                        text = "自动上传进度",
+                        keep_menu_open = true,
+                        help_text = "阅读时，自动上传阅读进度",
+                        checked_func = function() return settings.sync_reading == true end,
+                        hold_callback = function(menu_def)
+                            require("Legado/SettingsMenu").toggleSyncReading(settings)
                             if menu_def and menu_def.updateItems then menu_def:updateItems() end
+                        end,
+                        callback = function()
+                            MessageBox:info("阅读时，自动上传阅读进度\n <长按切换选项>")
+                        end,
+                    })
+
+                    table.insert(sub_items, {
+                        text = "立即上传进度",
+                        callback = function()
                             local reading_chapter = PlgState:readingChapter()
                             if reading_chapter then
-                                library_obj:loadAndRenderChapter(reading_chapter)
+                                local toc_obj = library_obj:getBookTocWidget()
+                                if toc_obj then
+                                    toc_obj:syncProgressShow(reading_chapter)
+                                end
+                            else
+                                MessageBox:error("上传进度失败: 没有获取到当前章节")
                             end
-                        end, b_id)
-                    end,
-                })
-            end
-
-            table.insert(sub_items, {
-                text = "重新下载本章",
-                separator = is_comic,
-                callback = function()
-                    self:onRefreshLegadoChapter()
-                end,
-            })
-
-            if Backend:supportsProviderMethod("saveBookProgress") then
-                table.insert(sub_items, {
-                    text = "自动上传进度",
-                    keep_menu_open = true,
-                    help_text = "阅读时，自动上传阅读进度",
-                    checked_func = function() return settings.sync_reading == true end,
-                    hold_callback = function(menu_def)
-                        require("Legado/SettingsMenu").toggleSyncReading(settings)
-                        if menu_def and menu_def.updateItems then menu_def:updateItems() end
-                    end,
-                    callback = function()
-                        MessageBox:info("阅读时，自动上传阅读进度\n <长按切换选项>")
-                    end,
-                })
+                        end,
+                    })
+                end
 
                 table.insert(sub_items, {
-                    text = "立即上传进度",
+                    text = "返回书架",
+                    separator = true,
                     callback = function()
-                        local reading_chapter = PlgState:readingChapter()
-                        if reading_chapter then
-                            local toc_obj = library_obj:getBookTocWidget()
-                            if toc_obj then
-                                toc_obj:syncProgressShow(reading_chapter)
-                            end
-                        else
-                            MessageBox:error("上传进度失败: 没有获取到当前章节")
-                        end
+                        local library = require("Legado/LibraryView"):getInstance()
+                        if library then library:fetchAndShow() end
                     end,
                 })
-            end
 
-            table.insert(sub_items, {
-                text = "返回书架",
-                separator = true,
-                callback = function()
-                    local library = LibraryView:getInstance()
-                    if library then library:fetchAndShow() end
-                end,
-            })
+                return sub_items
+            end
 
             menu_items.Legado_reader_ui_menu = {
                 text = "Legado 选项",
                 sorting_hint = "search",
-                sub_item_table = sub_items,
+                sub_item_table_func = build_sub_items,
             }
         end
 
@@ -525,7 +565,7 @@ function Handlers:register(parent_ref)
                     doc_settings:saveSetting("legado_doc_is_new", true)
                 end
 
-                local library_obj = LibraryView:getInstance()
+                local library_obj = require("Legado/LibraryView"):getInstance()
                 local shared_meta_data = library_obj:getSharedMetaData(directory)
 
                 if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
@@ -555,9 +595,6 @@ function Handlers:register(parent_ref)
                     doc_settings.data.css = "./data/fb2.css"
                 end
 
-                if document then
-                    document.is_pic = true
-                end
             elseif parent_ref:isSkeletonEpub(document.file) and doc_settings.data then
                 Patcher.readui_starting(self.ui)
                 local had_alternative_toc = doc_settings.data.alternative_toc == true
@@ -579,7 +616,7 @@ function Handlers:register(parent_ref)
 
                 if self.ui.doc_settings and type(self.ui.doc_settings.data) == 'table' then
                     local persisted_settings_keys = require("Legado.res.metadata")
-                    local library_obj = LibraryView:getInstance()
+                    local library_obj = require("Legado/LibraryView"):getInstance()
                     local shared_meta_data = library_obj:getSharedMetaData(directory)
 
                     if H.is_tbl(shared_meta_data) and H.is_tbl(shared_meta_data.data) then
@@ -630,6 +667,7 @@ function Handlers:register(parent_ref)
             if not (doc_settings and doc_settings.data and self.ui and self.view) then return end
 
             if not parent_ref:isCachePath(nil, self.ui) then
+                PlgState._entry_path = nil
                 PlgState:readerUiVisible(false)
                 PlgState:readingMode(nil)
                 PlgState:clearReadingRoute()
@@ -665,7 +703,7 @@ function Handlers:register(parent_ref)
             if not is_chapter_open and not parent_ref:isCachePath(nil, ui_ref) then return end
 
             if Env.is_legado_skeleton_book(nil, ui_ref) then return end
-            local library_obj = LibraryView:getInstance()
+            local library_obj = require("Legado/LibraryView"):getInstance()
             if library_obj then
                 local reading_chapter = PlgState:readingChapter()
                 if reading_chapter then

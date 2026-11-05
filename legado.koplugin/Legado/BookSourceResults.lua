@@ -28,6 +28,7 @@ local M = {
 
     explore_url = nil,
     explore_page = nil,
+    explore_title = nil,
     selected_source = nil,
 
     last_index = nil,
@@ -200,13 +201,15 @@ function M:hideLoadingSpinner()
     end
 end
 
-function M:withLoading(label, task_func, on_success, on_error)
+function M:withLoading(label, task_func, on_success, on_error, on_abort)
     on_success = H.is_func(on_success) and on_success or function() end
     on_error = H.is_func(on_error) and on_error or function() end
     if Backend:_isLocal() then Backend:closeDbManager() end
     TaskProg.loading(label, task_func, function(state, response)
         if state == true then
             Backend:HandleResponse(response, on_success, on_error)
+        elseif H.is_func(on_abort) then
+            on_abort(response)
         end
     end, nil, true)
 end
@@ -220,7 +223,10 @@ function M:modifySuccessCallback(is_close_menu)
     return is_close_menu and self:onCloseMenu()
 end
 
-function M:onCloseMenu()
+function M:onCloseMenu(keep_explore_categories)
+    if not keep_explore_categories then
+        self._explore_category_generation = (self._explore_category_generation or 0) + 1
+    end
     self._multi_search_request_id = (self._multi_search_request_id or 0) + 1
     self._available_source_request_id = (self._available_source_request_id or 0) + 1
     self._multi_search_cancel = nil
@@ -233,7 +239,8 @@ function M:onCloseMenu()
 
     self.explore_url = nil
     self.explore_page = nil
-    self.selected_source = nil
+    self.explore_title = nil
+    if not keep_explore_categories then self.selected_source = nil end
 
     if self.results_menu and self.results_menu._container then
         UIManager:close(self.results_menu._container)
@@ -262,7 +269,7 @@ function M:createBookSourceMenu(option)
             return true
         end,
         close_callback = function()
-            self:onCloseMenu()
+            self:onCloseMenu(self.call_mode == "EXPLORE")
         end
     }
 
@@ -343,9 +350,7 @@ function M:showBookInfo(bookinfo)
         return MessageBox:error("书籍信息错误")
     end
 
-    local download_book = Backend:isDownloadBook(bookinfo)
-    local button_text = download_book and '下载整本'
-        or ((self.call_mode == "SEARCH" or self.call_mode == "EXPLORE") and '添加' or '换源')
+    local button_text = (self.call_mode == "SEARCH" or self.call_mode == "EXPLORE") and '添加' or '换源'
 
     local BookDetailsDialog = require("Legado/BookDetailsDialog")
     local dialog = BookDetailsDialog:new{
@@ -354,9 +359,7 @@ function M:showBookInfo(bookinfo)
             {
                 text = button_text,
                 callback = function()
-                    if download_book then
-                        LocalExtension.downloadBook(bookinfo)
-                    elseif self.call_mode == "SEARCH" or self.call_mode == "EXPLORE" then
+                    if self.call_mode == "SEARCH" or self.call_mode == "EXPLORE" then
                         self:addBookToLibrary(bookinfo)
                     else
                         self:changeBookSource(bookinfo)
@@ -730,7 +733,9 @@ function M:selectBookSource(selectCallback, options)
 
                 for _, v in ipairs(data) do
                     if H.is_tbl(v) and H.is_str(v.bookSourceName) and H.is_str(v.bookSourceUrl) and (not v.enabled or v.enabled == true) then
-                        if with_explore_url and (not v.enabledExplore and not v.exploreUrl) then
+                        if with_explore_url and (v.enabledExplore == false
+                                or not H.is_str(v.exploreUrl) or v.exploreUrl:match("^%s*$")
+                                or v.exploreUrl:match("^%s*%[%s*%]%s*$")) then
                             goto continue
                         end
                         local group = (H.is_str(v.bookSourceGroup) and v.bookSourceGroup ~= "") and string.format(" [%s]", v.bookSourceGroup) or ""
@@ -789,24 +794,44 @@ function M:selectBookSource(selectCallback, options)
                     end
                 end
 
+                local function openSourceFilter()
+                    MessageBox:input("请输入书源名称、URL 或分组：", function(query)
+                        if query ~= nil then applySourceFilter(query) end
+                    end, {
+                        title = "筛选书源",
+                        input_hint = "名称、URL 或分组",
+                        input = active_search_query,
+                    })
+                end
+
+                local function refreshSources()
+                    local started, err = Backend:BookSourcesAndRulesAsync(true)
+                    if started == true then
+                        MessageBox:notice("已加入书源刷新任务")
+                    elseif err then
+                        MessageBox:notice(tostring(err))
+                    end
+                end
+
+                local function showSourceActions()
+                    local buttons = {{{text = "筛选书源", callback = openSourceFilter}}}
+                    if not Backend:_isLocal() then
+                        table.insert(buttons, {{text = "更新书源", callback = refreshSources}})
+                    end
+                    UIManager:show(require("ui/widget/buttondialog"):new{
+                        title = "书源操作",
+                        buttons = buttons,
+                    })
+                end
+
                 local default_subtitle = Backend:_isLocal() and "点击选择书源" or string.format("关键词：%s", self.search_text or "")
                 source_list_menu = self:createMenu{
                     title = options.title or "选择书源",
                     subtitle = options.subtitle or default_subtitle,
                     item_table = source_list_menu_table,
                     items_per_page = 15,
-                    title_bar_left_icon = options.title_bar_left_icon == nil and "appbar.search" or options.title_bar_left_icon,
-                    onLeftButtonTap = options.onLeftButtonTap or function()
-                        MessageBox:input("请输入书源名称、URL 或分组：", function(query)
-                            if query ~= nil then
-                                applySourceFilter(query)
-                            end
-                        end, {
-                            title = "筛选书源",
-                            input_hint = "名称、URL 或分组",
-                            input = active_search_query,
-                        })
-                    end,
+                    title_bar_left_icon = options.title_bar_left_icon == nil and "appbar.menu" or options.title_bar_left_icon,
+                    onLeftButtonTap = options.onLeftButtonTap or showSourceActions,
                     onMenuSelect = function(menu_self, item)
                         if H.is_func(selectCallback) then
                             selectCallback(item, menu_self)
@@ -817,13 +842,7 @@ function M:selectBookSource(selectCallback, options)
                         source_list_container = nil
                     end
                 }
-                source_list_menu.onLeftButtonHold = options.onLeftButtonHold or function()
-                    local started, err = Backend:BookSourcesAndRulesAsync(true)
-                    if started == false then
-                        return MessageBox:notice(tostring(err or "当前模式不支持刷新书源"))
-                    end
-                    MessageBox:notice("已加入书源刷新任务")
-                end
+                source_list_menu.onLeftButtonHold = options.onLeftButtonHold
                 if options.onMenuHold then
                     source_list_menu.onMenuHold = options.onMenuHold
                 end
@@ -865,6 +884,7 @@ function M:showSourceContextMenu(item)
     end
     local function clear_source(action, label)
         UIManager:close(dialog)
+        Backend:closeDbManager()
         TaskProg.loading("正在" .. label, function()
             return Backend:loginBookSource({bookSourceUrl = item.bookSourceUrl or item.url, action = action})
         end, function(state, response)
@@ -889,9 +909,6 @@ function M:showSourceContextMenu(item)
 end
 
 function M:openLocalBookSourceSettings()
-    if not Backend:_isLocal() then
-        return MessageBox:notice("远程模式请在阅读 App 内登录书源")
-    end
     self:selectBookSource(function(item)
         if item then
             self:showSourceContextMenu(item)
@@ -959,6 +976,9 @@ function M:addBookToLibrary(bookinfo)
 end
 
 function M:exploreBookDialog(onReturnCallback)
+    if not Backend:_isLocal() and Backend:usesLocalExplore() and not LocalExtension.available() then
+        return MessageBox:notice("扩展不可用")
+    end
     self:init()
     self.on_success_callback = onReturnCallback
     self.call_mode = "EXPLORE"
@@ -972,6 +992,7 @@ function M:exploreBookDialog(onReturnCallback)
                 bookSourceUrl = item.url,
         }
         self.selected_source = selected_source
+        Probe.event("Source", "探索选源", selected_source.bookSourceName)
         self:selectExploreCategory(selected_source)
     end)
 end
@@ -983,9 +1004,15 @@ function M:selectExploreCategory(source)
 
     local bookSourceUrl = source.bookSourceUrl
     local bookSourceName = source.bookSourceName
+    self._explore_category_generation = (self._explore_category_generation or 0) + 1
+    local generation = self._explore_category_generation
+    local category_span = Probe.start("Source", "探索分类加载", bookSourceName)
 
-    local decode_explore_url = function(explore_url)
+    local decode_explore_url
+    decode_explore_url = function(explore_url, replace_dialog, span)
+        local operation = replace_dialog and "探索分类操作" or "探索分类加载"
         if not (H.is_str(explore_url) and explore_url ~= "") then
+            Probe.done("Source", operation, bookSourceName, span, "EMPTY", "0 categories")
             return MessageBox:info("书源没有探索选项")
         end
 
@@ -1007,43 +1034,109 @@ function M:selectExploreCategory(source)
         end
 
         if not (H.is_tbl(categories) and #categories > 0) then
+            Probe.fail("Source", operation, bookSourceName, span, "此源没有有效探索配置")
             return MessageBox:error("此源没有有效探索配置")
         end
 
         local category_dialog
+        local closed, busy = false, false
+        local function current()
+            return not closed and self._explore_category_generation == generation
+        end
+        local function run_action(action)
+            if busy or not current() then return end
+            busy = true
+            local action_span = Probe.start("Source", "探索分类操作", bookSourceName)
+            if not Backend:_isLocal() and Backend:usesLocalExplore() then Backend:closeDbManager() end
+            self:withLoading("正在执行发现按钮...", function()
+                return Backend:getBookSourcesExploreUrl(bookSourceUrl, nil, {action = action})
+            end, function(data)
+                busy = false
+                if not current() then
+                    Probe.retry("Source", "探索分类操作", bookSourceName, action_span, "丢弃过期响应")
+                    return
+                end
+                if H.is_tbl(data) and data.refreshExplore == true then
+                    if not H.is_str(data.exploreUrl) then
+                        Probe.fail("Source", "探索分类操作", bookSourceName, action_span, "服务器返回数据异常")
+                        return MessageBox:notice("服务器返回数据异常")
+                    end
+                    decode_explore_url(data.exploreUrl, category_dialog, action_span)
+                else
+                    Probe.done("Source", "探索分类操作", bookSourceName, action_span, "OK")
+                    if H.is_tbl(data) and H.is_str(data.message) and data.message ~= "" then
+                        MessageBox:notice(data.message)
+                    end
+                end
+            end, function(err)
+                busy = false
+                Probe.fail("Source", "探索分类操作", bookSourceName, action_span, err)
+                if current() then MessageBox:notice(err or "发现按钮执行失败") end
+            end, function(reason)
+                busy = false
+                local finish = is_cancel_message(reason) and Probe.retry or Probe.fail
+                finish("Source", "探索分类操作", bookSourceName, action_span, tostring(reason))
+            end)
+        end
         local category_buttons = {}
-        local row = {}
-        local is_title_line
-        local has_valid_line
+        local supports_actions = Backend:canRunExploreAction()
+        local row, row_columns = {}, 4
+        local has_valid_line = false
+        local function flush_row()
+            if #row == 0 then return end
+            category_buttons[#category_buttons + 1] = row
+            row = {}
+        end
 
-        for i, category in ipairs(categories) do
-            if H.is_str(category.title) and category.title ~= "" then
-
-                is_title_line = not (H.is_str(category.url) and category.url ~= "")
-                if not is_title_line then
-                    table.insert(row, {
-                        text = category.title,
+        for _, category in ipairs(categories) do
+            if H.is_tbl(category) and H.is_str(category.title) and util.trim(category.title) ~= "" then
+                local title = util.trim(category.title)
+                local is_button = category.type == "button"
+                local supported_button = is_button and supports_actions
+                    and H.is_str(category.action) and category.action ~= ""
+                local is_url = (category.type == nil or category.type == "url")
+                    and H.is_str(category.url) and category.url ~= ""
+                if supported_button or is_url then
+                    local text = supported_button and ("操作 · " .. title) or title
+                    local length = utf8c.len(text)
+                    local columns = length > 14 and 1 or (length > 7 and 2 or 4)
+                    if columns ~= row_columns or is_button then flush_row() end
+                    row_columns = columns
+                    local action, url = category.action, category.url
+                    row[#row + 1] = {
+                        text = text,
+                        avoid_text_truncation = true,
                         callback = function()
-                            self:handleExploreBook(source, category.url)
+                            if busy or not current() then return end
+                            Probe.event("Source", "探索分类选择", function()
+                                return string.format("source=%s title=%s type=%s", tostring(bookSourceName), title, supported_button and "button" or "url")
+                            end)
+                            if supported_button then
+                                run_action(action)
+                            else
+                                self:handleExploreBook(source, url, false, title)
+                            end
                         end,
-                    })
-                end
-                if #row == 4 or (i == #categories and #row > 0) then
-                    table.insert(category_buttons, row)
-                    row = {}
+                    }
                     has_valid_line = true
-                end
-                if is_title_line then
-                    table.insert(category_buttons, {{
-                        text = category.title,
+                    if #row == row_columns or is_button then flush_row() end
+                else
+                    flush_row()
+                    category_buttons[#category_buttons + 1] = {{
+                        text = is_button and ("操作 · " .. title .. "（不可用）") or title,
                         callback = function() end,
                         enabled = false,
-                    }})
+                        align = "left",
+                        font_bold = true,
+                        avoid_text_truncation = true,
+                    }}
                 end
             end
         end
+        flush_row()
 
-        if #category_buttons == 0 or has_valid_line ~= true then
+        if not has_valid_line then
+            Probe.fail("Source", operation, bookSourceName, span, "无有效探索分类")
             return MessageBox:error("无有效探索分类")
         end
 
@@ -1058,22 +1151,43 @@ function M:selectExploreCategory(source)
             width_factor = 0.8,
         }
 
+        local on_close = category_dialog.onCloseWidget
+        category_dialog.onCloseWidget = function(dialog)
+            closed = true
+            return on_close(dialog)
+        end
+        if replace_dialog then UIManager:close(replace_dialog) end
         UIManager:show(category_dialog)
+        Probe.done("Source", operation, bookSourceName, span, "OK", function()
+            return string.format("%d categories", #categories)
+        end)
     end
 
+    if not Backend:_isLocal() and Backend:usesLocalExplore() then Backend:closeDbManager() end
     self:withLoading("正在获取探索信息...", function()
             return Backend:getBookSourcesExploreUrl(bookSourceUrl)
     end, function(data)
+        if self._explore_category_generation ~= generation then
+            Probe.retry("Source", "探索分类加载", bookSourceName, category_span, "丢弃过期响应")
+            return
+        end
         if not (H.is_tbl(data) and H.is_str(data.exploreUrl) )then
+            Probe.fail("Source", "探索分类加载", bookSourceName, category_span, "服务器返回数据异常")
             return MessageBox:notice('服务器返回数据异常')
         end
-        decode_explore_url(data.exploreUrl)
+        decode_explore_url(data.exploreUrl, nil, category_span)
     end, function(err_msg)
-        MessageBox:notice(err_msg or '加载失败')
+        Probe.fail("Source", "探索分类加载", bookSourceName, category_span, err_msg)
+        if self._explore_category_generation == generation then
+            MessageBox:notice(err_msg or '加载失败')
+        end
+    end, function(reason)
+        local finish = is_cancel_message(reason) and Probe.retry or Probe.fail
+        finish("Source", "探索分类加载", bookSourceName, category_span, tostring(reason))
     end)
 end
 
-function M:handleExploreBook(source_info, url, is_more_call)
+function M:handleExploreBook(source_info, url, is_more_call, category_title)
     if not( H.is_tbl(source_info) and H.is_str(url) ) then
         return MessageBox:error("参数错误")
     end
@@ -1086,12 +1200,21 @@ function M:handleExploreBook(source_info, url, is_more_call)
         page = self.explore_page,
     }
 
+    local action = is_more_call and "探索翻页" or "探索首屏"
+    local span = Probe.start("Source", action, source_info.bookSourceName, function()
+        return string.format("page=%s category=%s", tostring(options.page), tostring(category_title or self.explore_title or "-"))
+    end)
+    if not Backend:_isLocal() and Backend:usesLocalExplore() then Backend:closeDbManager() end
     self:withLoading("正在加载书籍...", function()
        return Backend:exploreBook(options)
     end, function(data)
         if not H.is_tbl(data) then
+            Probe.fail("Source", action, source_info.bookSourceName, span, "服务器返回数据错误")
             return MessageBox:notice('服务器返回数据错误')
         end
+        Probe.done("Source", action, source_info.bookSourceName, span, #data > 0 and "OK" or "EMPTY", function()
+            return string.format("%d items, page=%s", #data, tostring(options.page))
+        end)
         if #data == 0 and not is_more_call then
            return MessageBox:notice('没有更多书籍')
         end
@@ -1100,16 +1223,22 @@ function M:handleExploreBook(source_info, url, is_more_call)
         if is_more_call ~= true then
             self.results = data
             self.explore_url = url
+            self.explore_title = category_title
             self:createBookSourceMenu({
                 title = string.format("发现 · %s", source_info.bookSourceName or ""),
-                subtitle = url,
+                subtitle = category_title or "探索结果",
             })
         else
             self:refreshItems(false, data)
         end
     end, function(err_msg)
+        local finish = is_cancel_message(err_msg) and Probe.retry or Probe.fail
+        finish("Source", action, source_info.bookSourceName, span, err_msg)
         self:updateBatchState("EXPLORE", true, self.has_more_api_results, err_msg)
         MessageBox:notice(err_msg or '加载失败')
+    end, function(reason)
+        local finish = is_cancel_message(reason) and Probe.retry or Probe.fail
+        finish("Source", action, source_info.bookSourceName, span, tostring(reason))
     end)
 end
 

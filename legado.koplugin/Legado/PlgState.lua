@@ -19,12 +19,13 @@ local M = {
     is_low_version = nil,
     last_search_input = nil,
 
-    _local_mode_states = {},
+    _local_mode = false,
     LOCAL_MODE_ENTRY_ENABLED = true,
 
     _preload_task = nil,
     _preload_timer_cancel = nil,
     _open_entry = nil,
+    _entry_path = nil,
     _after_readui_open_callback = nil,
 }
 
@@ -51,12 +52,11 @@ local is_boolean = function(t)
     return "boolean" == type(t)
 end
 
-function M:isLocalMode(conf_name, value)
-    conf_name = conf_name or "default"
+function M:isLocalMode(_, value)
     if is_boolean(value) then
-        M._local_mode_states[conf_name] = value
+        M._local_mode = value
     end
-    return M._local_mode_states[conf_name] == true
+    return M._local_mode == true
 end
 
 function M:isLocalModeEntryEnabled(value)

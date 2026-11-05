@@ -54,4 +54,12 @@ function M.list_shuffle(t)
     return t
 end
 
+function M.resolveDownloadResource(info, source, book)
+    return require("Legado.spore.file_download").resolve(info, source, book)
+end
+
+function M.downloadResource(resource, temp, output_dir)
+    return require("Legado.spore.file_download").downloadResource(resource, temp, output_dir)
+end
+
 return M

@@ -359,7 +359,7 @@ local function append_text_html(lines, content, title, state, escape_text, blank
     end
 end
 
-function M.text_to_html(book_cache_id, content, title)
+function M.text_to_html(_book_cache_id, content, title)
     local lines = {}
     content = content or ""
     title = title or ""

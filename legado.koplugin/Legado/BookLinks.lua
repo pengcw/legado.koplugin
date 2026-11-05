@@ -89,9 +89,10 @@ local function init_book_links(parent)
             return nil, "书籍信息不完整，无法生成本地书籍"
         end
 
-        local ReadingFlow = require("Legado.ReadingFlow")
-        if not ReadingFlow:isSkeletonEnabled(bookinfo) then
-            return nil, "当前阅读模式或书籍类型不支持生成整本 EPUB"
+        local route = Backend:bookReaderRoute(bookinfo.cache_id)
+        if not Store:isSupported() or route == "comic"
+                or (route ~= "reader" and Backend:bookContentType(bookinfo) ~= "reader") then
+            return nil, "当前环境或书籍类型不支持生成快捷 EPUB"
         end
 
         local epub_name = FS.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author or "未知作者")) .. "\u{200B}.epub"

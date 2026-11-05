@@ -1,6 +1,5 @@
 local ffiUtil = require("ffi/util")
 local lfs = require("libs/libkoreader-lfs")
-local LuaSettings = require("luasettings")
 
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
@@ -9,16 +8,18 @@ local Backend = require("Legado/Backend")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local H = require("Legado/Helper")
-local image_meta = require("Legado.Helper.image_meta")
 local MessageBox = require("Legado/MessageBox")
 local TaskProg = require("Legado.task.Progress")
 local TaskQueue = require("Legado.task.Queue")
 
-local CACHE_SUMMARY_REFRESH_INTERVAL = 5 * 60
-local CACHE_SUMMARY_VERSION = 2
 local CACHE_DIRECTORY_SUFFIX = ".sdr"
-local function getSummaryConfig()
-    return LuaSettings:open(FS.joinPath(Env.getTempDirectory(), "book_cache_summary.lua"))
+local SCAN_REUSE_SECONDS = 60
+local recent_scan
+
+local function formatCacheProgress(summary)
+    return (summary.total_count or 0) > 0
+        and string.format("%d / %d 章", summary.cached_count or 0, summary.total_count)
+        or string.format("%d 章", summary.cached_count or 0)
 end
 
 local function fileAttributes(path)
@@ -95,26 +96,11 @@ local function scanCacheDirectories(root)
     return summaries
 end
 
-local function validSummaries(summaries)
-    local valid = {}
-    for _, summary in ipairs(summaries or {}) do
-        if H.is_tbl(summary) and H.is_str(summary.cache_id) then
-            table.insert(valid, {
-                cache_id = summary.cache_id,
-                name = summary.name,
-                author = summary.author,
-                cached_count = tonumber(summary.cached_count) or 0,
-                total_count = tonumber(summary.total_count) or 0,
-                size = tonumber(summary.size) or 0,
-            })
-        end
-    end
-    return valid
-end
-
 local M = Menu:extend{
     name = "cache_manager",
     title = "缓存管理",
+    subtitle = "书名排序 · 长按刷新按钮切换",
+    _sort_mode = "name",
     align_baselines = true,
     is_borderless = true,
     covers_fullscreen = true,
@@ -175,33 +161,14 @@ function M:_closeScanProgress()
     end
 end
 
-function M:_getCachedSummaries()
-    local cached = getSummaryConfig().data
-    if not (H.is_tbl(cached)
-            and cached.version == CACHE_SUMMARY_VERSION
-            and H.is_num(cached.updated_at)
-            and H.is_tbl(cached.summaries)) then
-        return
-    end
-
-    local elapsed = os.time() - cached.updated_at
-    if elapsed < 0 or elapsed >= CACHE_SUMMARY_REFRESH_INTERVAL then return end
-    return validSummaries(cached.summaries)
-end
-
-function M:_saveCachedSummaries(summaries)
-    getSummaryConfig():reset({
-        version = CACHE_SUMMARY_VERSION,
-        updated_at = os.time(),
-        summaries = validSummaries(summaries),
-    }):flush()
-end
-
-function M.invalidateSummariesCache()
-    getSummaryConfig():reset({}):flush()
-end
-
 function M:_updateItems(summaries, no_recalculate_dimen)
+    self._summaries = summaries
+    table.sort(summaries, function(a, b)
+        if self._sort_mode == "size" and a.size ~= b.size then return a.size > b.size end
+        local a_name, b_name = a.name or a.cache_id, b.name or b.cache_id
+        if a_name ~= b_name then return a_name < b_name end
+        return a.cache_id < b.cache_id
+    end)
     if #summaries > 0 then
         self.item_table = self:generateItemTable(summaries)
         self.multilines_show_more_text = false
@@ -221,6 +188,7 @@ function M:_enrichSummaries(scanned)
         local info = cached_info[disk.cache_id] or {}
         table.insert(summaries, {
             cache_id = disk.cache_id,
+            bookinfo = info.book_self_id and info or nil,
             name = info.name,
             author = info.author,
             cached_count = disk.cached_count or 0,
@@ -228,9 +196,6 @@ function M:_enrichSummaries(scanned)
             size = disk.size or 0,
         })
     end
-    table.sort(summaries, function(a, b)
-        return (a.name or a.cache_id) < (b.name or b.cache_id)
-    end)
     return summaries
 end
 
@@ -238,16 +203,19 @@ function M:refreshItems(no_recalculate_dimen, force_refresh)
     self:_cancelScan()
     self:_closeScanProgress()
     local token = self._scan_token
-
-    local cached = not force_refresh and self:_getCachedSummaries()
-    if cached then
-        self:_updateItems(cached, no_recalculate_dimen)
-        return
+    local cache_root = Env.getTempDirectory()
+    if force_refresh then recent_scan = nil end
+    if recent_scan and recent_scan.root == cache_root then
+        local elapsed = os.time() - recent_scan.updated_at
+        if elapsed >= 0 and elapsed < SCAN_REUSE_SECONDS then
+            self:_updateItems(self:_enrichSummaries(recent_scan.scanned), no_recalculate_dimen)
+            return
+        end
     end
-    self:_updateItems({}, no_recalculate_dimen)
+
+    if not self._summaries then self:_updateItems({}, no_recalculate_dimen) end
 
     self._scan_progress = TaskProg.showSpinner("正在统计缓存")
-    local cache_root = Env.getTempDirectory()
     self._scan_pid = TaskQueue.spawnProcess(function()
         return scanCacheDirectories(cache_root)
     end, function(ok, scanned)
@@ -260,7 +228,7 @@ function M:refreshItems(no_recalculate_dimen, force_refresh)
         end
 
         local summaries = self:_enrichSummaries(scanned)
-        self:_saveCachedSummaries(summaries)
+        recent_scan = {root = cache_root, updated_at = os.time(), scanned = scanned}
         self:_updateItems(summaries, no_recalculate_dimen)
     end)
 end
@@ -273,10 +241,36 @@ function M:onLeftButtonTap()
     self:forceRefresh()
 end
 
+function M:setSortMode(mode)
+    self._sort_mode = mode
+    self.page, self.itemnumber = 1, nil
+    self.subtitle = (mode == "size" and "占用大小排序" or "书名排序") .. " · 长按刷新按钮切换"
+    if self.title_bar then self.title_bar:setSubTitle(self.subtitle, true) end
+    self:_updateItems(self._summaries or {}, true)
+end
+
+function M:onLeftButtonHold()
+    local dialog
+    local function select(mode)
+        UIManager:close(dialog)
+        self:setSortMode(mode)
+    end
+    dialog = require("ui/widget/buttondialog"):new{
+        title = "排序方式",
+        buttons = {{
+            {text = "书名", callback = function() select("name") end},
+            {text = "占用大小", callback = function() select("size") end},
+        }},
+    }
+    UIManager:show(dialog)
+end
+
 function M:showBookActions(item)
     if not item or not item.cache_id then return end
     local summary = item.summary or {}
-    local bookinfo = summary
+    local bookinfo = Backend:getBookInfoCache(item.cache_id)
+    local associated = H.is_tbl(bookinfo) and bookinfo.cache_id == item.cache_id
+    if not associated then bookinfo = summary.bookinfo or summary end
     local dialog
     local actions = {{
         text = "清理缓存",
@@ -286,10 +280,38 @@ function M:showBookActions(item)
         end,
     }}
 
+    if associated then
+        table.insert(actions, 1, {
+            text = "缓存全书",
+            callback = function()
+                UIManager:close(dialog)
+                require("Legado/ExportDialog"):new{bookinfo = bookinfo}:cacheAllChapters(function()
+                    self:forceRefresh()
+                end)
+            end,
+        })
+        table.insert(actions, 2, {
+            text = "导出书籍",
+            callback = function()
+                UIManager:close(dialog)
+                require("Legado/ExportDialog"):new{bookinfo = bookinfo}:exportBook()
+            end,
+        })
+    elseif summary.bookinfo then
+        table.insert(actions, 1, {
+            text = "离线导出",
+            callback = function()
+                UIManager:close(dialog)
+                require("Legado/ExportDialog"):new{bookinfo = bookinfo}:exportBook(true)
+            end,
+        })
+    end
+
     dialog = require("ui/widget/buttondialog"):new{
-        title = string.format("《%s》 (%s)",
+        title = string.format("《%s》 (%s)\n\n已缓存：%s\n缓存占用：%s",
             bookinfo.name or "未关联缓存",
-            bookinfo.author or item.cache_id),
+            bookinfo.author or item.cache_id,
+            formatCacheProgress(summary), FS.formatFileSize(summary.size or 0)),
         buttons = { actions, {
             {
                 text = "取消",
@@ -303,11 +325,10 @@ end
 function M:confirmClean(bookinfo, summary)
     local cache_id = summary.cache_id or bookinfo.cache_id
     MessageBox:confirm(string.format(
-        "请确认清除《%s》的章节缓存：\n\n已缓存：%d/%d 章\n缓存占用：%s",
+        "请确认清除《%s》的章节缓存：\n\n已缓存：%s\n缓存占用：%s",
         bookinfo.name or "未关联缓存",
-        summary.cached_count or 0,
-        summary.total_count or 0,
-        FS.formatFileSize(summary.size)
+        formatCacheProgress(summary),
+        FS.formatFileSize(summary.size or 0)
     ), function(result)
         if not result then return end
         Backend:closeDbManager()
@@ -320,8 +341,7 @@ function M:confirmClean(bookinfo, summary)
             end
             Backend:HandleResponse(response, function()
                 MessageBox:success("已清理")
-                M.invalidateSummariesCache()
-                self:refreshItems(true)
+                self:forceRefresh()
             end, function(err_msg)
                 MessageBox:error("请稍后重试：", err_msg)
             end)
@@ -350,7 +370,7 @@ function M:confirmClearAll(on_done)
                     settings.servers_history = {}
                     Backend:saveSettings(settings)
                     MessageBox:notice("已清除")
-                    M.invalidateSummariesCache()
+                    recent_scan = nil
                     if H.is_func(on_done) then on_done() end
                 end, function(err_msg)
                     MessageBox:error("操作失败：", tostring(err_msg))

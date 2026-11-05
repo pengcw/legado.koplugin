@@ -135,6 +135,7 @@ function SyncTransport.request(opts)
     local ok, result, code, headers, status = pcall(http.request, request)
     socketutil:reset_timeout()
     if not ok then return nil, nil, "request interrupted:" .. Error.extract_message(result) end
+    if not result then return nil, nil, "request interrupted:" .. tostring(code) end
 
     if code == socketutil.TIMEOUT_CODE or code == socketutil.SSL_HANDSHAKE_CODE or code == socketutil.SINK_TIMEOUT_CODE then
         return nil, nil, "request interrupted:" .. tostring(code)

@@ -3,8 +3,6 @@ local Dispatcher = require("dispatcher")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
 local Backend = require("Legado/Backend")
-local SkeletonBook = require("Legado.Skeleton.Book")
-local LibraryView = require("Legado/LibraryView")
 local Patcher = require("Legado.patches")
 local DocumentRegistry = require("document/documentregistry")
 local CreDocument = require("Legado/Document")
@@ -26,7 +24,7 @@ function Legado:init()
         end
     end
     if not Backend.settings_data then
-        Backend:initialize(SkeletonBook:preloadCallbacks())
+        Backend:initialize(require("Legado.Skeleton.Callbacks").new())
     end
     if self.ui then
         EventHandlers:register(self)
@@ -38,7 +36,6 @@ function Legado:init()
     self:onDispatcherRegisterActions()
     CreDocument:register(DocumentRegistry)
     Patcher.install(self, EventHandlers:readerEventRules(self))
-    require("Legado.spore.local.js_cache_cleaner").start()
 end
 
 function Legado:onDispatcherRegisterActions()
@@ -107,7 +104,7 @@ function Legado:addToMainMenu(menu_items)
 end
 
 function Legado:openLibraryView()
-    self.library_view = LibraryView:fetchAndShow()
+    self.library_view = require("Legado/LibraryView"):fetchAndShow()
     UIManager:nextTick(function()
         Backend:backupDbWithPreCheck()
         Backend:checkOta()

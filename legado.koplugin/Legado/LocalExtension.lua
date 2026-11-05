@@ -3,27 +3,6 @@ local JSON = require("json")
 
 local M = {}
 
-local READER3_TEXT_TRANSFORM_JS = [[@js:
-(function() {
-    var payload = JSON.parse(result);
-    var values = Array.isArray(payload.values) ? payload.values : [];
-    var rules = Array.isArray(payload.rules) ? payload.rules : [];
-    return values.map(function(value) {
-        var text = String(value);
-        rules.forEach(function(rule) {
-            var pattern = String(rule.pattern);
-            var replacement = rule.replacement == null ? "" : String(rule.replacement);
-            if (rule.isRegex === true) {
-                text = text.replace(new RegExp(pattern, "ig"), replacement);
-            } else {
-                text = text.replace(pattern, replacement);
-            }
-        });
-        return text;
-    });
-})()
-]]
-
 local function parser()
     return require("Legado.spore.local.parser")
 end
@@ -33,12 +12,23 @@ function M.status(verify)
 end
 
 function M.available()
-    local ok, status = pcall(M.status, true)
+    local ok, p = pcall(parser)
+    if not ok then return false, tostring(p) end
+
+    local cached = p._library_validation
+    if p._lib_handle and cached and cached.handle == p._lib_handle
+            and cached.abi_ok and cached.version_ok then
+        return true, cached.version
+    end
+
+    local status
+    ok, status = pcall(p.getLibraryStatus, false)
+    if not ok then return false, tostring(status) end
+    if not status.any_file and not status.loaded then return false, "MISSING_SO" end
+
+    ok, status = pcall(p.getLibraryStatus, true)
     if not ok then return false, tostring(status) end
     if status.usable then return true, status.version end
-    if not status.any_file and not status.loaded then
-        return false, "MISSING_SO"
-    end
     return false, status.error or "LOAD_FAILED"
 end
 
@@ -58,6 +48,11 @@ function M.createProvider(options)
         if type(db.getBookSourceByUrl) == "function" then
             provider_options.single_source_loader = function(origin)
                 return db:getBookSourceByUrl(shelf_id, origin)
+            end
+        end
+        if type(db.getBookSourceRuntimeState) == "function" then
+            provider_options.source_state_loader = function(origin)
+                return db:getBookSourceRuntimeState(shelf_id, origin)
             end
         end
         provider_options.all_sources_loader = function()
@@ -85,33 +80,6 @@ end
 
 function M.testSource(item, keyword, allow_fallback)
     return require("Legado.spore.local.source_debugger"):show(item, keyword, allow_fallback)
-end
-
-function M.downloadBook(book)
-    local Backend = require("Legado/Backend")
-    local temp = require("Legado.spore.local.file_download").temporaryPath()
-    require("Legado.task.Progress").loading({
-        text = "下载整本书籍…",
-        dismissable = true,
-        runnable = function()
-            return Backend:downloadBook(book, temp)
-        end,
-        on_cancel = function(pid)
-            if pid then pcall(require("ffi/util").terminateSubProcess, pid) end
-        end,
-        callback = function(ok, response)
-            os.remove(temp)
-            if not ok then
-                if response ~= "cancelled" then require("Legado/MessageBox"):error("下载任务失败") end
-                return
-            end
-            Backend:HandleResponse(response, function(path)
-                require("Legado/ExportDialog"):showReaderUI(path)
-            end, function(err)
-                require("Legado/MessageBox"):error("下载失败：", err)
-            end)
-        end,
-    })
 end
 
 function M.showSourceLogin(item)
@@ -147,8 +115,31 @@ function M.applyReader3TextTransform(values, rules)
     })
     if not ok_encode then return nil, tostring(payload) end
 
+    if not M.reader3_text_transform_js then
+        M.reader3_text_transform_js = [[@js:
+(function() {
+    var payload = JSON.parse(result);
+    var values = Array.isArray(payload.values) ? payload.values : [];
+    var rules = (Array.isArray(payload.rules) ? payload.rules : []).map(function(rule) {
+        var pattern = String(rule.pattern);
+        return {
+            pattern: rule.isRegex === true ? new RegExp(pattern, "ig") : pattern,
+            replacement: rule.replacement == null ? "" : String(rule.replacement)
+        };
+    });
+    return values.map(function(value) {
+        var text = String(value);
+        rules.forEach(function(rule) {
+            text = text.replace(rule.pattern, rule.replacement);
+        });
+        return text;
+    });
+})()
+]]
+    end
+
     local ok_eval, transformed, eval_err = pcall(function()
-        return parser().reader_eval(payload, READER3_TEXT_TRANSFORM_JS)
+        return parser().reader_eval(payload, M.reader3_text_transform_js)
     end)
     if not ok_eval then return nil, tostring(transformed) end
     if type(transformed) ~= "table" then return nil, eval_err or "invalid Reader3 transform result" end
