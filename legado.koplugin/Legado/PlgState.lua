@@ -1,4 +1,5 @@
 local M = {
+    debug_enabled = false,
     _selected_book = nil,
     _displayed_chapter = nil,
     _chapter_direction = nil,

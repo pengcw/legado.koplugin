@@ -2,12 +2,17 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local Dispatcher = require("dispatcher")
 local UIManager = require("ui/uimanager")
 local _ = require("gettext")
+local DataStorage = require("datastorage")
+local lfs = require("libs/libkoreader-lfs")
+local PlgState = require("Legado/PlgState")
+
+PlgState.debug_enabled = lfs.attributes(DataStorage:getDataDir() .. "/LEGADO_DEBUG", "mode") == "file"
+
 local Backend = require("Legado/Backend")
 local Patcher = require("Legado.patches")
 local DocumentRegistry = require("document/documentregistry")
 local CreDocument = require("Legado/Document")
 local EventHandlers = require("Legado.EventHandlers")
-local PlgState = require("Legado/PlgState")
 local Env = require("Legado.Helper.Env")
 
 local Legado = WidgetContainer:extend({
@@ -66,7 +71,7 @@ function Legado:onDispatcherRegisterActions()
 end
 
 function Legado:isFileTypeSupported(file)
-    return self:isSkeletonEpub(file)
+    return require("Legado/BookEntry").identify(file) ~= nil
 end
 
 function Legado:registerDocumentRegistryAuxProvider()

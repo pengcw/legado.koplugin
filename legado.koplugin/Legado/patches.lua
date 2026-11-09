@@ -5,6 +5,7 @@ local ReaderUI = require("apps/reader/readerui")
 local FileManager = require("apps/filemanager/filemanager")
 local ReadHistory = require("readhistory")
 local Env = require("Legado.Helper.Env")
+local BookEntry = require("Legado/BookEntry")
 
 local M = {
     is_enabled = false,
@@ -269,15 +270,11 @@ M.install = function(parent_ref, rules)
         local orig_ReaderUI_showReader = ReaderUI.showReader
         ReaderUI._legado_wrapped = orig_ReaderUI_showReader
         ReaderUI.showReader = function(self, file, provider, seamless, is_provider_forced, after_open_callback)
-            if M.is_enabled and file and Env.is_legado_skeleton_epub(file) then
-                if parent_ref.openFile then return parent_ref:openFile(file) end
-            elseif M.is_enabled and file
-                and file:find("/Legado\u{200B}书目/", 1, true) ~= nil
-                and file:find("\u{200B}.html", 1, true) ~= nil then
-                if parent_ref.onOpenLegacyLnk then parent_ref:onOpenLegacyLnk(file) end
-            else
-                return orig_ReaderUI_showReader(self, file, provider, seamless, is_provider_forced, after_open_callback)
+            if M.is_enabled then
+                local kind, settings = BookEntry.identify(file)
+                if kind and parent_ref.openFile then return parent_ref:openFile(file, kind, settings) end
             end
+            return orig_ReaderUI_showReader(self, file, provider, seamless, is_provider_forced, after_open_callback)
         end
     end
 

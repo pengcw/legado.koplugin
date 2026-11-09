@@ -93,86 +93,6 @@ function M.getItems()
         if menu_def and menu_def.updateItems then menu_def:updateItems() end
     end
 
-    local function choose_full_book_cache_dir(menu_def)
-        local PathChooser = require("ui/widget/pathchooser")
-        UIManager:show(PathChooser:new{
-            title = "选择整本缓存保存目录",
-            path = Backend:getFullBookCacheOutputDir(),
-            select_directory = true,
-            select_file = false,
-            onConfirm = function(output_dir)
-                if not (H.is_str(output_dir) and util.directoryExists(output_dir)) then
-                    return MessageBox:error("选择的目录不可用")
-                end
-                local settings = Backend:getSettings()
-                settings.full_book_cache_output_dir = output_dir
-                Backend:HandleResponse(Backend:saveSettings(settings), function()
-                    MessageBox:notice("整本缓存保存目录已设置为：" .. output_dir)
-                    update_settings_menu(menu_def)
-                end, function(err_msg)
-                    MessageBox:error("设置失败：", tostring(err_msg))
-                end)
-            end,
-        })
-    end
-
-    local function reset_full_book_cache_dir(menu_def)
-        local settings = Backend:getSettings()
-        if not settings.full_book_cache_output_dir then
-            return MessageBox:notice("整本缓存保存目录已使用 KOReader Home")
-        end
-        settings.full_book_cache_output_dir = nil
-        Backend:HandleResponse(Backend:saveSettings(settings), function()
-            MessageBox:notice("整本缓存保存目录已恢复为 KOReader Home")
-            update_settings_menu(menu_def)
-        end, function(err_msg)
-            MessageBox:error("设置失败：", tostring(err_msg))
-        end)
-    end
-
-    local function full_book_cache_dir_item()
-        return {
-            text_func = function()
-                local output_dir = Backend:getFullBookCacheOutputDir():gsub("/+$", "")
-                local dir_name = output_dir:match("[^/]+$") or "/"
-                return "整本缓存目录: " .. dir_name
-            end,
-            help_text = "整本打开模式的书籍文件保存在此目录；兼容模式下也可提前设置。",
-            keep_menu_open = true,
-            callback = function(menu_def)
-                local dialog
-                dialog = require("ui/widget/buttondialog"):new{
-                    title = "整本缓存保存目录\n当前：" .. Backend:getFullBookCacheOutputDir(),
-                    buttons = {
-                        {
-                            {
-                                text = "重置",
-                                callback = function()
-                                    UIManager:close(dialog)
-                                    reset_full_book_cache_dir(menu_def)
-                                end,
-                            },
-                            {
-                                text = "选择目录",
-                                callback = function()
-                                    UIManager:close(dialog)
-                                    choose_full_book_cache_dir(menu_def)
-                                end,
-                            },
-                        },
-                        {
-                            {
-                                text = "取消",
-                                callback = function() UIManager:close(dialog) end,
-                            },
-                        },
-                    },
-                }
-                UIManager:show(dialog)
-            end,
-        }
-    end
-
     local function local_extension_item()
         local sub_item_table = {
                 {
@@ -283,7 +203,7 @@ function M.getItems()
                 save()
             else
                 MessageBox:confirm(
-                    "“整本打开”目前处于测试阶段，可能会遇到问题。若阅读卡顿，可切回“分章阅读”。",
+                    "整本阅读会边看边注入章节，提供与本地书籍一致的整体阅读体验，集中记录阅读历史与统计笔记，无需预先下载全书。此功能测试阶段，遇到问题可切回分章阅读。",
                     function(confirmed)
                         if confirmed then save() end
                     end,
@@ -299,12 +219,11 @@ function M.getItems()
                 return "阅读方式:" .. mode_name
             end,
             _legado_reading_mode = true,
-            help_text = "选择兼容性较好的逐章加载，或处于测试阶段的整本打开模式。",
+            help_text = "选择分章阅读，或在同一本书中按需注入章节的整本阅读。",
             sub_item_table_func = function()
                 local items = {
                     {
-                        text = "分章阅读(兼容)",
-                        help_text = "每章单独加载，兼容性较好；章节间可能有短暂停顿。",
+                        text = "分章阅读",
                         checked_func = function()
                             return Backend:getSettings().chapter_mode ~= false
                         end,
@@ -313,7 +232,7 @@ function M.getItems()
                         end,
                     }, {
                         text = "整本阅读",
-                        help_text = "章节在同一本书中连续阅读；目前处于测试阶段，遇到问题可切回分章阅读。",
+                        help_text = "边看边将章节注入同一本书，无需预先下载全书，提供与本地书籍一致的整体阅读体验，让阅读历史、阅读统计等信息集中记录。",
                         checked_func = function()
                             return Backend:getSettings().chapter_mode == false
                         end,
@@ -322,14 +241,156 @@ function M.getItems()
                         end,
                     },
                 }
-                local dir_item = full_book_cache_dir_item()
-                dir_item._legado_full_book_cache_dir = true
-                table.insert(items, dir_item)
                 return items
             end,
         }
     end
 
+    local virtual_bookshelf_item = {
+        text = "目录书架",
+        sub_item_table = {
+            {
+                text = "启用",
+                checked_func = function()
+                    return Backend:getSettings().virtual_bookshelf_enabled == true
+                end,
+                callback = function(menu_def)
+                    local settings = Backend:getSettings()
+                    local enabled = settings.virtual_bookshelf_enabled ~= true
+                    local function save_enabled(map_cached)
+                        local dir = settings.virtual_bookshelf_dir
+                        if enabled and not (H.is_str(dir) and dir ~= "" and util.directoryExists(dir)) then
+                            return MessageBox:info("请先设置有效的目标目录")
+                        end
+                        local updated = util.tableDeepCopy(settings)
+                        updated.virtual_bookshelf_enabled = enabled
+                        Backend:HandleResponse(Backend:saveSettings(updated), function()
+                            update_settings_menu(menu_def)
+                            if not map_cached then return end
+                            UIManager:nextTick(function()
+                                local result, err = require("Legado/BookEntry").mapCachedBooks(Backend)
+                                if not result then return MessageBox:error(err) end
+                                MessageBox:info(string.format("映射完成：成功 %d 本，跳过 %d 本，失败 %d 本", result.mapped, result.skipped, result.failed))
+                            end)
+                        end, function(err)
+                            MessageBox:error("设置失败：", tostring(err))
+                        end)
+                    end
+                    if not enabled then return save_enabled() end
+                    local map_cached
+                    local ConfirmBox = require("ui/widget/confirmbox")
+                    local dialog = ConfirmBox:new{
+                        text = "将云端书籍映射到本地目录，方便快捷打开，也可用于 Bookshelf 的分类书架。"
+                            .. (ConfirmBox.addWidget and "" or "\n开启时将映射当前书架中已缓存的书籍。"),
+                        ok_text = "开启",
+                        cancel_text = "取消",
+                        ok_callback = function()
+                            save_enabled(map_cached == nil or map_cached.checked)
+                        end,
+                    }
+                    if dialog.addWidget then
+                        map_cached = require("ui/widget/checkbutton"):new{
+                            text = "映射更新当前书架已缓存书籍",
+                            checked = false,
+                            parent = dialog,
+                        }
+                        dialog:addWidget(map_cached)
+                    end
+                    UIManager:show(dialog)
+                end,
+            }, {
+                text_func = function()
+                    local dir = Backend:getSettings().virtual_bookshelf_dir
+                    if not (H.is_str(dir) and dir ~= "") then return "目标目录：未设置" end
+                    local name = require("ffi/util").basename(dir)
+                    return "目标目录：" .. (name ~= "" and name or "/")
+                end,
+                hold_callback = function()
+                    local dir = Backend:getSettings().virtual_bookshelf_dir
+                    MessageBox:info("目标目录：" .. (H.is_str(dir) and dir ~= "" and dir or "未设置"))
+                end,
+                callback = function(menu_def)
+                    local dir = Backend:getSettings().virtual_bookshelf_dir
+                    local has_dir = H.is_str(dir) and dir ~= ""
+                    local dialog
+                    dialog = require("ui/widget/buttondialog"):new{
+                        title = "目标目录：" .. (has_dir and dir or "未设置")
+                            .. "\n清空后将关闭目录书架，已有文件不受影响。",
+                        buttons = {
+                            {{
+                                text = "选择目录",
+                                callback = function()
+                                    UIManager:close(dialog)
+                                    local PathChooser = require("ui/widget/pathchooser")
+                                    UIManager:show(PathChooser:new{
+                                        title = "选择目标目录",
+                                        path = has_dir and dir or require("Legado.Helper.Env").getHomeDir(),
+                                        select_directory = true,
+                                        select_file = false,
+                                        onConfirm = function(dir)
+                                            if not (H.is_str(dir) and dir ~= "" and util.directoryExists(dir)) then
+                                                return MessageBox:error("选择的目录不可用")
+                                            end
+                                            local settings = util.tableDeepCopy(Backend:getSettings())
+                                            local old_dir = settings.virtual_bookshelf_dir
+                                            settings.virtual_bookshelf_dir = dir
+                                            Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                                update_settings_menu(menu_def)
+                                                local message = "目标目录已设置为：" .. dir
+                                                if H.is_str(old_dir) and old_dir ~= "" and old_dir ~= dir then
+                                                    message = message .. "\n请按需手动清理原目录中的旧文件：" .. old_dir
+                                                end
+                                                MessageBox:notice(message)
+                                            end, function(err)
+                                                MessageBox:error("设置失败：", tostring(err))
+                                            end)
+                                        end,
+                                    })
+                                end,
+                            }},
+                            {{
+                                text = "清空设置",
+                                enabled = has_dir,
+                                callback = function()
+                                    local settings = util.tableDeepCopy(Backend:getSettings())
+                                    settings.virtual_bookshelf_dir = ""
+                                    settings.virtual_bookshelf_enabled = false
+                                    Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                        UIManager:close(dialog)
+                                        update_settings_menu(menu_def)
+                                        MessageBox:notice("目标目录已清空，目录书架已关闭；已有文件不受影响")
+                                    end, function(err)
+                                        MessageBox:error("设置失败：", tostring(err))
+                                    end)
+                                end,
+                            }},
+                            {{
+                                text = "取消",
+                                callback = function() UIManager:close(dialog) end,
+                            }},
+                        },
+                    }
+                    UIManager:show(dialog)
+                end,
+            }, {
+                text = "刷新目录",
+                help_text = "补建或更新当前书架已缓存书籍的快捷入口，不下载正文或删除旧文件。",
+                enabled_func = function()
+                    local settings = Backend:getSettings()
+                    local dir = settings.virtual_bookshelf_dir
+                    return settings.virtual_bookshelf_enabled == true
+                        and H.is_str(dir) and dir ~= "" and util.directoryExists(dir)
+                end,
+                callback = function()
+                    UIManager:nextTick(function()
+                        local result, err = require("Legado/BookEntry").mapCachedBooks(Backend)
+                        if not result then return MessageBox:error(err) end
+                        MessageBox:info(string.format("刷新完成：成功 %d 本，跳过 %d 本，失败 %d 本", result.mapped, result.skipped, result.failed))
+                    end)
+                end,
+            },
+        },
+    }
     local auto_upload_progress_item = {
         text = "自动上传进度",
         help_text = "阅读时，自动上传阅读进度",
@@ -346,135 +407,148 @@ function M.getItems()
         callback = function()
             require("Legado/WebConfigDialog"):openWebConfigManager()
         end,
-    }, auto_upload_progress_item, {
-        text = "书架显示封面",
-        help_text = "开启后，书架将尝试加载并显示书籍封面",
-        checked_func = function()
-            return Backend:getSettings().show_cover == true
-        end,
-        callback = function(menu_def)
-            local settings = Backend:getSettings()
-            local new_state = not settings.show_cover
+    }, virtual_bookshelf_item, {
+        text = "界面设置",
+        sub_item_table = {
+            {
+                text = "书架封面",
+                help_text = "开启后，书架将尝试加载并显示书籍封面",
+                checked_func = function()
+                    return Backend:getSettings().show_cover == true
+                end,
+                callback = function(menu_def)
+                    local settings = Backend:getSettings()
+                    local new_state = not settings.show_cover
 
-            local function save_and_notify()
-                settings.show_cover = new_state
-                local msg = new_state and "已开启封面显示" or "已关闭封面显示"
-                Backend:HandleResponse(Backend:saveSettings(settings), function()
-                    MessageBox:notice(msg)
-                    if menu_def and menu_def.updateItems then menu_def:updateItems() end
-                end, function(err_msg)
-                    MessageBox:error("设置失败:", err_msg)
-                end)
-            end
+                    local function save_and_notify()
+                        settings.show_cover = new_state
+                        local msg = new_state and "已开启封面显示" or "已关闭封面显示"
+                        Backend:HandleResponse(Backend:saveSettings(settings), function()
+                            MessageBox:notice(msg)
+                            if menu_def and menu_def.updateItems then menu_def:updateItems() end
+                        end, function(err_msg)
+                            MessageBox:error("设置失败:", err_msg)
+                        end)
+                    end
 
-            if new_state then
-                local current_items = settings.items_per_page or G_reader_settings:readSetting("items_per_page") or 14
-                if current_items > 8 then
-                    MessageBox:confirm("开启封面建议每页 8 条（可自行调整最佳行数），是否自动调整？", function(is_ok)
-                        if is_ok then
-                            settings.items_per_page = 8
+                    if new_state then
+                        local current_items = settings.items_per_page or G_reader_settings:readSetting("items_per_page") or 14
+                        if current_items > 8 then
+                            MessageBox:confirm("开启封面建议每页 8 条（可自行调整最佳行数），是否自动调整？", function(is_ok)
+                                if is_ok then
+                                    settings.items_per_page = 8
+                                end
+                                save_and_notify()
+                            end)
+                            return
                         end
-                        save_and_notify()
-                    end)
-                    return
-                end
-            end
-            save_and_notify()
-        end,
-    }, {
-        text_func = function()
-            local settings = Backend:getSettings()
-            local default_items = settings.show_cover and 8 or (G_reader_settings:readSetting("items_per_page") or 14)
-            local current = settings.items_per_page or default_items
-            return string.format("书架每页项数: %d", current)
-        end,
-        callback = function()
-            local settings = Backend:getSettings()
-            local default_items = settings.show_cover and 8 or (G_reader_settings:readSetting("items_per_page") or 14)
-            local thread_spin = require("ui/widget/spinwidget"):new{
-                value = settings.items_per_page or default_items,
-                value_min = 4,
-                value_max = 15,
-                value_step = 1,
-                value_hold_step = 3,
-                ok_text = "确定",
-                title_text = "书架每页项数",
-                info_text = "设置书架每页显示书籍数量",
-                default_value = default_items,
-                default_text = tostring(default_items),
-                callback = function(spin)
-                    settings.items_per_page = spin.value
-                    Backend:HandleResponse(Backend:saveSettings(settings), function()
-                        MessageBox:notice(string.format("每页项数已设置为: %d", spin.value))
-                    end, function(err_msg)
-                        MessageBox:error("设置失败：", tostring(err_msg))
-                    end)
+                    end
+                    save_and_notify()
                 end,
-            }
-            UIManager:show(thread_spin)
-        end,
-    }, {
-        text_func = function()
-            return string.format("预载章数: %d", Backend:getSettings().preload_chapters or 4)
-        end,
-        callback = function()
-            local settings = Backend:getSettings()
-            local thread_spin = require("ui/widget/spinwidget"):new{
-                value = settings.preload_chapters or 4,
-                value_min = 0,
-                value_max = 40,
-                value_step = 1,
-                value_hold_step = 5,
-                ok_text = "确定",
-                title_text = "预下载章节数",
-                info_text = "阅读时, 向后预缓存正文",
-                default_value = 4,
-                default_text = "4",
-                callback = function(spin)
-                    settings.preload_chapters = spin.value
-                    Backend:HandleResponse(Backend:saveSettings(settings), function()
-                        MessageBox:notice(string.format("预缓存章节数已设置为: %d", spin.value))
-                    end, function(err_msg)
-                        MessageBox:error("设置失败：", tostring(err_msg))
-                    end)
+            }, {
+                text_func = function()
+                    local settings = Backend:getSettings()
+                    local default_items = settings.show_cover and 8 or (G_reader_settings:readSetting("items_per_page") or 14)
+                    local current = settings.items_per_page or default_items
+                    return string.format("书架每页项数：%d", current)
                 end,
-            }
-            UIManager:show(thread_spin)
-        end,
-    }, {
-        text_func = function()
-            return string.format("下载并发数: %d", Backend:normalizeDownloadThreads(Backend:getSettings().download_threads))
-        end,
-        callback = function()
-            local settings = Backend:getSettings()
-            local thread_spin = require("ui/widget/spinwidget"):new{
-                value = Backend:normalizeDownloadThreads(settings.download_threads),
-                value_min = 1,
-                value_max = 6,
-                value_step = 1,
-                value_hold_step = 2,
-                ok_text = "确定",
-                title_text = "同时下载进程数",
-                info_text = "有的书源有限制\n（如正文异常，可尝试调为 1）",
-                default_value = 2,
-                default_text = "2",
-                callback = function(spin)
-                    settings.download_threads = Backend:normalizeDownloadThreads(spin.value)
-                    Backend:HandleResponse(Backend:saveSettings(settings), function()
-                        MessageBox:notice(string.format("同时下载数已设置为: %d", spin.value))
-                    end, function(err_msg)
-                        MessageBox:error("设置失败：", tostring(err_msg))
-                    end)
+                keep_menu_open = true,
+                callback = function(menu_def)
+                    local settings = Backend:getSettings()
+                    local default_items = settings.show_cover and 8 or (G_reader_settings:readSetting("items_per_page") or 14)
+                    local thread_spin = require("ui/widget/spinwidget"):new{
+                        value = settings.items_per_page or default_items,
+                        value_min = 4,
+                        value_max = 15,
+                        value_step = 1,
+                        value_hold_step = 3,
+                        ok_text = "确定",
+                        title_text = "书架每页项数",
+                        info_text = "设置书架每页显示书籍数量",
+                        default_value = default_items,
+                        default_text = tostring(default_items),
+                        callback = function(spin)
+                            settings.items_per_page = spin.value
+                            Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                MessageBox:notice(string.format("每页项数已设置为: %d", spin.value))
+                                update_settings_menu(menu_def)
+                            end, function(err_msg)
+                                MessageBox:error("设置失败：", tostring(err_msg))
+                            end)
+                        end,
+                    }
+                    UIManager:show(thread_spin)
                 end,
-            }
-            UIManager:show(thread_spin)
-        end,
+            },
+        },
+    }, {
+        text = "阅读设置",
+        sub_item_table = {
+            auto_upload_progress_item, {
+                text_func = function()
+                    return string.format("预载章数: %d", Backend:getSettings().preload_chapters or 4)
+                end,
+                callback = function()
+                    local settings = Backend:getSettings()
+                    local thread_spin = require("ui/widget/spinwidget"):new{
+                        value = settings.preload_chapters or 4,
+                        value_min = 0,
+                        value_max = 40,
+                        value_step = 1,
+                        value_hold_step = 5,
+                        ok_text = "确定",
+                        title_text = "预下载章节数",
+                        info_text = "阅读时, 向后预缓存正文",
+                        default_value = 4,
+                        default_text = "4",
+                        callback = function(spin)
+                            settings.preload_chapters = spin.value
+                            Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                MessageBox:notice(string.format("预缓存章节数已设置为: %d", spin.value))
+                            end, function(err_msg)
+                                MessageBox:error("设置失败：", tostring(err_msg))
+                            end)
+                        end,
+                    }
+                    UIManager:show(thread_spin)
+                end,
+            }, {
+                text_func = function()
+                    return string.format("下载并发数: %d", Backend:normalizeDownloadThreads(Backend:getSettings().download_threads))
+                end,
+                callback = function()
+                    local settings = Backend:getSettings()
+                    local thread_spin = require("ui/widget/spinwidget"):new{
+                        value = Backend:normalizeDownloadThreads(settings.download_threads),
+                        value_min = 1,
+                        value_max = 6,
+                        value_step = 1,
+                        value_hold_step = 2,
+                        ok_text = "确定",
+                        title_text = "同时下载进程数",
+                        info_text = "有的书源有限制\n（如正文异常，可尝试调为 1）",
+                        default_value = 2,
+                        default_text = "2",
+                        callback = function(spin)
+                            settings.download_threads = Backend:normalizeDownloadThreads(spin.value)
+                            Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                MessageBox:notice(string.format("同时下载数已设置为: %d", spin.value))
+                            end, function(err_msg)
+                                MessageBox:error("设置失败：", tostring(err_msg))
+                            end)
+                        end,
+                    }
+                    UIManager:show(thread_spin)
+                end,
+            }, reading_mode_item(),
+        },
     },
     }
+    local reading_items = items[#items].sub_item_table
     if not Backend:supportsProviderMethod("saveBookProgress") then
-        for i, item in ipairs(items) do
+        for i, item in ipairs(reading_items) do
             if item == auto_upload_progress_item then
-                table.remove(items, i)
+                table.remove(reading_items, i)
                 break
             end
         end
@@ -483,7 +557,6 @@ function M.getItems()
     if engine_status.any_file and engine_status.usable then
         table.insert(items, 2, local_extension_item())
     end
-    table.insert(items, reading_mode_item())
     table.insert(items, {
         text = "清理与维护",
         sub_item_table = {

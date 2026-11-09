@@ -93,9 +93,12 @@ function M.show(snapshot, emit)
             local opened_revision = revision
             local input
             input = InputDialog:new{
-                title = action.password and "输入密码" or "输入内容",
+                title = action.label or (action.password and "输入密码" or "输入内容"),
+                input_hint = action.hint,
                 input = action.value or "",
                 text_type = action.password and "password" or nil,
+                allow_newline = action.multiline == true,
+                use_available_height = action.multiline == true,
                 buttons = {{
                     {text = "取消", callback = function()
                         if editor == input then close_editor() end
@@ -103,6 +106,10 @@ function M.show(snapshot, emit)
                     {text = "确认", callback = function()
                         if page.closed or editor ~= input or opened_revision ~= revision then return end
                         local value = input:getInputText()
+                        if action.inputType == "color" and not value:match("^#%x%x%x%x%x%x$") then
+                            MessageBox:notice("请输入六位颜色代码，如 #aabbcc")
+                            return
+                        end
                         close_editor()
                         actions, pending = {}, true
                         MessageBox:notice("输入已提交，正在处理")

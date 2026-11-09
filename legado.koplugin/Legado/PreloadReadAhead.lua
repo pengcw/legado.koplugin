@@ -429,7 +429,7 @@ function M:start(chapter, future_need)
         task._pending_chapter_indexes[data.chapter.chapters_index] = nil
         metric_inc("completed")
         metric_inc("bytes", data.size or 0)
-        pcall(self.host.commit_cache_path, data.chapter, data.cacheFilePath)
+        pcall(self.host.commit_cache_path, data.chapter, data.cacheFilePath, book_info)
         pcall(self.host.set_task_lock, data.chapter, false, nil, batch_id)
         if data.cacheFilePath and util.fileExists(data.cacheFilePath)
                 and not data.cacheFilePath:lower():match("%.cbz$") then

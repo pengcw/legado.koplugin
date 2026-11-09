@@ -36,8 +36,11 @@ end
 
 M.is_legado_chapter_cache = function(file_path, instance)
     local path = get_file_path(file_path, instance)
-    if not is_cache_path(path) then return false end
-    local extension = path:match("%-%d+%.([^%.]+)$")
+    if type(path) ~= "string" then return false end
+    local _, root_end = path:find(LEGADO_CACHE_PATH, 1, true)
+    if not root_end then _, root_end = path:lower():find(LEGADO_CACHE_PATH, 1, true) end
+    if not root_end then return false end
+    local extension = path:sub(root_end + 1):match("^[^/]+%.sdr/[^/]*%-%d+%.([^/.]+)$")
     if not extension then return false end
     return CHAPTER_CACHE_EXTENSIONS[extension] == true or CHAPTER_CACHE_EXTENSIONS[extension:lower()] == true
 end
@@ -157,7 +160,8 @@ M.getHomeDir = function()
                require("apps/filemanager/filemanagerutil").getDefaultDir()
 end
 
-M.getLinksDir = function()
+M.getFullBookCacheOutputDir = function(settings)
+    if settings.virtual_bookshelf_enabled == true then return settings.virtual_bookshelf_dir end
     return M.getHomeDir()
 end
 

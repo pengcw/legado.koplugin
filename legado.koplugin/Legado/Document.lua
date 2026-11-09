@@ -5,28 +5,29 @@ local util = require("util")
 local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local Backend = require("Legado/Backend")
+local BookEntry = require("Legado/BookEntry")
 
 local Document= CreDocument:extend{
     provider = "legadodoc",
     provider_name = "Legado Document",
-    _is_skeleton_book = nil,
+    _is_entry = nil,
     _is_cache_book = nil,
 }
 
 function Document:init()
     CreDocument.init(self)
-    if Env.is_legado_chapter_cache(self.file) then
+    if BookEntry.identify(self.file) then
+        self._is_entry = true
+    elseif Env.is_legado_chapter_cache(self.file) then
         self._is_cache_book = true
-    elseif Env.is_legado_skeleton_epub(self.file) then
-        self._is_skeleton_book = true
     end
 end
 
 function Document:get_book_metadata(fullpath)
     if not H.is_str(fullpath) then return nil, nil end
-    local doc_settings = DocSettings:open(fullpath)
-    if doc_settings then
-        return doc_settings:readSetting("book_cache_id"), doc_settings
+    local entry = BookEntry.resolve(fullpath, true)
+    if entry then
+        return entry.book_cache_id, DocSettings:open(fullpath)
     end
     return nil, nil
 end
@@ -47,10 +48,17 @@ function Document:getProps()
         return base_props
     end
 
-    if self._is_skeleton_book then
+    if self._is_entry then
         local book_cache_id, doc_settings = self:get_book_metadata(self.file)
         if H.is_tbl(doc_settings) and H.is_tbl(doc_settings.data) then
             for k, v in pairs(doc_settings.data) do base_props[k] = v end
+            local book = book_cache_id and Backend:getBookInfoCache(book_cache_id)
+            if book then
+                base_props.title = book.name or base_props.title
+                base_props.authors = book.author or base_props.authors
+                base_props.description = book.intro or base_props.description
+            end
+            base_props.book_cache_id = book_cache_id
             base_props["keywords"] = "legado"
         end
     elseif self._is_cache_book then
@@ -67,7 +75,7 @@ function Document:getProps()
 end
 
 function Document:getCoverPageImage()
-    if not (self._is_skeleton_book or self._is_cache_book) then
+    if not (self._is_entry or self._is_cache_book) then
         return CreDocument.getCoverPageImage(self)
     end
 
@@ -76,7 +84,7 @@ function Document:getCoverPageImage()
         local cover_dir = util.splitFilePathName(self.file)
         local  cover_path_no_ext = cover_dir .. "/cover"
         custom_cover_file = Backend:findCustomCoverFileInDir(cover_path_no_ext)
-    elseif self._is_skeleton_book then
+    elseif self._is_entry then
         local book_id = self:get_book_metadata(self.file)
         if book_id then
             custom_cover_file = Backend:get_default_cover_cache(book_id)

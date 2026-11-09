@@ -130,10 +130,11 @@ end
 M.escape_xml_attr = function(value, quote)
     local escaped = M.escape_xml(value)
     if quote == '"' then
-        return escaped:gsub('"', "&quot;")
+        escaped = escaped:gsub('"', "&quot;")
     else
-        return escaped:gsub("'", "&apos;")
+        escaped = escaped:gsub("'", "&apos;")
     end
+    return escaped
 end
 
 local review_css_module = "Legado.res.review_css"

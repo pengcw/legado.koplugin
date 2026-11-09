@@ -77,6 +77,11 @@ return function()
         is_changed = true
     end
 
+    if settings.full_book_cache_output_dir ~= nil then
+        settings.full_book_cache_output_dir = nil
+        is_changed = true
+    end
+
     if is_changed == true then
         settings_data.data = settings
         settings_data:flush()

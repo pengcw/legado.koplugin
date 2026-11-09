@@ -1,7 +1,8 @@
 local logger = require("logger")
+local PlgState = require("Legado/PlgState")
 
 local Probe = {
-    ENABLED = false,
+    ENABLED = PlgState.debug_enabled,
     LOG_LEVEL = "info",
     DETAIL_LEVEL = "verbose",
     CATEGORIES = nil,

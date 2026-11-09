@@ -814,13 +814,30 @@ function M:selectBookSource(selectCallback, options)
                 end
 
                 local function showSourceActions()
-                    local buttons = {{{text = "筛选书源", callback = openSourceFilter}}}
+                    local dimen
+                    if source_list_menu.title_bar and source_list_menu.title_bar.left_button
+                            and source_list_menu.title_bar.left_button.image then
+                        dimen = source_list_menu.title_bar.left_button.image.dimen
+                    end
+                    local align = dimen and "left" or "center"
+                    local buttons = {{{
+                        text = Icons.FA_SEARCH .. " 筛选书源",
+                        callback = openSourceFilter,
+                        align = align,
+                    }}}
                     if not Backend:_isLocal() then
-                        table.insert(buttons, {{text = "更新书源", callback = refreshSources}})
+                        table.insert(buttons, {{
+                            text = Icons.FA_REFRESH .. " 更新书源",
+                            callback = refreshSources,
+                            align = align,
+                        }})
                     end
                     UIManager:show(require("ui/widget/buttondialog"):new{
                         title = "书源操作",
+                        title_align = align,
                         buttons = buttons,
+                        shrink_unneeded_width = dimen and true,
+                        anchor = dimen and function() return dimen end or nil,
                     })
                 end
 
@@ -915,7 +932,7 @@ function M:openLocalBookSourceSettings()
         end
     end, {
         title = "本地书源设置",
-        subtitle = "点击设置",
+        subtitle = "仅用于本地解析",
         loading_text = "获取书源列表 ",
         empty_text = "本地没有可用书源",
         sort_has_login = true,

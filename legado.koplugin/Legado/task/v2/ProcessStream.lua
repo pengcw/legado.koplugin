@@ -158,7 +158,7 @@ function M.spawnProcessStream(job, opts)
                 pcall(on_chunk, chunk)
             end
         else
-            local okd, frame = pcall(on_decode, chunk)
+            local okd, frame = pcall(on_decode, chunk, ok_control, control)
             if not okd then
                 logger.warn(string.format("[spawnProcessStream] on_decode 失败: %s (head: %s)",
                     tostring(frame), chunk:sub(1, 80)))

@@ -1,4 +1,3 @@
-local ffiUtil = require("ffi/util")
 local util = require("util")
 local logger = require("logger")
 local _ = require("gettext")
@@ -12,6 +11,10 @@ local FileManager = require("apps/filemanager/filemanager")
 local DocSettings = require("docsettings")
 local Icons = require("Legado.res.icons")
 local Backend = require("Legado/Backend")
+local Store = require("Legado.Skeleton.BookStore")
+local BookEntry = require("Legado/BookEntry")
+local FS = require("Legado.Helper.FS")
+local NetworkMgr = require("ui/network/manager")
 local Reader = require("Legado.Skeleton.Reader")
 local SkeletonBook = require("Legado.Skeleton.Book")
 local LocalExtension = require("Legado.LocalExtension")
@@ -28,7 +31,6 @@ local LibraryView = {
     book_toc = nil,
     book_shelf = nil,
     stream_view = nil,
-    book_links = nil,
 }
 
 local function isClosingBookMessage(widget)
@@ -97,12 +99,35 @@ function LibraryView:addBkShortcut(bookinfo, always_add)
     if not always_add and self:isDisableBrowserMode() then
         return nil, "当前设置已禁用本地书库入口"
     end
-    local browser = self:getBrowserWidget()
-    if not browser then
-        return nil, "本地书库服务未就绪"
-    end
     local ok, epub_path, err_msg = pcall(function()
-        return browser:addBookShortcut(bookinfo)
+        if not (H.is_tbl(bookinfo) and bookinfo.name and bookinfo.cache_id) then
+            return nil, "书籍信息不完整，无法生成本地书籍"
+        end
+        local route = Backend:bookReaderRoute(bookinfo.cache_id)
+        if not Store:isSupported() or route == "comic"
+                or (route ~= "reader" and Backend:bookContentType(bookinfo) ~= "reader") then
+            return nil, "当前环境或书籍类型不支持生成快捷 EPUB"
+        end
+        local name = FS.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author or "未知作者")) .. "\u{200B}.epub"
+        local output_path = Store:location(bookinfo.cache_id)
+        if not (output_path and util.fileExists(output_path)) then
+            local home_dir = self:getBrowserHomeDir()
+            if not home_dir then return nil, "本地书库保存目录不可用" end
+            output_path = FS.joinPath(home_dir, name)
+        end
+        local path, err = Store:ensureEpub(bookinfo, nil, output_path)
+        if not path then return nil, err or "生成整本 EPUB 失败" end
+        if not util.fileExists(path) then return nil, "EPUB 文件未生成或无法访问" end
+        pcall(util.removeFile, path .. ".old")
+        BookEntry.metadata(path, bookinfo, "epub")
+        Backend:emitMetadataChanged(path)
+        if bookinfo.coverUrl and not Backend:get_default_cover_cache(bookinfo.cache_id) and NetworkMgr:isConnected() then
+            Backend:launchProcess(function()
+                return Backend:download_cover_img(bookinfo.cache_id, bookinfo.coverUrl)
+            end)
+        end
+        local _, filename = util.splitFilePathName(path)
+        return path, filename
     end)
     if not ok then
         logger.warn("addBkShortcut failed:", tostring(epub_path))
@@ -656,35 +681,7 @@ function LibraryView:getSharedMetaData(dir)
 end
 
 function LibraryView:getBrowserHomeDir()
-    return Backend:getFullBookCacheOutputDir()
-end
-
-function LibraryView:deleteFile(file, is_file)
-    local exists = is_file and util.fileExists(file) or util.directoryExists(file)
-    if not exists then return false end
-
-    if FileManager.instance and FileManager.instance.goHome then
-        pcall(function() FileManager.instance:goHome() end)
-        FileManager.instance:deleteFile(file, is_file)
-        pcall(function() FileManager.instance:onRefresh() end)
-        return true
-    end
-    if is_file then
-        return util.removeFile(file)
-    else
-        return pcall(ffiUtil.purgeDir, file)
-    end
-end
-
-function LibraryView:getBrowserCurrentDir()
-    local file_manager = FileManager.instance
-    if file_manager and file_manager.file_chooser then
-        return file_manager.file_chooser.path
-    end
-    local readerui = ReaderUI.instance
-    if readerui then
-        return readerui:getLastDirFile()
-    end
+    return Env.getFullBookCacheOutputDir(Backend:getSettings())
 end
 
 function LibraryView:getInstance()
@@ -692,10 +689,6 @@ function LibraryView:getInstance()
         self:init()
     end
     return self
-end
-
-function LibraryView:getBrowserWidget()
-    return require("Legado/BookLinks")(self)
 end
 
 function LibraryView:getMenuWidget()
@@ -713,7 +706,7 @@ function LibraryView:getBookTocWidget()
     return self.book_toc
 end
 
-function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible)
+function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible, sidebar_mode)
     if not (H.is_tbl(bookinfo) and bookinfo.cache_id) then return self.book_toc end
     local book_cache_id = bookinfo.cache_id
     local toc_obj = self.book_toc
@@ -732,10 +725,13 @@ function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible)
         variable = bookinfo.variable,
     }
 
-    if not (H.is_tbl(toc_obj) and H.is_tbl(toc_obj.bookinfo) and toc_obj.bookinfo.cache_id == book_cache_id) then
+    sidebar_mode = sidebar_mode == true
+    if not (H.is_tbl(toc_obj) and H.is_tbl(toc_obj.bookinfo) and toc_obj.bookinfo.cache_id == book_cache_id)
+            or toc_obj.sidebar_mode ~= sidebar_mode then
+        if toc_obj and UIManager:isWidgetShown(toc_obj) then UIManager:close(toc_obj) end
         self.book_toc = require("Legado/ChapterListing"):fetchAndShow(toc_bookinfo, onReturnCallBack, function(chapter)
             self:loadAndRenderChapter(chapter)
-        end, true, visible)
+        end, true, visible, sidebar_mode)
     else
         self.book_toc.bookinfo = toc_bookinfo
         self.book_toc.expanded_nodes = nil
@@ -750,7 +746,9 @@ end
 
 function LibraryView:showBookTocDialog(bookinfo, onReturnCallBack)
     PlgState:chapterDirection("nil")
-    return self:refreshBookTocWidget(bookinfo, onReturnCallBack, true)
+    local reading = ReaderUI.instance and UIManager:isWidgetShown(ReaderUI.instance)
+        or self.stream_view and UIManager:isWidgetShown(self.stream_view)
+    return self:refreshBookTocWidget(bookinfo, onReturnCallBack, true, reading == true)
 end
 
 function LibraryView:getReadingBookId()

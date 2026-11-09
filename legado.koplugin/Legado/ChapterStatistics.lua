@@ -1,4 +1,5 @@
 local logger = require("logger")
+local _ = require("gettext")
 local M = {}
 
 local function pause(ui)
@@ -32,16 +33,11 @@ local function install(ui, state)
     local Backend = require("Legado/Backend")
     local book = Backend:getBookInfoCache(book_id)
     if not book or not book.name then return end
-    local chapters = Backend:getReadableChapters(book_id) or {}
-    local ordinal
-    for i, chapter in ipairs(chapters) do
-        if chapter.chapters_index == chapter_index then ordinal = i; break end
-    end
+    local ordinal, total = Backend:getReadableChapterPosition(book_id, chapter_index)
     if not ordinal then return end
-    local _ = require("gettext")
     local CHAPTER_SPAN = 100
     local identity = { title = book.name, authors = book.author or "N/A",
-        md5 = "legado-chapters-pages-" .. book_id, ordinal = ordinal, total = #chapters }
+        md5 = require("Legado/Helper").md5("legado-chapters-pages-" .. book_id), ordinal = ordinal, total = total }
     local function virtualPage(page)
         return (ordinal - 1) * CHAPTER_SPAN + math.min(math.max(page, 1), CHAPTER_SPAN)
     end

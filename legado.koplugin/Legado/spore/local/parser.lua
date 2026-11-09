@@ -25,8 +25,8 @@ local Reader = {
     _json = nil,
     _loaded_path = nil,
     _library_validation = nil,
-    MIN_EXTENSION_VERSION = "1.1.4",
-    PINNED_EXTENSION_VERSION = "1.1.4",
+    MIN_EXTENSION_VERSION = "1.1.5",
+    PINNED_EXTENSION_VERSION = "1.1.5",
 }
 
 local function is_android_platform()

@@ -10,19 +10,15 @@ local H = require("Legado/Helper")
 local Patcher = require("Legado.patches")
 local PlgState = require("Legado/PlgState")
 local Env = require("Legado.Helper.Env")
+local BookEntry = require("Legado/BookEntry")
 
 local Handlers = {}
 
 local function return_to_filemanager(ui)
     local file = ui.document.file
     if Env.is_legado_chapter_cache(nil, ui) then
-        local entry_path = PlgState._entry_path
-        if entry_path and util.fileExists(entry_path) then
-            file = entry_path
-        else
-            ui:setLastDirForFileBrowser(Env.getHomeDir())
-            file = nil
-        end
+        ui:setLastDirForFileBrowser(Env.getFullBookCacheOutputDir(Backend:getSettings()))
+        file = nil
     end
     ui:onClose()
     PlgState._entry_path = nil
@@ -143,11 +139,12 @@ function Handlers:register(parent_ref)
         return true
     end
 
-    function parent_ref:_loadBookFromManager(file, undoFileOpen)
+    function parent_ref:_loadBookFromManager(file, undoFileOpen, book_cache_id)
         local loading_msg = MessageBox:info("前往最近阅读章节...", 3)
 
-        local doc_settings = DocSettings:open(file)
-        local book_cache_id = doc_settings:readSetting("book_cache_id")
+        if not book_cache_id then
+            book_cache_id = DocSettings:open(file):readSetting("book_cache_id")
+        end
 
         if not book_cache_id then
             local ok, lnk_conf = pcall(Backend.getLuaConfig, Backend, file)
@@ -251,7 +248,7 @@ function Handlers:register(parent_ref)
         end
     end
 
-    function parent_ref:openFile(file)
+    function parent_ref:openFile(file, kind, entry_settings)
         if not H.is_str(file) then return end
         local function open_regular_file(file_path)
             local ReaderUI = require("apps/reader/readerui")
@@ -259,62 +256,38 @@ function Handlers:register(parent_ref)
             UIManager:broadcastEvent(Event:new("SetupShowReader"))
             show_reader(ReaderUI, file_path, nil, true)
         end
-        if not parent_ref:isSkeletonEpub(file) then
+        if not kind then kind, entry_settings = BookEntry.identify(file) end
+        if not kind then
             PlgState._entry_path = nil
             open_regular_file(file)
             return
         end
         local settings = Backend:getSettings()
-        PlgState._entry_path = (not settings or settings.chapter_mode ~= false) and file or nil
-        local doc_settings = DocSettings:open(file)
-        if not (doc_settings and doc_settings:readSetting("book_cache_id")) then
-            pcall(function()
-                local SkeletonEpub = require("Legado.Skeleton.Epub")
-                SkeletonEpub.restoreDocSettings(file)
-            end)
+        local fallback = kind == "epub" and settings and settings.chapter_mode == false and open_regular_file or nil
+        local entry, entry_err = BookEntry.resolve(file, false, kind, entry_settings)
+        if not entry then
+            PlgState._entry_path = nil
+            PlgState:entrySource(nil)
+            if fallback then return fallback(file) end
+            return MessageBox:error(kind == "epub" and "无法识别骨架 EPUB 入口" or entry_err)
         end
+        local repair_error
+        file, repair_error = BookEntry.repair(entry)
+        if repair_error then MessageBox:notice(repair_error) end
+        PlgState._entry_path = (not settings or settings.chapter_mode ~= false) and file or nil
         PlgState:entrySource("filemanager")
-        local fallback = settings and settings.chapter_mode == false and open_regular_file or nil
         local ok, err = pcall(function()
-            self:_loadBookFromManager(file, fallback)
+            if entry.kind == "epub" then
+                require("Legado.Skeleton.BookStore"):location(entry.book_cache_id, file)
+            end
+            self:_loadBookFromManager(file, fallback, entry.book_cache_id)
         end)
         if not ok then
             PlgState._entry_path = nil
+            PlgState:entrySource(nil)
             logger.err("fail to open file:", err)
         end
         return true
-    end
-
-    function parent_ref:onOpenLegacyLnk(file)
-        if not H.is_str(file) then return end
-        local book_cache_id
-        local ok, lnk_conf = pcall(Backend.getLuaConfig, Backend, file)
-        if ok and H.is_tbl(lnk_conf) and lnk_conf.readSetting then
-            book_cache_id = lnk_conf:readSetting("book_cache_id")
-        end
-        if not book_cache_id then
-            local doc_settings = DocSettings:open(file)
-            book_cache_id = doc_settings and doc_settings:readSetting("book_cache_id")
-        end
-        if not book_cache_id then
-            return MessageBox:error("无法识别的链接文件")
-        end
-        local bookinfo = Backend:getBookInfoCache(book_cache_id)
-        if not (H.is_tbl(bookinfo) and bookinfo.name) then
-            return MessageBox:error("旧版链接对应的书籍信息不存在")
-        end
-        MessageBox:notice("检测到链接文件，正在重新生成快捷 EPUB…")
-        local library_obj = require("Legado/LibraryView"):getInstance()
-        local book_links = library_obj and library_obj.book_links
-        require("Legado.Skeleton.Book"):ensureEpubAsync(bookinfo, nil, nil, function(epub_path)
-            if book_links and book_links.refreshBookMetadata then
-                book_links:refreshBookMetadata(epub_path, bookinfo)
-            end
-            util.removeFile(file)
-            self:openFile(epub_path)
-        end, function(err)
-            MessageBox:error("快捷 EPUB 生成失败：" .. tostring(err))
-        end)
     end
 
     function parent_ref:genMainMenuItems(_)
@@ -666,7 +639,8 @@ function Handlers:register(parent_ref)
         function parent_ref:applyReaderReady(doc_settings)
             if not (doc_settings and doc_settings.data and self.ui and self.view) then return end
 
-            if not parent_ref:isCachePath(nil, self.ui) then
+            if not (Env.is_legado_chapter_cache(nil, self.ui)
+                    or Env.is_legado_skeleton_book(nil, self.ui)) then
                 PlgState._entry_path = nil
                 PlgState:readerUiVisible(false)
                 PlgState:readingMode(nil)
@@ -700,7 +674,7 @@ function Handlers:register(parent_ref)
                 if not is_chapter_open then return end
             end
 
-            if not is_chapter_open and not parent_ref:isCachePath(nil, ui_ref) then return end
+            if not is_chapter_open and not Env.is_legado_chapter_cache(nil, ui_ref) then return end
 
             if Env.is_legado_skeleton_book(nil, ui_ref) then return end
             local library_obj = require("Legado/LibraryView"):getInstance()

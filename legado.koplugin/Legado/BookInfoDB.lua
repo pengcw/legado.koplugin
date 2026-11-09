@@ -1108,6 +1108,22 @@ function M:getReadableChapters(bookCacheId)
     return self:getAllChapters(bookCacheId, true)
 end
 
+function M:getReadableChapterPosition(bookCacheId, chapterIndex)
+    local rows = self:execute([[
+        SELECT COUNT(*),
+               SUM(CASE WHEN c.chapterIndex <= ? THEN 1 ELSE 0 END),
+               MAX(CASE WHEN c.chapterIndex = ? THEN 1 ELSE 0 END)
+        FROM chapters AS c
+        WHERE c.bookCacheId = ? AND (c.isVolume IS NULL OR c.isVolume = 0)
+          AND EXISTS (SELECT 1 FROM books AS b
+                      WHERE b.bookCacheId = c.bookCacheId AND b.isEnabled = 1);
+    ]], { chapterIndex, chapterIndex, bookCacheId })
+    local row = rows and rows[1]
+    if row and tonumber(row[3]) == 1 then
+        return tonumber(row[2]), tonumber(row[1])
+    end
+end
+
 function M:getAllChaptersByUI(bookCacheId, is_desc_sort)
     if not H.is_str(bookCacheId) then
         return {}

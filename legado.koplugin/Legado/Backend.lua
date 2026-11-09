@@ -630,8 +630,10 @@ local function make_preload_host(backend)
         download_chapter = function(chapter, options)
             return backend:_pDownloadChapter(chapter, options)
         end,
-        commit_cache_path = function(chapter, path)
-            return backend.dbManager:updateCacheFilePath(chapter, path)
+        commit_cache_path = function(chapter, path, bookinfo)
+            local result = backend.dbManager:updateCacheFilePath(chapter, path)
+            backend:onChapterCached(chapter, path, bookinfo)
+            return result
         end,
         set_task_lock = function(targets, is_locked, ttl, owner_id)
             return TaskLock.setLock(backend.dbManager, targets, is_locked, ttl, owner_id)
@@ -1728,6 +1730,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     local first_ch = chapter_down_tasks[1]
     local last_ch = chapter_down_tasks[#chapter_down_tasks]
     local book_cache_id = first_ch.book_cache_id
+    local bookinfo
     local is_comic = self:isBookTypeComic(book_cache_id)
     local chapter_timeout = is_comic and 120 or 20
 
@@ -1856,6 +1859,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                                     return check_completion(false, string.format("章节[%s]图片打包失败: %s", tostring(current_chapter.title), tostring(result and result.output or pending.filePath)), current_chapter)
                                 end
                                 current_chapter.cacheFilePath = pending.filePath
+                                bookinfo = self:onChapterCached(current_chapter, pending.filePath, bookinfo)
                                 logger.dbg('Download chapter successfully (cbz):', current_chapter.book_cache_id, current_chapter.chapters_index, pending.filePath)
 
                                 local ok, err = pcall(db_update_success, current_chapter, pending.filePath)
@@ -1888,6 +1892,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     end
 
                     local cache_file_path = downloaded_chapter.cacheFilePath
+                    bookinfo = self:onChapterCached(current_chapter, cache_file_path, bookinfo)
                     logger.dbg('Download chapter successfully:', current_chapter.book_cache_id, current_chapter.chapters_index, cache_file_path)
 
                     local ok, err = pcall(db_update_success, current_chapter, cache_file_path)
@@ -2085,6 +2090,10 @@ end
 function M:getReadableChapters(bookCacheId)
     local chapter_data = self.dbManager:getReadableChapters(bookCacheId)
     return chapter_data
+end
+
+function M:getReadableChapterPosition(bookCacheId, chapterIndex)
+    return self.dbManager:getReadableChapterPosition(bookCacheId, chapterIndex)
 end
 
 function M:closeDbManager()
@@ -2450,6 +2459,25 @@ function M:after_reader_chapter_show(chapter)
     chapter.isDownLoaded = is_downloaded
 end
 
+function M:onChapterCached(chapter, path, bookinfo)
+    local settings = self:getSettings()
+    if settings.virtual_bookshelf_enabled ~= true then return bookinfo end
+    path = path or chapter.cacheFilePath
+    if not path or path:lower():match("%.epub$") or FS.getFileSize(path) <= 0 then return bookinfo end
+    local ok, err = pcall(function()
+        local Entry = require("Legado/BookEntry")
+        local epub_path = require("Legado.Skeleton.BookStore"):location(chapter.book_cache_id)
+        if Entry.isEpubInDirectory(epub_path, settings.virtual_bookshelf_dir) then return end
+        bookinfo = bookinfo or self:getBookInfoCache(chapter.book_cache_id)
+        if not bookinfo then return end
+        local entry_path, changed = Entry.ensureHtml(bookinfo, settings.virtual_bookshelf_dir)
+        if entry_path == nil then error(changed) end
+        if changed then self:emitMetadataChanged(entry_path) end
+    end)
+    if not ok then logger.warn("快捷 HTML 维护失败:", tostring(err)) end
+    return bookinfo
+end
+
 function M:downloadChapter(chapter)
     if self:isTaskRunning(chapter) then
         Probe.retry("Chapter", "章节正在后台执行中", format_chapter_desc(chapter), nil, "LOCK_HELD")
@@ -2688,13 +2716,8 @@ local function ensure_directory(dir)
     return nil, "整本缓存保存目录不可用，且无法创建：" .. dir
 end
 
-function M:getFullBookCacheOutputDir()
-    local dir = self:getSettings().full_book_cache_output_dir
-    return H.is_str(dir) and dir ~= "" and dir or Env.getHomeDir()
-end
-
 function M:ensureFullBookCacheOutputDir()
-    return ensure_directory(self:getFullBookCacheOutputDir())
+    return ensure_directory(Env.getFullBookCacheOutputDir(self:getSettings()))
 end
 
 function M:enforceRateLimit(last_time, limit_ms)

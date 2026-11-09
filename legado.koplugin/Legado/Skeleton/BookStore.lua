@@ -5,7 +5,6 @@ local H = require("Legado/Helper")
 local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local Probe = require("Legado.Helper.Probe")
-local ffiUtil = require("ffi/util")
 local DocSettings = require("docsettings")
 local M = { _epub_revision = {} }
 
@@ -19,25 +18,29 @@ end
 
 function M:getPath(book_cache_id, book_name)
     if not book_cache_id then return nil end
-    return Env.getVirtualBookEpubPath(book_cache_id, book_name, Backend:getFullBookCacheOutputDir())
+    local recorded = self:location(book_cache_id)
+    if recorded then return recorded end
+    local output_dir = Env.getFullBookCacheOutputDir(Backend:getSettings())
+    if not (H.is_str(output_dir) and output_dir ~= "") then return nil end
+    return Env.getVirtualBookEpubPath(book_cache_id, book_name, output_dir)
 end
 
 function M:location(book_cache_id, epub_path)
     if not (H.is_str(book_cache_id) and book_cache_id ~= "") then return nil end
-    local record = Backend:getLuaConfig(self:getLocationRecord(book_cache_id))
-    if H.is_str(epub_path) and epub_path ~= "" then
-        local old = record:readSetting("path")
-        if old ~= epub_path then
-            record:saveSetting("path", epub_path):flush()
-        end
-        return epub_path
+    local record_path = self:getLocationRecord(book_cache_id)
+    local record = Backend:getLuaConfig(record_path)
+    local old = record:readSetting("path")
+    if H.is_str(old) and old ~= "" and util.fileExists(old) then return old end
+    local path = H.is_str(epub_path) and epub_path ~= "" and util.fileExists(epub_path) and epub_path or nil
+    if old ~= path then
+        if path then FS.checkAndCreateFolder(util.splitFilePathName(record_path)) end
+        record:saveSetting("path", path):flush()
     end
-    local p = record:readSetting("path")
-    return H.is_str(p) and p or nil
+    return path
 end
 
 function M:getLocationRecord(book_cache_id)
-    return FS.joinPath(Env.getBookCachePath(book_cache_id), "virtual_book_location.lua")
+    return FS.joinPath(Env.getTempDirectory(), book_cache_id .. ".sdr/virtual_book_location.lua")
 end
 
 function M:isSupported()
@@ -81,6 +84,8 @@ function M:ensureEpub(bookinfo, _, custom_output_path)
         return nil, "invalid bookinfo"
     end
     local book_cache_id = bookinfo.cache_id
+    local recorded = self:location(book_cache_id)
+    if recorded then custom_output_path = recorded end
     local output_dir, dir_err
     if custom_output_path then
         output_dir = util.splitFilePathName(custom_output_path)
@@ -98,31 +103,6 @@ function M:ensureEpub(bookinfo, _, custom_output_path)
     if not epub_path then return nil, "cannot resolve epub path" end
 
     local SkeletonEpub = require("Legado.Skeleton.Epub")
-    if not custom_output_path and not (FS.getFileSize(epub_path) > 1024) then
-        local old_path = self:location(book_cache_id)
-        if H.is_str(old_path) and old_path ~= "" and old_path ~= epub_path and util.fileExists(old_path) then
-            local ok_mv = FS.moveFile(old_path, epub_path)
-            if not ok_mv then
-                ok_mv = FS.copyRecursive(old_path, epub_path) and util.removeFile(old_path)
-            end
-            if ok_mv then
-                local old_sdr, new_sdr = old_path .. ".sdr", epub_path .. ".sdr"
-                if util.pathExists(old_sdr) then
-                    local ok_sdr = FS.moveFile(old_sdr, new_sdr)
-                    if not ok_sdr then
-                        ok_sdr = FS.copyRecursive(old_sdr, new_sdr)
-                        if ok_sdr then
-                            pcall(function() ffiUtil.purgeDir(old_sdr) util.removePath(old_sdr) end)
-                        end
-                    end
-                end
-                self:location(book_cache_id, epub_path)
-            else
-                logger.warn("virtual book recover move failed:", old_path, epub_path)
-            end
-        end
-    end
-
     local SKELETON_SCHEMA_VERSION = SkeletonEpub.SKELETON_SCHEMA_VERSION or 3
     if FS.getFileSize(epub_path) > 1024 then
         local ds = DocSettings:open(epub_path)

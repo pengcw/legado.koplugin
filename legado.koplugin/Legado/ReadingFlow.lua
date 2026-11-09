@@ -125,7 +125,7 @@ function ReadingFlow:openBook(chapter, options)
     return self:_openLegacyBook(bookinfo, chapter, options)
 end
 
-function ReadingFlow:_openLegacyBook(_, chapter, options, on_ready)
+function ReadingFlow:_openLegacyBook(bookinfo, chapter, options, on_ready)
     if chapter.is_virtual_epub or (H.is_str(chapter.cacheFilePath) and chapter.cacheFilePath:lower():match("%.epub$")) then
         local normalized = {}
         for key, value in pairs(chapter) do normalized[key] = value end
@@ -156,9 +156,10 @@ function ReadingFlow:_openLegacyBook(_, chapter, options, on_ready)
     return TaskProg.loading("正在下载正文 ", function()
         return Backend:downloadChapter(chapter)
     end, function(state, response)
-        if SkeletonBook._open_generation ~= generation then return end
         if state == true then
             Backend:HandleResponse(response, function(data)
+                if H.is_tbl(data) and data.cacheFilePath then Backend:onChapterCached(data, nil, bookinfo) end
+                if SkeletonBook._open_generation ~= generation then return end
                 if H.is_tbl(data) and data.kind == "cbz" then
                     local pending = data
                     local cbz_writer = require("Legado.task.QueueCbz"):new()
@@ -178,6 +179,7 @@ function ReadingFlow:_openLegacyBook(_, chapter, options, on_ready)
                             if progress_bar then progress_bar:close() end
                             if result and result.success then
                                 pending.chapter.cacheFilePath = pending.filePath
+                                Backend:onChapterCached(pending.chapter, nil, bookinfo)
                                 UIManager:nextTick(function()
                                     if SkeletonBook._open_generation == generation then show(pending.chapter) end
                                 end)
@@ -195,9 +197,11 @@ function ReadingFlow:_openLegacyBook(_, chapter, options, on_ready)
 
                 return show(data)
             end, function(err_msg)
+                if SkeletonBook._open_generation ~= generation then return end
                 on_error(err_msg or "下载章节失败")
             end)
         else
+            if SkeletonBook._open_generation ~= generation then return end
             on_error(tostring(response or "下载正文失败"))
         end
     end)
@@ -262,6 +266,7 @@ function ReadingFlow:refreshCurrentChapter(options)
                     return on_error("下载章节正文为空")
                 end
 
+                Backend:onChapterCached(data, nil, bookinfo)
                 if is_skeleton and bookinfo then
                     local raw = util.readFromFile(data.cacheFilePath)
                     if not raw or raw == "" then

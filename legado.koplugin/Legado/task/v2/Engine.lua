@@ -176,9 +176,8 @@ function ProcessEngine.start(task)
 
     local stream_opts = {
         timeout = task.timeout,
-        on_decode = function(line)
-            local ok, data = pcall(JSON.decode, line)
-            return ok and data or nil
+        on_decode = function(_, decoded_ok, decoded)
+            return decoded_ok and decoded or nil
         end,
         on_chunk = function(frame)
             if not (frame and type(frame) == "table") then return end

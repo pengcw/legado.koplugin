@@ -12,6 +12,7 @@ local ButtonDialog = require("ui/widget/buttondialog")
 local Button = require("ui/widget/button")
 local TextWidget = require("ui/widget/textwidget")
 local Screen = Device.screen
+local Size = require("ui/size")
 
 local Backend = require("Legado/Backend")
 local LocalExtension = require("Legado.LocalExtension")
@@ -52,7 +53,12 @@ local ChapterListing = Menu:extend{
 }
 
 function ChapterListing:init()
-    self.width, self.height = Screen:getWidth(), Screen:getHeight()
+    self.sidebar_mode = self.sidebar_mode == true
+    local width, height = Screen:getWidth(), Screen:getHeight()
+    local sidebar_ratio = height >= width * 1.6 and 0.8 or 0.6
+    self.width = self.sidebar_mode and math.floor(width * sidebar_ratio) or width
+    self.height = height
+    self.covers_fullscreen = not self.sidebar_mode
     self.onLeftButtonTap = function()
         self:openMenu()
     end
@@ -78,8 +84,8 @@ end
 
 function ChapterListing:initButtons()
     local items_per_page = self.items_per_page or self.toc_items_per_page_default
-    local icon_size = math.floor(Screen:getHeight() / items_per_page * 2 / 5)
-    local button_width = icon_size * 2
+    local icon_size = Screen:scaleBySize(24)
+    local button_width = Screen:scaleBySize(40)
 
     self.expand_button = Button:new{
         icon = "control.expand",
@@ -402,6 +408,14 @@ function ChapterListing:refreshVisibleItems(target_raw_index)
     self:switchItemTable(nil, self.item_table, target_v_idx or -1)
 end
 
+function ChapterListing:onTapCloseAllMenus(arg, ges_ev)
+    if self.sidebar_mode and ges_ev.pos:notIntersectWith(self.dimen) then
+        self:onClose()
+        return true
+    end
+    return Menu.onTapCloseAllMenus(self, arg, ges_ev)
+end
+
 function ChapterListing:onClose()
     self._opening_chapter = nil
     self._force_refresh_after_clear = nil
@@ -411,7 +425,7 @@ end
 
 function ChapterListing:onReturn()
     Menu.onClose(self)
-    if H.is_func(self.on_return_callback) then
+    if not self.sidebar_mode and H.is_func(self.on_return_callback) then
         UIManager:nextTick(function()
             self.on_return_callback()
         end)
@@ -432,7 +446,7 @@ function ChapterListing:updateReturnCallback(callback)
     end
 end
 
-function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, visible)
+function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCallBack, accept_cached_results, visible, sidebar_mode)
     accept_cached_results = accept_cached_results or false
 
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
@@ -464,6 +478,7 @@ function ChapterListing:fetchAndShow(bookinfo, onReturnCallBack, showChapterCall
 
     local chapter_listing = ChapterListing:new{
         bookinfo = bookinfo,
+        sidebar_mode = sidebar_mode == true,
         on_return_callback = onReturnCallBack,
         on_show_chapter_callback = showChapterCallBack,
 
@@ -499,11 +514,9 @@ function ChapterListing:onMenuSelect(item, pos)
     if item.isVolume then
         do_toggle = true
     elseif item.state and pos and pos.x then
-        if BD.mirroredUILayout() then
-            do_toggle = pos.x > 0.7
-        else
-            do_toggle = pos.x < 0.3
-        end
+        local x = (BD.mirroredUILayout() and (1 - pos.x) or pos.x) * self.item_dimen.w
+        local start = (self.items_padding or Size.padding.fullscreen) + (item.indent or 0)
+        do_toggle = x >= start and x < start + item.state.width
     end
 
     if do_toggle and item.has_children then
@@ -555,7 +568,7 @@ function ChapterListing:onMenuHold(item)
                 chapters_index = item.chapters_index,
                 isRead = chapter.isRead,
                 book_cache_id = chapter.book_cache_id
-            }), function(data)
+            }), function()
                 self:refreshItems(true)
 
             end, function(err_msg)
@@ -577,7 +590,7 @@ function ChapterListing:onMenuHold(item)
                 variable = chapter.variable,
                 bookVariable = chapter.bookVariable,
                 name = chapter.name,
-            }), function(data)
+            }), function()
                 self:refreshItems(true)
                 if isDownLoaded == true then
                     MessageBox:notice('删除成功')
@@ -614,14 +627,14 @@ function ChapterListing:onMenuHold(item)
                 callback = function(autoturn_spin)
                     require("Legado/ExportDialog"):new({
                         bookinfo = self.bookinfo
-                    }):cacheSelectedChapters(tonumber(chapters_index), autoturn_spin.value, function(success)
+                    }):cacheSelectedChapters(tonumber(chapters_index), autoturn_spin.value, function()
                         self:refreshItems(true)
                     end)
                 end,
                 extra_callback = function()
                     require("Legado/ExportDialog"):new({
                         bookinfo = self.bookinfo
-                    }):cacheSelectedChapters(tonumber(chapters_index), nil, function(success)
+                    }):cacheSelectedChapters(tonumber(chapters_index), nil, function()
                         self:refreshItems(true)
                     end)
                 end
@@ -680,7 +693,7 @@ function ChapterListing:onRefreshChapters()
             end,
             callback = function(ok, result)
                 if ok == true then
-                    Backend:HandleResponse(result, function(data)
+                    Backend:HandleResponse(result, function()
                         self._force_refresh_after_clear = nil
                         MessageBox:notice('同步成功')
                         self.expanded_nodes = nil
@@ -732,7 +745,7 @@ function ChapterListing:syncProgressShow(chapter)
         end,
         callback = function(ok, result)
             if ok == true then
-                Backend:HandleResponse(result, function(data)
+                Backend:HandleResponse(result, function()
                     local bookCacheId = self.bookinfo.cache_id
                     local bookinfo = Backend:getBookInfoCache(bookCacheId)
                     if H.is_tbl(bookinfo) and H.is_num(bookinfo.durChapterIndex) then
@@ -947,6 +960,23 @@ function ChapterListing:openMenu()
         end,
         align = "left",
     }})
+
+    if self.sidebar_mode then
+        table.insert(buttons, {{
+            text = Icons.FA_BOOK .. " 返回书架",
+            align = "left",
+            callback = function()
+                UIManager:close(dialog)
+                self:onClose()
+                local library = require("Legado/LibraryView"):getInstance()
+                if library.stream_view and UIManager:isWidgetShown(library.stream_view) then
+                    library.stream_view.on_return_callback = nil
+                    library.stream_view:onClose()
+                end
+                library:afterCloseReaderUi(function() library:fetchAndShow() end)
+            end,
+        }})
+    end
 
     local dimen
     if self.title_bar and self.title_bar.left_button and self.title_bar.left_button.image then

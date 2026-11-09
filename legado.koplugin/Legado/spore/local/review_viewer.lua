@@ -124,13 +124,14 @@ function M.show(reference, extension_source, extension_url)
         local preview, err = M.fetch(reference, extension_source, extension_url)
         return { preview = preview, error = err }
     end, function(ok, result)
+        if not ok and result == "cancelled" then return end
         if ok and type(result) == "table" and type(result.preview) == "table" then
             Preview.show(result.preview)
         else
             local message = ok and type(result) == "table" and result.error
             MessageBox:error(type(message) == "string" and message or "书评加载失败，请稍后重试")
         end
-    end)
+    end, { silent_cancel = true })
 end
 
 return M
