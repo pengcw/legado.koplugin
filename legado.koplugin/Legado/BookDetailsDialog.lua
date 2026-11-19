@@ -144,7 +144,7 @@ function BookDetails:getButtonGroup(other_elements_height)
         end
     end
     if self.has_reload_btn then
-        table.insert(buttons, {
+        table.insert(buttons, self.reload_btn_position or (#buttons + 1), {
             text = "刷新封面",
             callback = function()
                 if self.is_downloading then return end
@@ -292,7 +292,7 @@ function BookDetails:_createMetadataGroup(metadata_table)
             face = self.small_font,
             fgcolor = Blitbuffer.COLOR_GRAY_9,
         })
-        table.insert(metadata_labeled_group, TextWidget:new{
+        table.insert(metadata_labeled_group, item.widget or TextWidget:new{
             text = item.value or "N/A",
             face = self.small_font,
         })
@@ -333,6 +333,38 @@ function BookDetails:getBookDetails()
         { label = "总章数", value = self.bookinfo.totalChapterNum },
         { label = "总字数", value = self.bookinfo.wordCount },
     }
+    local chapter = util.trim(self.bookinfo.durChapterTitle or "")
+    local timestamp = tonumber(self.bookinfo.durChapterTime) or 0
+    if chapter ~= "" or timestamp > 0 then
+        local label = chapter ~= "" and "读至" or "上次阅读"
+        local row = HorizontalGroup:new{}
+        local time_widget
+        if timestamp > 0 then
+            local seconds = math.floor(timestamp / 1000)
+            local format = os.date("%Y", seconds) == os.date("%Y")
+                and "%m-%d %H:%M" or "%Y-%m-%d %H:%M"
+            time_widget = TextWidget:new{
+                text = (chapter ~= "" and "," or "") .. os.date(format, seconds),
+                face = self.small_font,
+            }
+        end
+        if chapter ~= "" then
+            local label_width = TextWidget:new{
+                text = "总章数", face = self.small_font,
+            }:getSize().w
+            local value_width = screen_width - img_width
+                - 2 * math.floor(screen_width * Constants.DETAILS_HORIZONTAL_PADDING_RATIO)
+                - math.floor(screen_width * Constants.METADATA_HORIZONTAL_SPACING_RATIO)
+                - label_width
+            table.insert(row, TextWidget:new{
+                text = chapter,
+                face = self.small_font,
+                max_width = math.max(0, value_width - (time_widget and time_widget:getSize().w or 0)),
+            })
+        end
+        if time_widget then table.insert(row, time_widget) end
+        table.insert(metadata_table, { label = label, widget = row })
+    end
     table.insert(book_metadata_group, self:_createMetadataGroup(metadata_table))
 
     local metadata_height = book_metadata_group:getSize().h

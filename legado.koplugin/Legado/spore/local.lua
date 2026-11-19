@@ -621,8 +621,10 @@ function M:loginBookSource(options, callback)
             if type(self.clear_source_state) ~= "function" then error("书源清理不可用", 0) end
             local kind = options.action == "logout" and "cookie" or "cache"
             if kind == "cache" then
-                local cleared = require("Legado.spore.local.providers.file_cache").new():clear(entry.source.bookSourceUrl)
-                if cleared ~= true then error("书源文件缓存清除失败，请稍后重试", 0) end
+                local cleared = Reader.execute(entry.source:json(), {api = 2, op = "cache_clear"})
+                if not (cleared and cleared.ok == true and cleared.data == true) then
+                    error("书源文件缓存清除失败，请稍后重试", 0)
+                end
             end
             local cleared, session = self.clear_source_state(entry.source.bookSourceUrl, kind)
             if cleared ~= true then error(session or "书源清理失败", 0) end

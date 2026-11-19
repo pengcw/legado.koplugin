@@ -1381,8 +1381,7 @@ local chapter_writeToFile = function(chapter, filePath, resources)
         end
     end
 
-    if util.writeToFile(resources, filePath, true) then
-
+    if FS.writeAtomic(filePath, resources) then
         chapter.cacheFilePath = filePath
         return chapter
     else
@@ -1752,27 +1751,39 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
     local failed_chapters = {}
     local first_error = nil
 
+    local function chapter_status(state, chapter, err)
+        return {
+            state = state,
+            chapter = chapter,
+            completed = completed_count,
+            failed = failed_count,
+            error = err,
+        }
+    end
+
     local is_finalizing = false
     local pending_cbz_count = 0
-    local check_completion = function(progress, err_msg, failed_chapter)
+    local check_completion = function(progress, err_msg, chapter)
         if progress == false then
             Probe.fail("Preload", "预加载失败", batch_desc, t_batch_start, tostring(err_msg or "下载中断"))
             if not is_read_ahead then
                 has_error = true
                 failed_count = failed_count + 1
                 first_error = first_error or err_msg or "下载中断"
-                if failed_chapter then table.insert(failed_chapters, failed_chapter) end
+                if chapter then table.insert(failed_chapters, chapter) end
                 if has_result_progress_callback then
-                    result_progress_callback(completed_count + failed_count)
+                    result_progress_callback(completed_count + failed_count, nil, nil,
+                        chapter_status("failed", chapter, err_msg))
                 end
             elseif has_result_progress_callback then
-                result_progress_callback(false, err_msg)
+                result_progress_callback(false, err_msg, nil, chapter_status("failed", chapter, err_msg))
             end
         elseif has_result_progress_callback and type(progress) == "number" then
             if not is_read_ahead then
-                result_progress_callback(completed_count + failed_count, err_msg)
+                result_progress_callback(completed_count + failed_count, err_msg, nil,
+                    chapter_status("succeeded", chapter))
             elseif not has_error then
-                result_progress_callback(progress, err_msg)
+                result_progress_callback(progress, err_msg, nil, chapter_status("succeeded", chapter))
             end
         end
 
@@ -1871,7 +1882,7 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                                 local cbz_size = FS.getFileSize(pending.filePath)
                                 local progress_str = string.format("进度 %d/%d", completed_count, #chapter_down_tasks)
                                 Probe.done("Chapter", "CBZ完成", format_chapter_desc(current_chapter), t_cbz_start, "200 OK", Probe.format_bytes(cbz_size), progress_str)
-                                check_completion(completed_count)
+                                check_completion(completed_count, nil, current_chapter)
                             end,
                         })
                         if not started then
@@ -1904,13 +1915,17 @@ function M:preLoadingChapters(chapters, download_chapter_count, result_progress_
                     local file_size = FS.getFileSize(cache_file_path)
                     local progress_str = string.format("进度 %d/%d", completed_count, #chapter_down_tasks)
                     Probe.done("Chapter", "章节下载完成", format_chapter_desc(current_chapter), current_chapter._t_probe_start, "200 OK", Probe.format_bytes(file_size), progress_str)
-                    check_completion(completed_count)
+                    check_completion(completed_count, nil, current_chapter)
                 end,
                 {
                     args = {dlChapter},
                     insert_at_head = true,
                     timeout = chapter_timeout,
                     on_start = function()
+                        if has_result_progress_callback then
+                            result_progress_callback(completed_count + failed_count, nil, nil,
+                                chapter_status("started", dlChapter))
+                        end
                         dlChapter._t_probe_start = H.timestamp()
                         Probe.start("Chapter", "下载章节", format_chapter_desc(dlChapter), string.format("(book_id: %s, idx: %s)", tostring(book_cache_id), tostring(dlChapter.chapters_index)))
                         logger.dbg('TaskQueue running: chapter_title:', dlChapter.title or nil)
@@ -2082,8 +2097,8 @@ function M:getAllChaptersByUI(bookCacheId)
     return chapter_data
 end
 
-function M:getBookChapterPlusCache(bookCacheId)
-    local chapter_data = self.dbManager:getAllChapters(bookCacheId)
+function M:getBookChapterPlusCache(bookCacheId, bookShelfId)
+    local chapter_data = self.dbManager:getAllChapters(bookCacheId, false, bookShelfId)
     return chapter_data
 end
 

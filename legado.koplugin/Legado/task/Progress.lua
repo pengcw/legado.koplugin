@@ -3,6 +3,7 @@ local Screen = require("device").screen
 local InfoMessage = require("ui/widget/infomessage")
 local TaskQueue = require("Legado.task.Queue")
 local H = require("Legado/Helper")
+local socket = require("socket")
 
 local M = {}
 local SPINNER_STYLES = {{"|", "/", "-", "\\"}, {"\u{25D0}", "\u{25D3}", "\u{25D1}", "\u{25D2}"}}
@@ -35,6 +36,7 @@ local function show_progress_info(message, options)
     local updateText
     local message_dialog
     local current_progress
+    local completed = false
 
     local spinner
     local spinner_index = 1
@@ -51,7 +53,7 @@ local function show_progress_info(message, options)
             current_progress_text = spinner
         end
 
-        local new_text = string.format("%s %s ...", message, current_progress_text)
+        local new_text = completed and message or string.format("%s %s ...", message, current_progress_text)
         if message_dialog and message_dialog.movable and Screen.refreshUI then
             local orig_offset = message_dialog.movable:getMovedOffset()
             message_dialog:free()
@@ -67,7 +69,7 @@ local function show_progress_info(message, options)
             UIManager:show(message_dialog)
         end
 
-        UIManager:scheduleIn(defaultOptions.update_interval, updateText)
+        if not completed then UIManager:scheduleIn(defaultOptions.update_interval, updateText) end
     end
 
     updateText()
@@ -81,11 +83,14 @@ local function show_progress_info(message, options)
                 message_dialog = nil
             end
         end,
-        unschedule = function()
+        unschedule = function() UIManager:unschedule(updateText) end,
+        reportProgress = function(_, progress) current_progress = progress end,
+        setMessage = function(_, text) message = text end,
+        finish = function(_, text)
             UIManager:unschedule(updateText)
-        end,
-        reportProgress = function(_, progress)
-            current_progress = progress
+            completed = true
+            message = text
+            updateText()
         end,
     }
 end
@@ -133,12 +138,17 @@ function M.loading(message_or_args, runnable, callback, options, silent_cancel)
     local message_dialog
     local confirm_dialog
     local bg_switch_dialog
+    local pending_finish
 
     local MessageBox = require("Legado/MessageBox")
 
     if is_dismissable then
         args.dismiss_callback = function()
-            if is_cancelled or is_finished then return end
+            if is_cancelled then return end
+            if is_finished then
+                if pending_finish then pending_finish() end
+                return
+            end
             if message_dialog and message_dialog.unschedule then message_dialog:unschedule() end
 
             if is_silent_cancel then
@@ -183,35 +193,164 @@ function M.loading(message_or_args, runnable, callback, options, silent_cancel)
         end
     end
 
+    local shown_at = socket.gettime()
     message_dialog = show_progress_info(message, args)
 
-    pid = TaskQueue.spawnProcess(task_runnable, function(ok, return_values)
+    local function finish(ok, return_values)
+        if is_finished then return end
         is_finished = true
         if is_cancelled then return end
 
-        if message_dialog and message_dialog.close then
-            message_dialog:close()
-        end
-        if confirm_dialog then UIManager:close(confirm_dialog) end
-        if bg_switch_dialog then UIManager:close(bg_switch_dialog) end
+        local delivered = false
+        local function complete()
+            if delivered then return end
+            delivered = true
+            if pending_finish then UIManager:unschedule(pending_finish) end
+            pending_finish = nil
+            if message_dialog and message_dialog.close then
+                message_dialog:close()
+            end
+            if confirm_dialog then UIManager:close(confirm_dialog) end
+            if bg_switch_dialog then UIManager:close(bg_switch_dialog) end
 
-        if H.is_func(on_done) then
-            if not ok then
-                on_done(false, return_values or "Task was cancelled or failed to complete")
-            else
-                on_done(true, return_values)
+            if H.is_func(on_done) then
+                if not ok then
+                    on_done(false, return_values or "Task was cancelled or failed to complete")
+                else
+                    on_done(true, return_values)
+                end
+            end
+
+            if is_background and notify_bg_finish == true then
+                local bg_msg = (message ~= "") and (message .. " 已结束") or "后台任务已结束"
+                MessageBox:notice(bg_msg)
             end
         end
 
-        if is_background and notify_bg_finish == true then
-            local bg_msg = (message ~= "") and (message .. " 已结束") or "后台任务已结束"
-            MessageBox:notice(bg_msg)
+        local remaining = (args.min_visible_time or 0) - (socket.gettime() - shown_at)
+        if remaining > 0 and not is_background then
+            local text = H.is_func(args.completion_text)
+                and args.completion_text(ok, return_values) or "任务已结束"
+            message_dialog:finish(text)
+            pending_finish = complete
+            UIManager:scheduleIn(remaining, complete)
+        else
+            complete()
         end
-    end, timeout)
+    end
+
+    if args.on_progress then
+        local started, err = pcall(function()
+            require("Legado.task.v2").stream(task_runnable, {
+                engine = "process",
+                timeout = timeout,
+                on_progress = function(_, text)
+                    if not is_finished and not is_background and H.is_str(text) then
+                        message_dialog:setMessage(text)
+                    end
+                end,
+                on_finish = finish,
+            })
+        end)
+        if not started then finish(false, tostring(err)) end
+    else
+        pid = TaskQueue.spawnProcess(task_runnable, finish, timeout)
+    end
+end
+
+local function show_detailed_progress(message, options)
+    local ButtonDialog = require("ui/widget/buttondialog")
+    if type(ButtonDialog.addWidget) ~= "function"
+            or type(ButtonDialog.getAddedWidgetAvailableWidth) ~= "function" then
+        return nil
+    end
+    local TextWidget = require("ui/widget/textwidget")
+    local LeftContainer = require("ui/widget/container/leftcontainer")
+    local Geom = require("ui/geometry")
+    local splitToArray = require("util").splitToArray
+    local ProgressWidget = require("ui/widget/progresswidget")
+    local Font = require("ui/font")
+    local MessageBox = require("Legado/MessageBox")
+    local closed = false
+    local text, progress = message, 0
+    local rendered_text, rendered_progress = message, 0
+    local refresh
+    local dialog
+    local function background()
+        dialog:onClose()
+    end
+    dialog = ButtonDialog:new{
+        title = options.title,
+        title_align = "center",
+        dismissable = options.dismissable == true,
+        tap_close_callback = function()
+            MessageBox:notice("已切至后台")
+            if options.on_dismiss then options.on_dismiss(dialog) end
+        end,
+        buttons = options.dismissable and {{{text = "后台运行", callback = background}}} or {},
+    }
+    local width = dialog:getAddedWidgetAvailableWidth()
+    local rows = {}
+    local lines = splitToArray(text, "\n", true)
+    for i = 1, 3 do
+        local row = TextWidget:new{
+            text = lines[i] or "",
+            face = Font:getFace("smallffont"),
+            max_width = width,
+            truncate_with_ellipsis = true,
+        }
+        rows[i] = row
+        dialog:addWidget(LeftContainer:new{
+            dimen = Geom:new{w = width, h = row:getSize().h},
+            parent = dialog,
+            not_focusable = true,
+            row,
+        })
+    end
+    local bar = ProgressWidget:new{
+        width = width,
+        height = Screen:scaleBySize(12),
+        percentage = 0,
+        fillcolor = require("ffi/blitbuffer").COLOR_BLACK,
+        parent = dialog,
+        not_focusable = true,
+    }
+    dialog:addWidget(bar)
+    refresh = function()
+        if closed then return end
+        if text ~= rendered_text or progress ~= rendered_progress then
+            local lines = splitToArray(text, "\n", true)
+            for i, row in ipairs(rows) do row:setText(lines[i] or "") end
+            bar:setPercentage(progress / options.max)
+            rendered_text, rendered_progress = text, progress
+            UIManager:setDirty(dialog, "ui")
+        end
+        UIManager:scheduleIn(0.5, refresh)
+    end
+    local on_close = dialog.onCloseWidget
+    dialog.onCloseWidget = function(self, ...)
+        closed = true
+        UIManager:unschedule(refresh)
+        if on_close then return on_close(self, ...) end
+    end
+    UIManager:show(dialog)
+    UIManager:scheduleIn(0.5, refresh)
+    return {
+        close = function()
+            if not closed then UIManager:close(dialog) end
+        end,
+        reportProgress = function(_, value) progress = value end,
+        setDetails = function(_, value) text = value end,
+    }
 end
 
 function M.showBar(message, options)
     if not H.is_tbl(options) then options = {} end
+    if options.detailed then
+        local dialog = show_detailed_progress(message, options)
+        if dialog then return dialog end
+        message = "正在缓存章节..."
+    end
 
     local title = options.title or "progressbar"
     local sub_title = message or ""

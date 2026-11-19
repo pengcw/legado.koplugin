@@ -1,10 +1,7 @@
 local lfs = require("libs/libkoreader-lfs")
-local ffi = require("ffi")
-require("ffi/posix_h")
 local sha = require("ffi/sha2")
 local url = require("socket.url")
 local image_meta = require("Legado.Helper.image_meta")
-ffi.cdef[[int mkstemp(char *);]]
 
 local Cache = {}
 Cache.__index = Cache
@@ -39,25 +36,6 @@ local function read_file(path, limit)
     local data = file:read(limit + 1)
     file:close()
     if data and #data <= limit then return data end
-end
-
-local function atomic_write(path, data)
-    local template = path .. ".tmp-XXXXXX"
-    local name = ffi.new("char[?]", #template + 1)
-    ffi.copy(name, template, #template)
-    local fd = ffi.C.mkstemp(name)
-    if fd < 0 then return false end
-    local temporary = ffi.string(name)
-    local pointer, position = ffi.cast("const char *", data), 0
-    while position < #data do
-        local written = tonumber(ffi.C.write(fd, pointer + position, #data - position))
-        if written <= 0 then break end
-        position = position + written
-    end
-    local closed = ffi.C.close(fd) == 0
-    if position == #data and closed and os.rename(temporary, path) then return true end
-    os.remove(temporary)
-    return false
 end
 
 local function with_lock(dir, operation)
@@ -222,10 +200,11 @@ function Cache:_store(name, data, meta_name, encoded)
         if total + (write_body and #data or 0) + (encoded and #encoded or 0) > MAX_TOTAL then
             return failure("limit_exceeded", "resource directory quota exceeded")
         end
-        if write_body and not atomic_write(target, data) then
+        local writeAtomic = require("Legado.Helper.FS").writeAtomic
+        if write_body and not writeAtomic(target, data, nil, false) then
             return failure("cache_unavailable", "resource body write failed")
         end
-        if encoded and not atomic_write(dir .. "/" .. meta_name, encoded) then
+        if encoded and not writeAtomic(dir .. "/" .. meta_name, encoded, nil, false) then
             return failure("cache_unavailable", "resource metadata write failed")
         end
         return target

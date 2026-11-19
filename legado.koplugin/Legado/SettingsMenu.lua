@@ -1,3 +1,4 @@
+-- Legado settings menu, built on demand.
 local util = require("util")
 local UIManager = require("ui/uimanager")
 local Backend = require("Legado/Backend")
@@ -435,9 +436,7 @@ function M.getItems()
                         local current_items = settings.items_per_page or G_reader_settings:readSetting("items_per_page") or 14
                         if current_items > 8 then
                             MessageBox:confirm("开启封面建议每页 8 条（可自行调整最佳行数），是否自动调整？", function(is_ok)
-                                if is_ok then
-                                    settings.items_per_page = 8
-                                end
+                                if is_ok then settings.items_per_page = 8 end
                                 save_and_notify()
                             end)
                             return
@@ -478,6 +477,48 @@ function M.getItems()
                         end,
                     }
                     UIManager:show(thread_spin)
+                end,
+            }, {
+                text_func = function()
+                    local ratio = require("Legado/ChapterListing").getWidthRatio()
+                    return string.format("阅读目录宽度：%.2f", ratio)
+                end,
+                help_text = "设置阅读时目录宽度比例",
+                keep_menu_open = true,
+                callback = function(menu_def)
+                    local ratio = require("Legado/ChapterListing").getWidthRatio()
+                    UIManager:show(require("ui/widget/spinwidget"):new{
+                        -- 使用整数百分比，避免小数步进产生浮点累积误差。
+                        value = math.floor(ratio * 50 + 0.5) * 2,
+                        value_min = 40,
+                        value_max = 100,
+                        value_step = 2,
+                        value_hold_step = 10,
+                        ok_text = "确定",
+                        title_text = "侧边栏目录宽度比（%）",
+                        info_text = "宽度可选40～100, 仅作用于阅读时侧边目录.\n(点击中间数字可直接输入)",
+                        callback = function(spin)
+                            local settings = util.tableDeepCopy(Backend:getSettings())
+                            settings.toc_width_ratio = spin.value / 100
+                            Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                update_settings_menu(menu_def)
+                                MessageBox:notice(string.format("已设置为：%.2f", settings.toc_width_ratio))
+                            end, function(err)
+                                MessageBox:error("设置失败：", tostring(err))
+                            end)
+                        end,
+                        extra_text = "恢复默认",
+                        extra_callback = function()
+                            local settings = util.tableDeepCopy(Backend:getSettings())
+                            settings.toc_width_ratio = nil
+                            Backend:HandleResponse(Backend:saveSettings(settings), function()
+                                update_settings_menu(menu_def)
+                                MessageBox:notice("已恢复默认")
+                            end, function(err)
+                                MessageBox:error("设置失败：", tostring(err))
+                            end)
+                        end,
+                    })
                 end,
             },
         },

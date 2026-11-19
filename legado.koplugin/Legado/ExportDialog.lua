@@ -14,10 +14,11 @@ local Env = require("Legado.Helper.Env")
 local FS = require("Legado.Helper.FS")
 local ZipUtil = require("Legado.Helper.ZipUtil")
 local image_meta = require("Legado.Helper.image_meta")
+local Error = require("Legado.Helper.Error")
 
 local CbzExporter = {
     bookinfo = nil,
-    output_path = nil,
+    output_file = nil,
     cache_chapters = nil,
     reportProgress = nil,
 }
@@ -44,9 +45,7 @@ function CbzExporter:package()
     self.bookinfo.name = self.bookinfo.name or "未知书名"
     self.bookinfo.author = self.bookinfo.author or "未知作者"
 
-    local output_dir = self.output_path or Env.getHomeDir()
-    local safe_filename = FS.getSafeFilename(string.format("%s-%s",self.bookinfo.name, self.bookinfo.author))
-    local output_path = FS.joinPath(output_dir, safe_filename .. ".cbz")
+    local output_path = self.output_file
     local cbz_path_tmp = output_path .. '.tmp'
 
     if util.fileExists(cbz_path_tmp) then
@@ -142,6 +141,8 @@ function CbzExporter:package()
     }
 end
 
+local active_exports = {}
+
 local M = {
     bookinfo = nil,
     chapter_count = nil,
@@ -195,6 +196,7 @@ function M:showExportErrorDialog(error_info, retry_callback)
     elseif H.is_str(error_info) then
         error_msg = error_info
     end
+    local can_retry = H.is_func(retry_callback)
     MessageBox:confirm(
         error_msg,
         function(retry)
@@ -203,8 +205,9 @@ function M:showExportErrorDialog(error_info, retry_callback)
             end
         end,
         {
+            no_ok_button = not can_retry,
             ok_text = "重试",
-            cancel_text = "完成"
+            cancel_text = can_retry and "完成" or "知道了"
         }
     )
 end
@@ -388,15 +391,20 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
 
     local uncached_count = #uncached_chapters
 
-    local title_text = string.format("%s - 正在缓存 %d/%d 章节", bookinfo.name, uncached_count, chapter_count)
+    local title_text = bookinfo.name or "缓存章节"
     if retry_count > 0 then
-        title_text = title_text .. string.format(" (重试 %d)", retry_count)
+        title_text = title_text .. string.format("（重试 %d）", retry_count)
     end
-    local cache_msg = TaskProg.showBar("正在缓存章节...", {
+    local cache_msg = TaskProg.showBar(string.format(
+        "已处理 0/%d · 成功 0 · 失败 0\n下载中：等待开始\n最近失败：无", uncached_count), {
         title = title_text,
         max = uncached_count,
         dismissable = true,
+        detailed = true,
     })
+    local active_chapters = {}
+    local failed_count = 0
+    local last_error = "无"
 
     if not retry_count then retry_count = 0 end
     local retry_func = function(retry_chapters)
@@ -424,6 +432,7 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
     end
 
     local showRetryDialog = function(err_msg, retry_chapters)
+        err_msg = Error.extract_message(err_msg)
         local error_title = "⚠ 缓存出错"
         local is_timeout = err_msg:find("超时")
         local is_toc_empty = err_msg:find("目录为空") or err_msg:find("TOC") or err_msg:find("章节列表")
@@ -488,16 +497,40 @@ function M:startCacheChapters(bookinfo, uncached_chapters, chapter_count, retry_
         showRetryDialog(err_msg, failed_chapters)
     end
 
-    cache_progress_callback = function(progress, err_msg, failed_chapters)
+    cache_progress_callback = function(progress, err_msg, failed_chapters, detail)
+        if cache_complete then return end
+        if detail then
+            local chapter = detail.chapter
+            active_chapters[chapter.chapters_index] = detail.state == "started" and chapter or nil
+            failed_count = detail.failed
+            if detail.state == "failed" then
+                last_error = (chapter.title or "未命名章节") .. "——" .. Error.extract_message(detail.error or "下载失败")
+            end
+        end
         if progress == false or progress == true then
             if progress == true then
                 handleCacheSuccess()
-            elseif err_msg then
-                handleCacheError(err_msg, failed_chapters)
+            else
+                handleCacheError(err_msg or "缓存章节失败", failed_chapters)
             end
         elseif H.is_num(progress) then
             if cache_msg and cache_msg.reportProgress then
                 cache_msg:reportProgress(progress)
+            end
+            if cache_msg and cache_msg.setDetails then
+                local active, titles = {}, {}
+                for _, chapter in pairs(active_chapters) do active[#active + 1] = chapter end
+                table.sort(active, function(a, b) return a.chapters_index < b.chapters_index end)
+                local active_count = #active
+                for i = 1, math.min(2, active_count) do
+                    titles[i] = active[i].title or "未命名章节"
+                end
+                local active_text = active_count > 0 and table.concat(titles, "、") or "等待剩余任务完成"
+                if active_count > 2 then active_text = active_text .. " 等" end
+                cache_msg:setDetails(string.format(
+                    "已处理 %d/%d · 成功 %d · 失败 %d\n下载中（%d章）：%s\n最近失败：%s",
+                    progress, uncached_count, progress - failed_count, failed_count,
+                    active_count, active_text, last_error))
             end
         end
     end
@@ -514,7 +547,8 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, ret
         return Backend:analyzeCacheStatusForRange(book_cache_id, 0, chapter_count - 1, true)
     end, function(state, cache_status)
         if not (state == true and H.is_tbl(cache_status) and H.is_tbl(cache_status.cached_chapters) and H.is_tbl(cache_status.uncached_chapters)) then
-            return MessageBox:error("查询章节缓存状态出错")
+            MessageBox:error("查询章节缓存状态出错")
+            return completion_callback(false)
         end
 
         local cached_count = cache_status.cached_count
@@ -566,7 +600,13 @@ function M:checkCacheIntegrity(bookinfo, chapter_count, completion_callback, ret
     end)
 end
 
-function M:_buildEpubFile(bookinfo, chapters, export_settings, only_cached)
+function M:_getExportOutputPath(bookinfo, settings, is_comic)
+    local filename = FS.getSafeFilename(string.format("%s-%s",
+        bookinfo.name or "未知书名", bookinfo.author or "未知作者"))
+    return FS.joinPath(settings.output_path or Env.getHomeDir(), filename .. (is_comic and ".cbz" or ".epub"))
+end
+
+function M:_buildEpubFile(bookinfo, chapters, export_settings, only_cached, report_progress)
     if not (H.is_tbl(bookinfo) and H.is_tbl(chapters) and #chapters > 0) then
         return {success = false, error = "无效的书籍信息或章节列表" }
     end
@@ -577,7 +617,8 @@ function M:_buildEpubFile(bookinfo, chapters, export_settings, only_cached)
 
     local epub_chapters = {}
     for _, cache_chapter in ipairs(chapters) do
-        if H.is_tbl(cache_chapter) and H.is_str(cache_chapter.cacheFilePath) and util.fileExists(cache_chapter.cacheFilePath) then
+        if H.is_tbl(cache_chapter) and not cache_chapter.isVolume
+                and H.is_str(cache_chapter.cacheFilePath) and util.fileExists(cache_chapter.cacheFilePath) then
             local file_ext = cache_chapter.cacheFilePath:match("%.([^.]+)$")
             local chapters_index = cache_chapter.chapters_index
             table.insert(epub_chapters, {
@@ -593,9 +634,7 @@ function M:_buildEpubFile(bookinfo, chapters, export_settings, only_cached)
         return {success = false, error = "没有可导出的章节" }
     end
 
-    local output_dir = export_settings.output_path or Env.getHomeDir()
-    local safe_filename = FS.getSafeFilename(string.format("%s-%s", bookinfo.name, bookinfo.author))
-    local output_path = FS.joinPath(output_dir, safe_filename .. ".epub")
+    local output_path = self:_getExportOutputPath(bookinfo, export_settings)
 
     local cover_path = require("Legado.Helper.ImageUtil").get_default_cover_cache(book_cache_id)
     if not cover_path and not only_cached and bookinfo.coverUrl then
@@ -616,12 +655,14 @@ function M:_buildEpubFile(bookinfo, chapters, export_settings, only_cached)
 
     local EpubHelper = require("Legado/EpubHelper")
     local exporter = EpubHelper.EpubExporter:new():init({
+        report_progress = report_progress,
         title = bookinfo.name,
         author = bookinfo.author,
         description = bookinfo.intro,
         cover_path = cover_path,
         custom_css = custom_css,
         chapters = epub_chapters,
+        toc = Backend:getBookChapterPlusCache(book_cache_id, bookinfo.book_self_id),
         output_path = output_path,
         book_cache_id = book_cache_id
     })
@@ -630,28 +671,43 @@ function M:_buildEpubFile(bookinfo, chapters, export_settings, only_cached)
         return exporter:build()
     end)
 
+    if not ok then return {success = false, error = tostring(build_result)} end
     return build_result
 end
 
-function M:_processEpubExport(bookinfo, chapters, only_cached)
-    local export_settings = self:getEpubExportSettings()
-    TaskProg.loading("正在统计已缓存章节", function()
-        return self:_buildEpubFile(bookinfo, chapters, export_settings, only_cached)
-    end, function(state, build_result)
-        if state == true and H.is_tbl(build_result) and build_result.success then
-            self:showExportSuccessDialog(build_result, function(path)
-                self:showReaderUI(path)
-            end)
-        else
-            self:showExportErrorDialog(H.is_tbl(build_result) and build_result.error or "EPUB构建失败", function()
-                self:_generateBookFile(bookinfo, only_cached, false)
-            end)
-        end
-    end)
+function M:_processEpubExport(bookinfo, chapters, only_cached, export_settings)
+    export_settings = export_settings or self:getEpubExportSettings()
+    TaskProg.loading{
+        text = "正在导出 EPUB，请稍候",
+        update_interval = 0.5,
+        min_visible_time = 0.8,
+        completion_text = function(ok, result)
+            return ok and H.is_tbl(result) and result.success and "EPUB 导出成功" or "EPUB 导出失败"
+        end,
+        dismissable = true,
+        on_progress = true,
+        runnable = function(ctx)
+            return self:_buildEpubFile(bookinfo, chapters, export_settings, only_cached, ctx.progress)
+        end,
+        callback = function(state, build_result)
+            active_exports[self:_getExportOutputPath(bookinfo, export_settings)] = nil
+            if state == true and H.is_tbl(build_result) and build_result.success then
+                self:showExportSuccessDialog(build_result, function(path)
+                    self:showReaderUI(path)
+                end)
+            else
+                self:showExportErrorDialog(H.is_tbl(build_result) and build_result.error
+                    or (H.is_str(build_result) and build_result) or "EPUB构建失败", function()
+                    self:_generateBookFile(bookinfo, only_cached, false, export_settings)
+                end)
+            end
+        end,
+    }
 end
 
-function M:_processCbzExport(bookinfo, chapters, only_cached)
-    local export_settings = self:getEpubExportSettings()
+function M:_processCbzExport(bookinfo, chapters, only_cached, export_settings)
+    export_settings = export_settings or self:getEpubExportSettings()
+    local output_path = self:_getExportOutputPath(bookinfo, export_settings, true)
 
     local cache_msg = TaskProg.showBar("缓存进度", {
         title = "导出进度",
@@ -660,7 +716,7 @@ function M:_processCbzExport(bookinfo, chapters, only_cached)
 
     local exporter = CbzExporter:new({
         bookinfo = bookinfo,
-        output_path = export_settings.output_path,
+        output_file = output_path,
         cache_chapters = chapters,
         reportProgress = function(current_progress)
             if H.is_num(current_progress) and cache_msg and cache_msg.reportProgress then
@@ -673,6 +729,7 @@ function M:_processCbzExport(bookinfo, chapters, only_cached)
         return exporter:package()
     end)
 
+    active_exports[output_path] = nil
     if cache_msg and cache_msg.close then cache_msg:close() end
     if success and H.is_tbl(result) and result.success then
         self:showExportSuccessDialog(result, function(path)
@@ -680,27 +737,35 @@ function M:_processCbzExport(bookinfo, chapters, only_cached)
         end)
     else
         self:showExportErrorDialog(H.is_tbl(result) and tostring(result.error) or tostring(result), function()
-            self:_generateBookFile(bookinfo, only_cached, true)
+            self:_generateBookFile(bookinfo, only_cached, true, export_settings)
         end)
     end
 end
 
-function M:_generateBookFile(bookinfo, only_cached, is_comic)
+function M:_generateBookFile(bookinfo, only_cached, is_comic, export_settings)
     if not (H.is_tbl(bookinfo) and H.is_str(bookinfo.cache_id)) then
         self:showExportErrorDialog("书籍信息错误")
         return
     end
+    export_settings = export_settings or self:getEpubExportSettings()
+    local output_path = self:_getExportOutputPath(bookinfo, export_settings, is_comic)
+    if active_exports[output_path] then
+        MessageBox:notice("该文件正在导出，请等待完成")
+        return
+    end
+    active_exports[output_path] = true
     local callback = function(chapters)
         if not is_comic then
-            self:_processEpubExport(bookinfo, chapters, only_cached)
+            self:_processEpubExport(bookinfo, chapters, only_cached, export_settings)
         else
-            self:_processCbzExport(bookinfo, chapters, only_cached)
+            self:_processCbzExport(bookinfo, chapters, only_cached, export_settings)
         end
     end
     self:prepareChaptersForExport(bookinfo, only_cached, function(success, result)
         if success and H.is_tbl(result) and H.is_tbl(result.chapters) then
             callback(result.chapters)
         else
+            active_exports[output_path] = nil
             self:showExportErrorDialog(H.is_tbl(result) and result.error or "准备章节失败")
         end
     end)
@@ -733,29 +798,51 @@ function M:exportBook(only_cached)
         local is_comic = route == "comic"
             or (route ~= "reader" and Backend:bookContentType(bookinfo) == "comic")
         local export_type = is_comic and "CBZ" or "EPUB"
+        local export_settings = self:getEpubExportSettings()
+        local output_path = self:_getExportOutputPath(bookinfo, export_settings, is_comic)
 
         local export_select_callback = function(cached_only)
             if cached_only and cached_count == 0 then
                 self:showExportErrorDialog("没有已缓存的章节")
                 return
             end
-            UIManager:nextTick(function()
-                self:_generateBookFile(bookinfo, cached_only, is_comic)
-            end)
+            local function start_export()
+                UIManager:nextTick(function()
+                    self:_generateBookFile(bookinfo, cached_only, is_comic, export_settings)
+                end)
+            end
+            if util.fileExists(output_path) then
+                MessageBox:confirm("文件已存在，是否替换？\n\n" .. output_path
+                    .. "\n\n导出失败将保留原文件。", function(confirmed)
+                    if confirmed then start_export() end
+                end, {ok_text = "替换并导出", cancel_text = "取消"})
+            else
+                start_export()
+            end
         end
 
         local other_buttons = {{
             text = "自定义设置",
-            callback = function() self:showEpubExportSettings() end,
+            callback = function()
+                self:showEpubExportSettings(function()
+                    UIManager:nextTick(function() self:exportBook(only_cached) end)
+                end)
+            end,
         }}
         if not only_cached then
             table.insert(other_buttons, {
-                text = "全书导出",
+                text = "全部章节",
                 callback = function() export_select_callback(false) end,
             })
         end
         local hint = only_cached and "仅导出本地缓存，不下载章节或封面"
-            or "全书导出需要下载所有章节，可能需要一些时间"
+            or "全部章节需要下载所有章节，可能需要一些时间"
+        hint = hint .. "\n\n输出文件：" .. output_path
+        if not is_comic then
+            local css_path = export_settings.custom_css_path
+            local style = css_path and (css_path:match("([^/\\]+)$") or css_path) or "默认样式"
+            hint = hint .. "\n样式：" .. style
+        end
         MessageBox:confirm(string.format(
             "是否导出 <<%s>> 为 %s 文件？\n\n作者：%s\n总章节数：%d\n已缓存章节：%d\n\n%s",
             bookinfo.name or "未命名",
@@ -805,9 +892,17 @@ function M:saveEpubExportSettings(export_settings)
     return Backend:saveSettings(settings)
 end
 
-function M:showEpubExportSettings()
+function M:showEpubExportSettings(on_saved)
     local dialog
     local export_settings = self:getEpubExportSettings()
+
+    local function saved(message)
+        if H.is_func(on_saved) then
+            on_saved()
+        else
+            MessageBox:success(message)
+        end
+    end
 
     local function getOutputPathText()
         if export_settings.output_path then
@@ -837,7 +932,7 @@ function M:showEpubExportSettings()
                 onConfirm = function(output_dir)
                     export_settings.output_path = output_dir
                     Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
-                        MessageBox:success("输出路径已设置为：" .. output_dir)
+                        saved("输出路径已设置为：" .. output_dir)
                     end, function(err)
                         MessageBox:error("设置失败：" .. tostring(err))
                     end)
@@ -866,7 +961,7 @@ function M:showEpubExportSettings()
                         onConfirm = function(css_file)
                             export_settings.custom_css_path = css_file
                             Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
-                                MessageBox:success("CSS 文件已设置：" .. css_file)
+                                saved("CSS 文件已设置：" .. css_file)
                             end, function(err)
                                 MessageBox:error("设置失败：" .. tostring(err))
                             end)
@@ -881,7 +976,7 @@ function M:showEpubExportSettings()
                     UIManager:close(css_dialog)
                     export_settings.custom_css_path = nil
                     Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
-                        MessageBox:success("已移除自定义 CSS，将使用默认样式")
+                        saved("已移除自定义 CSS，将使用默认样式")
                     end, function(err)
                         MessageBox:error("设置失败：" .. tostring(err))
                     end)
@@ -904,7 +999,7 @@ function M:showEpubExportSettings()
                     export_settings.output_path = nil
                     export_settings.custom_css_path = nil
                     Backend:HandleResponse(self:saveEpubExportSettings(export_settings), function()
-                        MessageBox:success("已重置为默认设置")
+                        saved("已重置为默认设置")
                     end, function(err)
                         MessageBox:error("设置失败：" .. tostring(err))
                     end)

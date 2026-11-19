@@ -52,11 +52,18 @@ local ChapterListing = Menu:extend{
     _force_refresh_after_clear = nil,
 }
 
+function ChapterListing.getWidthRatio()
+    local ratio = Backend:getSettings().toc_width_ratio
+    if type(ratio) == "number" and ratio >= 0.4 and ratio <= 1 then
+        return ratio
+    end
+    return Screen:getHeight() >= Screen:getWidth() * 1.6 and 0.8 or 0.6
+end
+
 function ChapterListing:init()
     self.sidebar_mode = self.sidebar_mode == true
     local width, height = Screen:getWidth(), Screen:getHeight()
-    local sidebar_ratio = height >= width * 1.6 and 0.8 or 0.6
-    self.width = self.sidebar_mode and math.floor(width * sidebar_ratio) or width
+    self.width = self.sidebar_mode and math.floor(width * ChapterListing.getWidthRatio()) or width
     self.height = height
     self.covers_fullscreen = not self.sidebar_mode
     self.onLeftButtonTap = function()

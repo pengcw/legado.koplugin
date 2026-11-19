@@ -270,6 +270,8 @@ function EpubExporter:new(o)
 end
 
 function EpubExporter:init(options)
+    self.report_progress = options.report_progress
+    self.uuid = generateUUID()
     self.title = options.title or self.default_title
     self.author = options.author or self.default_author
     self.description = options.description
@@ -279,6 +281,32 @@ function EpubExporter:init(options)
     self.output_path = options.output_path
     self.book_cache_id = options.book_cache_id
     self.book_cache_path = Env.getBookCachePath(self.book_cache_id)
+
+    local volumes, volume = {}, nil
+    for _, chapter in ipairs(options.toc or {}) do
+        if chapter.isVolume then
+            volume = chapter
+        else
+            volumes[chapter.chapters_index] = volume
+        end
+    end
+    self.toc, self.toc_depth = {}, 1
+    local current_volume, group
+    for _, chapter in ipairs(self.chapters) do
+        local parent = volumes[chapter.chapters_index]
+        if parent then
+            if parent ~= current_volume then
+                group = {title = parent.title, volume_index = parent.chapters_index,
+                    chapters_index = chapter.chapters_index, children = {}}
+                self.toc[#self.toc + 1] = group
+                self.toc_depth = 2
+            end
+            group.children[#group.children + 1] = chapter
+        else
+            self.toc[#self.toc + 1] = chapter
+        end
+        current_volume = parent
+    end
 
     if self.cover_path then
         local ext = image_meta.get_image_ext(self.cover_path) or "jpg"
@@ -298,7 +326,7 @@ function EpubExporter:createOPF()
         local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
         local cover_mime = self.cover_mime or "image/jpeg"
         table.insert(manifest_items, string.format(
-            '<item id="cover-image" href="Images/%s" media-type="%s"/>',
+            '<item id="cover-image" href="Images/%s" media-type="%s" properties="cover-image"/>',
             cover_filename, cover_mime
         ))
     end
@@ -321,6 +349,10 @@ function EpubExporter:createOPF()
         table.insert(spine_items, string.format('<itemref idref="%s"/>', chapter_id))
     end
 
+    for _, item in ipairs(self.resource_manifest or {}) do
+        table.insert(manifest_items, item)
+    end
+
     table.insert(spine_items, 1, '<itemref idref="cover"/>')
 
     local description_meta = ""
@@ -340,8 +372,7 @@ function EpubExporter:createOPF()
     <dc:creator>%s</dc:creator>
 %s    <dc:language>zh-CN</dc:language>
     <dc:identifier id="BookId">urn:uuid:%s</dc:identifier>
-    <meta name="cover" content="cover-image"/>
-    <meta property="dcterms:modified">%s</meta>
+%s    <meta property="dcterms:modified">%s</meta>
   </metadata>
   <manifest>
     <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
@@ -353,32 +384,40 @@ function EpubExporter:createOPF()
   </spine>
 </package>]]
 
-    local uuid = generateUUID()
-    local timestamp = os.date("%Y-%m-%dT%H:%M:%SZ")
+    local cover_meta = self.cover_path and '    <meta name="cover" content="cover-image"/>\n' or ""
+    local timestamp = os.date("!%Y-%m-%dT%H:%M:%SZ")
     local manifest_str = "    " .. table.concat(manifest_items, "\n    ")
     local spine_str = "    " .. table.concat(spine_items, "\n    ")
 
-    return string.format(opf_template, M.escape_xml(self.title), M.escape_xml(self.author), description_meta, uuid, timestamp, manifest_str, spine_str)
+    return string.format(opf_template, M.escape_xml(self.title), M.escape_xml(self.author), description_meta, self.uuid, cover_meta, timestamp, manifest_str, spine_str)
 end
 
 function EpubExporter:createNCX()
-    local nav_points = {}
-
-    for _, chapter in ipairs(self.chapters) do
-        local chapter_index = chapter.chapters_index
-        local nav_point = string.format([[
-    <navPoint id="navPoint-%d" playOrder="%d">
+    local nav_points = {[[    <navPoint id="cover" playOrder="1">
+      <navLabel><text>封面</text></navLabel>
+      <content src="Text/cover.xhtml"/>
+    </navPoint>]]}
+    local play_order = {}
+    for i, chapter in ipairs(self.chapters) do play_order[chapter.chapters_index] = i + 1 end
+    local function render(node)
+        local children = {}
+        for _, child in ipairs(node.children or {}) do children[#children + 1] = render(child) end
+        local index = node.chapters_index
+        local id = node.children and ("volume-" .. node.volume_index) or ("chapter-" .. index)
+        return string.format([[
+    <navPoint id="%s" playOrder="%d">
       <navLabel><text>%s</text></navLabel>
       <content src="Text/chapter%d.xhtml"/>
-    </navPoint]], chapter_index, chapter_index, M.escape_xml(chapter.title or ("第" .. (chapter_index + 1) .. "章")), chapter_index)
-        table.insert(nav_points, nav_point)
+%s    </navPoint>]], id, play_order[index], M.escape_xml(node.title or ("第" .. (index + 1) .. "章")),
+            index, #children > 0 and (table.concat(children, "\n") .. "\n") or "")
     end
+    for _, node in ipairs(self.toc) do nav_points[#nav_points + 1] = render(node) end
 
     local ncx_template = [[<?xml version="1.0" encoding="utf-8"?>
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
     <meta name="dtb:uid" content="urn:uuid:%s"/>
-    <meta name="dtb:depth" content="1"/>
+    <meta name="dtb:depth" content="%d"/>
     <meta name="dtb:totalPageCount" content="0"/>
     <meta name="dtb:maxPageNumber" content="0"/>
   </head>
@@ -389,10 +428,9 @@ function EpubExporter:createNCX()
   </navMap>
 </ncx>]]
 
-    local uuid = generateUUID()
     local nav_str = table.concat(nav_points, "\n")
 
-    return string.format(ncx_template, uuid, M.escape_xml(self.title), M.escape_xml(self.author), nav_str)
+    return string.format(ncx_template, self.uuid, self.toc_depth, M.escape_xml(self.title), M.escape_xml(self.author), nav_str)
 end
 
 function EpubExporter:createCoverPage()
@@ -402,41 +440,52 @@ function EpubExporter:createCoverPage()
 <head>
     <title>Cover</title>
     <style type="text/css">
+        .cover { page-break-inside: avoid; }
         .pic {
-            margin: 50%% 30%% 0 30%%;
+            margin: 2%% 3%% 0 3%%;
             padding: 2px 2px;
             border: 1px solid #f5f5dc;
             background-color: rgba(250,250,250, 0);
             border-radius: 1px;
         }
+        .pic img {
+            display: block;
+            margin: 0 auto;
+            max-width: 100%%;
+            max-height: 75vh;
+        }
     </style>
 </head>
 <body style="text-align: center;">
+<div class="cover">
 %s
-<h1 style="margin-top: 5%%; font-size: 110%%;">%s</h1>
+<h1 style="margin: 0.5em 5%% 0.3em; font-size: 110%%; line-height: 1.2;">%s</h1>
 <div class="author" style="margin-top: 0;"><b>%s</b> <span style="font-size: smaller;">/ 著</span></div>
+</div>
 </body>
 </html>]]
 
     local cover_image = ""
     if H.is_str(self.cover_path) then
         local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
-        cover_image = string.format('<div class="pic"><img src="../Images/%s" style="width: 100%%; height: auto;"/></div>', cover_filename)
+        cover_image = string.format('<div class="pic"><img src="../Images/%s" style="width: auto; height: auto;"/></div>', cover_filename)
     end
 
     return string.format(cover_template, cover_image, M.escape_xml(self.title), M.escape_xml(self.author))
 end
 
 function EpubExporter:createNavPage()
-    local nav_items = {}
+    local nav_items = {'<li><a href="cover.xhtml">封面</a></li>'}
 
-    for _, chapter in ipairs(self.chapters) do
-        local chapter_index = chapter.chapters_index
-        table.insert(nav_items, string.format(
-            '        <li><a href="chapter%d.xhtml">%s</a></li>',
-            chapter_index, M.escape_xml(chapter.title or ("第" .. (chapter_index + 1) .. "章"))
-        ))
+    local function render(node)
+        local children = {}
+        for _, child in ipairs(node.children or {}) do children[#children + 1] = render(child) end
+        local index = node.chapters_index
+        return string.format('<li><a href="chapter%d.xhtml">%s</a>%s</li>', index,
+            M.escape_xml(node.title or ("第" .. (index + 1) .. "章")),
+            #children > 0 and ("<ol>" .. table.concat(children, "\n") .. "</ol>") or "")
     end
+    for _, node in ipairs(self.toc) do nav_items[#nav_items + 1] = render(node) end
 
     local nav_template = [[<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -449,6 +498,12 @@ function EpubExporter:createNavPage()
         <h1>目录</h1>
         <ol>
 %s
+        </ol>
+    </nav>
+    <nav epub:type="landmarks" hidden="">
+        <h2>导航</h2>
+        <ol>
+            <li><a epub:type="cover" href="cover.xhtml">封面</a></li>
         </ol>
     </nav>
 </body>
@@ -544,12 +599,24 @@ function EpubExporter:packageEpub()
         end
     end
 
+    local function readFile(path, mode)
+        local content, err = util.readFromFile(path, mode or "rb")
+        if not content then
+            error("读取 EPUB 文件失败: " .. path .. ": " .. tostring(err or "无法读取"), 0)
+        end
+        return content
+    end
+
+    self.resource_manifest = {}
+    local resource_paths = {}
+    local report = self.report_progress
     local write_ok, write_err = pcall(function()
+        if report then report(0, "正在准备封面和目录") end
         addFile("mimetype", self:createMimetype(), true)
         addFile("META-INF/container.xml", self:createContainer())
 
-        if H.is_str(self.cover_path) and util.fileExists(self.cover_path) then
-            local cover_data = util.readFromFile(self.cover_path, "rb")
+        if H.is_str(self.cover_path) then
+            local cover_data = readFile(self.cover_path)
             local cover_filename = string.format("cover.%s", self.cover_ext or "jpg")
             addFile("OEBPS/Images/" .. cover_filename, cover_data, true)
         end
@@ -560,8 +627,8 @@ function EpubExporter:packageEpub()
         local cache_file_path
         local chapter_content
         local file_index
-        for _, chapter in ipairs(self.chapters) do
-
+        for i, chapter in ipairs(self.chapters) do
+            if report and i == 1 then report(0, string.format("正在处理章节 0/%d", #self.chapters)) end
             file_index = chapter.chapters_index
             cache_ext = chapter.cache_ext
             cache_file_path = chapter.cache_path
@@ -572,37 +639,38 @@ function EpubExporter:packageEpub()
                 chapter.content = M.escape_xml(chapter_content):gsub("([^\n]+)", "<p>%1</p>")
                 chapter_content = self:createChapterPage(file_index, chapter)
             elseif cache_ext == "html" or cache_ext == "xhtml" then
-                chapter_content = util.readFromFile(cache_file_path, "r") or ""
+                chapter_content = readFile(cache_file_path, "r")
                 chapter_content = chapter_content:gsub('href="%.%./resources/legado%.css"', 'href="' .. epubCss .. '"')
                 if self.custom_css_path then
                     chapter_content = chapter_content:gsub('<p%s+style="text%-indent:%s*0em;"><span%s+class="duokan%-dropcaps%-two">(.)</span>', '<p>%1')
                 end
             elseif image_meta.is_image_extension(cache_ext) then
-                local img_data = util.readFromFile(cache_file_path, "rb")
-                if img_data then
-                     chapter.content = string.format("<img src='resources/chapter%d.%s'/>", file_index, cache_ext)
-                     chapter_content = self:createChapterPage(file_index, chapter)
-                     addFile(string.format("OEBPS/Text/resources/chapter%d.%s", file_index, cache_ext), img_data)
-                end
+                local img_data = readFile(cache_file_path)
+                chapter.content = string.format("<img src='resources/chapter%d.%s'/>", file_index, cache_ext)
+                chapter_content = self:createChapterPage(file_index, chapter)
+                local resource_name = string.format("chapter%d.%s", file_index, cache_ext)
+                resource_paths[resource_name] = true
+                addFile("OEBPS/Text/resources/" .. resource_name, img_data)
             end
 
             addFile(string.format("OEBPS/Text/chapter%d.xhtml", file_index), chapter_content)
+            if report then report(i / #self.chapters, string.format("正在处理章节 %d/%d", i, #self.chapters)) end
         end
 
-        addFile("OEBPS/content.opf", self:createOPF())
-
-        addFile("OEBPS/toc.ncx", self:createNCX())
-
+        if report then report(1, "正在打包资源") end
         local resources_path = FS.joinPath(self.book_cache_path, "resources")
         if util.directoryExists(resources_path) then
             util.findFiles(resources_path, function(file_path, fname, attr)
                 if attr and attr.mode == "file" and H.is_str(fname) and fname ~= "" then
-                    if fname ~= "legado.css" then
-                        local file_content = util.readFromFile(file_path)
-                        if file_content and #file_content > 0 then
-                            addFile("OEBPS/Text/resources/" .. fname, file_content)
-                        else
-                            logger.warn("Empty or unreadable resource file:", file_path)
+                    if fname ~= "legado.css" and not resource_paths[fname] then
+                        local file_content = readFile(file_path)
+                        addFile("OEBPS/Text/resources/" .. fname, file_content)
+                        resource_paths[fname] = true
+                        local ext = fname:match("%.([^.]+)$")
+                        if ext and image_meta.is_image_extension(ext:lower()) then
+                            table.insert(self.resource_manifest, string.format(
+                                '<item id="resource%d" href="Text/resources/%s" media-type="%s"/>',
+                                #self.resource_manifest + 1, M.escape_xml(fname), image_meta.get_mime_type(ext:lower())))
                         end
                     end
                 end
@@ -610,10 +678,12 @@ function EpubExporter:packageEpub()
         end
 
         local css_content = self.custom_css
-            or util.readFromFile(M.addCssRes(), "r")
-        if css_content then
-            addFile("OEBPS/Text/resources/legado.css", css_content)
-        end
+            or readFile(M.addCssRes(), "r")
+        addFile("OEBPS/Text/resources/legado.css", css_content)
+
+        addFile("OEBPS/content.opf", self:createOPF())
+        addFile("OEBPS/toc.ncx", self:createNCX())
+        if report then report(1, "正在完成文件") end
 
     end)
     local close_ok, closed, close_err = pcall(writer.close, writer)

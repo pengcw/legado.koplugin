@@ -25,8 +25,8 @@ local Reader = {
     _json = nil,
     _loaded_path = nil,
     _library_validation = nil,
-    MIN_EXTENSION_VERSION = "1.1.5",
-    PINNED_EXTENSION_VERSION = "1.1.5",
+    MIN_EXTENSION_VERSION = "1.1.6",
+    PINNED_EXTENSION_VERSION = "1.1.6",
 }
 
 local function is_android_platform()
@@ -497,6 +497,13 @@ local function call_and_parse(symbol, mode, ...)
             return chinese:convert(arguments)
         end
         handlers["resource.cache.config"] = function()
+            local base = require("datastorage"):getDataDir()
+            local lfs = require("libs/libkoreader-lfs")
+            local cache_mode = lfs.symlinkattributes(base .. "/cache", "mode")
+            if lfs.symlinkattributes(base, "mode") ~= "directory"
+                    or (cache_mode and cache_mode ~= "directory") then
+                return nil, {kind = "permission_denied", message = "invalid cache directory"}
+            end
             local loaded, Env = pcall(require, "Legado.Helper.Env")
             local ok, root = false, nil
             if loaded then ok, root = pcall(Env.getTempDirectory) end
@@ -504,32 +511,6 @@ local function call_and_parse(symbol, mode, ...)
                 return nil, {kind = "unavailable", message = "cache root unavailable"}
             end
             return root
-        end
-        local file_cache
-        local function file_cache_call(action,arguments,context)
-            if not file_cache then
-                file_cache = require("Legado.spore.local.providers.file_cache").new()
-            end
-            return file_cache:invoke(action,arguments,context)
-        end
-        handlers["cache.file.get"] = function(arguments,context)
-            return file_cache_call("get",arguments,context)
-        end
-        handlers["cache.file.put"] = function(arguments,context)
-            return file_cache_call("put",arguments,context)
-        end
-        handlers["cache.file.delete"] = function(arguments,context)
-            return file_cache_call("delete",arguments,context)
-        end
-        local info_map
-        for _, method in ipairs({"load", "save_now", "commit"}) do
-            local action = method
-            handlers["info_map." .. action] = function(arguments, context)
-                if not info_map then
-                    info_map = require("Legado.spore.local.providers.info_map").new()
-                end
-                return info_map[action](info_map, arguments, context)
-            end
         end
         local ok, err = Reader.set_host_services(handlers, {
             max_response_bytes = 2 * 1024 * 1024,

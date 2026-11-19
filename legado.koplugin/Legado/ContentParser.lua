@@ -178,7 +178,8 @@ end
 local function book_chapter_resources(book_cache_id, filename, res_data, overwrite)
     if not book_cache_id then return end
 
-    local catalogue = string.format("%s/resources", Env.getBookCachePath(book_cache_id))
+    local book_dir = Env.getBookCachePath(book_cache_id)
+    local catalogue = string.format("%s/resources", book_dir)
     local relpath, filepath
     if H.is_str(filename) then
         relpath = string.format("resources/%s", filename)
@@ -187,7 +188,7 @@ local function book_chapter_resources(book_cache_id, filename, res_data, overwri
 
     if res_data and (overwrite or not util.fileExists(filepath or "")) then
         FS.checkAndCreateFolder(catalogue)
-        util.writeToFile(res_data, filepath, true)
+        if not FS.writeAtomic(filepath, res_data, book_dir) then return nil end
     end
 
     return relpath, filepath, catalogue

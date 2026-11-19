@@ -215,20 +215,9 @@ local function init_book_shelf(parent)
         local dialog = BookDetailsDialog:new{
             bookinfo = bookinfo,
             has_reload_btn = true,
+            reload_btn_position = 2,
             buttons = {
                 {
-                    text = "同步至本地书库",
-                    callback = function()
-                        UIManager:nextTick(function()
-                            local epub_path, err_msg = self.parent_ref:addBkShortcut(bookinfo, true)
-                            if epub_path then
-                                MessageBox:notice("已保存到本地书库")
-                            else
-                                MessageBox:error("同步到本地书库失败：", tostring(err_msg or "未知错误"))
-                            end
-                        end)
-                    end,
-                }, {
                     text = pin_top_text,
                     callback = function()
                         Backend:manuallyPinToTop(item.cache_id, bookinfo.sortOrder)

@@ -726,10 +726,14 @@ function LibraryView:refreshBookTocWidget(bookinfo, onReturnCallBack, visible, s
     }
 
     sidebar_mode = sidebar_mode == true
+    local ChapterListing = require("Legado/ChapterListing")
+    local width, height = Device.screen:getWidth(), Device.screen:getHeight()
+    local toc_width = sidebar_mode and math.floor(width * ChapterListing.getWidthRatio()) or width
     if not (H.is_tbl(toc_obj) and H.is_tbl(toc_obj.bookinfo) and toc_obj.bookinfo.cache_id == book_cache_id)
-            or toc_obj.sidebar_mode ~= sidebar_mode then
+            or toc_obj.sidebar_mode ~= sidebar_mode
+            or toc_obj.width ~= toc_width or toc_obj.height ~= height then
         if toc_obj and UIManager:isWidgetShown(toc_obj) then UIManager:close(toc_obj) end
-        self.book_toc = require("Legado/ChapterListing"):fetchAndShow(toc_bookinfo, onReturnCallBack, function(chapter)
+        self.book_toc = ChapterListing:fetchAndShow(toc_bookinfo, onReturnCallBack, function(chapter)
             self:loadAndRenderChapter(chapter)
         end, true, visible, sidebar_mode)
     else

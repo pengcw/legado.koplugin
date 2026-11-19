@@ -1,11 +1,12 @@
 local lfs = require("libs/libkoreader-lfs")
-local util = require("util")
-local Device = require("device")
 local ffiUtil = require("ffi/util")
+local ffi = require("ffi")
+ffi.cdef[[int mkstemp(char *);]]
 
 local M = {}
 
 M.replaceAllInvalidChars = function(str)
+    local util = require("util")
     if util.replaceAllInvalidChars then
         return util.replaceAllInvalidChars(str)
     end
@@ -31,6 +32,7 @@ M.isFileOlderThan = function(filepath, seconds)
 end
 
 M.moveFile = function(from, to)
+    local Device = require("device")
     local mv_bin = Device:isAndroid() and "/system/bin/mv" or "/bin/mv"
     return ffiUtil.execute(mv_bin, from, to) == 0
 end
@@ -47,6 +49,7 @@ M.formatFileSize = function(bytes)
 end
 
 M.copyRecursive = function(from, to)
+    local Device = require("device")
     local cp_bin = Device:isAndroid() and "/system/bin/cp" or "/bin/cp"
     return ffiUtil.execute(cp_bin, "-r", from, to) == 0
 end
@@ -66,12 +69,49 @@ M.joinPath = function(path1, path2)
     return path1 .. path2
 end
 
+M.writeAtomic = function(path, data, temp_dir, sync)
+    if type(path) ~= "string" or path == "" or type(data) ~= "string" then return false end
+    local custom_temp_dir = temp_dir ~= nil
+    if temp_dir == nil then
+        temp_dir = path:match("^(.*)/[^/]+$") or "."
+        if temp_dir == "" then temp_dir = "/" end
+    end
+    if type(temp_dir) ~= "string" or temp_dir == "" then return false end
+
+    local template = custom_temp_dir and M.joinPath(temp_dir, ".legado-write-XXXXXX")
+        or path .. ".tmp-XXXXXX"
+    local name = ffi.new("char[?]", #template + 1)
+    ffi.copy(name, template, #template)
+    local ok, fd = pcall(ffi.C.mkstemp, name)
+    if not ok or fd < 0 then return false end
+    local temporary = ffi.string(name)
+    if ffi.C.close(fd) ~= 0 then
+        os.remove(temporary)
+        return false
+    end
+
+    local file = io.open(temporary, "wb")
+    if not file then
+        os.remove(temporary)
+        return false
+    end
+    local written, synced = pcall(function()
+        return file:write(data) ~= nil and (sync == false or ffiUtil.fsyncOpenedFile(file) == true)
+    end)
+    local closed = file:close() == true
+    if written and synced and closed and os.rename(temporary, path) then return true end
+    os.remove(temporary)
+    return false
+end
+
 M.getSafeFilename = function(str, path, limit, limit_ext)
+    local util = require("util")
     local safe_name = util.getSafeFilename(str, path, limit, limit_ext)
     return safe_name:gsub("[\r\n]", " "):gsub("\t", " ")
 end
 
 M.checkAndCreateFolder = function(d_path)
+    local util = require("util")
     if not util.directoryExists(d_path) then
         util.makePath(d_path)
         if not util.directoryExists(d_path) then
@@ -82,6 +122,7 @@ M.checkAndCreateFolder = function(d_path)
 end
 
 M.getFileSize = function(path)
+    local util = require("util")
     if not (path and util.fileExists(path)) then return 0 end
     local size = lfs.attributes(path, "size")
     if type(size) == "number" then return size end
@@ -95,6 +136,7 @@ M.getFileSize = function(path)
 end
 
 M.getDirectorySize = function(path)
+    local util = require("util")
     if not (path and util.directoryExists(path)) then return 0 end
     local total = 0
 

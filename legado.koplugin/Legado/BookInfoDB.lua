@@ -1081,19 +1081,22 @@ ON CONFLICT(bookCacheId, chapterIndex) DO UPDATE SET
     return true, #batch_data
 end
 
-function M:getAllChapters(bookCacheId, readable_only)
+function M:getAllChapters(bookCacheId, readable_only, bookShelfId)
     if not H.is_str(bookCacheId) then
         return {}
     end
     local filter = (readable_only == true) and " AND (c.isVolume IS NULL OR c.isVolume = 0) " or ""
+    local scope = bookShelfId and "b.bookShelfId = ?" or "b.isEnabled = 1"
+    local params = {bookCacheId}
+    if bookShelfId then params[2] = bookShelfId end
     local sql_stmt = string.format([[
-    SELECT %s 
+    SELECT %s
     FROM chapters AS c INNER JOIN books AS b ON c.bookCacheId = b.bookCacheId
-    WHERE b.isEnabled = 1 AND c.bookCacheId = ? %s
+    WHERE c.bookCacheId = ? AND %s %s
     ORDER BY c.chapterIndex ASC;
-    ]], COLS_CHAPTER_FULL, filter)
+    ]], COLS_CHAPTER_FULL, scope, filter)
 
-    local result = self:execute(sql_stmt, bookCacheId)
+    local result = self:execute(sql_stmt, params)
     local chapters = {}
     if result then
         for i = 1, #result do

@@ -25,6 +25,8 @@ function Task:new(job, opts)
     obj.id = opts.id or new_task_id()
     obj.job = job
     obj.engine = opts.engine or "copas"
+    obj.result_codec = opts.result_codec or "json"
+    assert(obj.result_codec == "json" or obj.result_codec == "buffer", "invalid result_codec")
     obj.channel = opts.channel or "default"
     obj.priority = opts.priority or 0
     obj.timeout = opts.timeout or nil
@@ -57,7 +59,10 @@ end
 function Task:on(event, callback)
     if not event or type(callback) ~= "function" then return self end
     if event == "done" and self:is_done() then
-        pcall(callback, self.state == Task.STATE.COMPLETED, self.result or self.error, self.state, self)
+        local completed = self.state == Task.STATE.COMPLETED
+        local value = self.error
+        if completed then value = self.result end
+        pcall(callback, completed, value, self.state, self)
         return self
     end
     self.listeners[event] = self.listeners[event] or {}

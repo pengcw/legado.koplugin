@@ -8,6 +8,7 @@ local Task = TaskModule.Task
 local create_task_context = TaskModule.create_task_context
 
 local Engines = {}
+local BUFFER_RESULT_PREFIX = "\0legado-result-buffer\1"
 
 local copas_pump_running = false
 
@@ -151,6 +152,8 @@ function ProcessEngine.start(task)
     task:transition(Task.STATE.RUNNING)
 
     local return_result = nil
+    local buffer_result_received = false
+    local result_decode_error
     local handle
     local pending_rate_grants = {}
 
@@ -176,7 +179,16 @@ function ProcessEngine.start(task)
 
     local stream_opts = {
         timeout = task.timeout,
-        on_decode = function(_, decoded_ok, decoded)
+        on_decode = function(raw, decoded_ok, decoded)
+            if task.result_codec == "buffer" and raw:sub(1, #BUFFER_RESULT_PREFIX) == BUFFER_RESULT_PREFIX then
+                local ok, frame = pcall(require("string.buffer").decode, raw:sub(#BUFFER_RESULT_PREFIX + 1))
+                if not ok or type(frame) ~= "table" or frame.type ~= "__return__" then
+                    result_decode_error = "buffer_result_decode_error"
+                    return nil
+                end
+                buffer_result_received = true
+                return frame
+            end
             return decoded_ok and decoded or nil
         end,
         on_chunk = function(frame)
@@ -201,7 +213,9 @@ function ProcessEngine.start(task)
         on_finish = function(ok, err)
             RateGate:cancel_task(task.id)
             if task:is_done() then return end
-            if ok then
+            if ok and task.result_codec == "buffer" and (result_decode_error or not buffer_result_received) then
+                task:fail(result_decode_error or "buffer_result_missing")
+            elseif ok then
                 task:transition(Task.STATE.COMPLETED, return_result)
             else
                 if err == "timeout" then
@@ -280,7 +294,11 @@ function ProcessEngine.start(task)
 
         if job_error then error(job_error) end
 
-        if return_value ~= nil then
+        if task.result_codec == "buffer" then
+            local data = require("string.buffer").encode({ type = "__return__", data = return_value })
+            local sent, err = stream:write(BUFFER_RESULT_PREFIX .. data)
+            assert(sent, err or "buffer result write failed")
+        elseif return_value ~= nil then
             stream:write(JSON.encode({ type = "__return__", data = return_value }))
         end
     end, stream_opts)
